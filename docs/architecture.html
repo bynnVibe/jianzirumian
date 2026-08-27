@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>见字如面系统架构图 · 手账版</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  :root {
+    --hand: "Hannotate SC", "HanziPen SC", "Kaiti SC", "STKaiti", "KaiTi", "DFKai-SB", cursive;
+    --ink: #46392b;
+    --paper: #fffcf4;
+  }
+  body {
+    background: #f4eddc;
+    background-image: radial-gradient(#d9cfb6 1px, transparent 1.3px);
+    background-size: 22px 22px;
+    font-family: var(--hand);
+    color: var(--ink);
+    padding: 34px 0 52px;
+  }
+  .sheet {
+    position: relative;
+    width: 1400px; margin: 0 auto;
+    background: var(--paper);
+    border: 2px solid #d8cfba;
+    border-radius: 8px 14px 10px 16px / 14px 8px 16px 10px;
+    box-shadow: 4px 6px 0 rgba(120, 100, 60, .12), 0 14px 40px rgba(90, 70, 40, .14);
+    padding: 30px 0 18px;
+  }
+  .head { text-align: center; position: relative; z-index: 2; }
+  .head .row { display: flex; justify-content: center; align-items: center; gap: 18px; }
+  .head h1 {
+    font-family: var(--hand);
+    font-size: 34px; font-weight: 700; letter-spacing: 10px; color: var(--ink);
+  }
+  .head p {
+    margin-top: 8px; font-size: 14px; color: #6d5f4b; letter-spacing: .5px;
+  }
+  .head p b { color: #3f6fae; font-weight: 700; }
+  .squiggle { display: block; margin: 2px auto 0; }
+
+  .canvas { position: relative; width: 1400px; height: 1216px; margin-top: 16px; }
+
+  .band {
+    position: absolute; left: 20px; width: 1360px; height: 140px;
+    border-radius: 16px 22px 14px 26px / 24px 14px 26px 16px;
+    border: 2.5px solid;
+  }
+  .band h3 {
+    position: absolute; left: 24px; top: 10px; z-index: 2;
+    font-size: 19px; font-weight: 700; letter-spacing: 2px;
+  }
+  .b1 { background: #e3edf7; border-color: #4a7fb5; transform: rotate(-.15deg); }
+  .b1 h3 { color: #35618f; text-shadow: 0 0 4px #e3edf7, 0 0 7px #e3edf7, 0 0 9px #e3edf7; }
+  .b2 { background: #e4f2e7; border-color: #5d9c72; transform: rotate(.12deg); }
+  .b2 h3 { color: #40714f; text-shadow: 0 0 4px #e4f2e7, 0 0 7px #e4f2e7, 0 0 9px #e4f2e7; }
+  .b3 { background: #fbeed7; border-color: #d9903f; transform: rotate(-.12deg); }
+  .b3 h3 { color: #9c6420; text-shadow: 0 0 4px #fbeed7, 0 0 7px #fbeed7, 0 0 9px #fbeed7; }
+  .b4 { background: #efe7f6; border-color: #9a7bb8; transform: rotate(.15deg); }
+  .b4 h3 { color: #6d4f8c; text-shadow: 0 0 4px #efe7f6, 0 0 7px #efe7f6, 0 0 9px #efe7f6; }
+  .b5 { background: #e0f0f1; border-color: #4fa3ab; transform: rotate(-.12deg); }
+  .b5 h3 { color: #33777e; text-shadow: 0 0 4px #e0f0f1, 0 0 7px #e0f0f1, 0 0 9px #e0f0f1; }
+  .b6 { background: #efece4; border-color: #8a8578; transform: rotate(.12deg); }
+  .b6 h3 { color: #5c574b; text-shadow: 0 0 4px #efece4, 0 0 7px #efece4, 0 0 9px #efece4; }
+
+  .node {
+    position: absolute; height: 76px; z-index: 2;
+    background: #fffdf6; border: 2px solid;
+    border-radius: 10px 16px 9px 18px / 16px 9px 18px 10px;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px;
+    box-shadow: 2px 3px 0 rgba(120, 100, 60, .14);
+  }
+  .node b { font-size: 15px; font-weight: 700; color: var(--ink); letter-spacing: .5px; }
+  .node span {
+    font-size: 12px; color: #7a6f5c; line-height: 1.35;
+    padding: 0 8px; text-align: center;
+  }
+  .n1 { border-color: #4a7fb5; } .n2 { border-color: #5d9c72; }
+  .n3 { border-color: #d9903f; } .n4 { border-color: #9a7bb8; }
+  .n5 { border-color: #4fa3ab; } .n6 { border-color: #8a8578; }
+  .tilt-l { transform: rotate(-.35deg); } .tilt-r { transform: rotate(.3deg); }
+
+  .tape {
+    position: absolute; width: 96px; height: 26px; z-index: 3;
+    opacity: .5; border-left: 2px dashed rgba(255,255,255,.8);
+    border-right: 2px dashed rgba(255,255,255,.8);
+  }
+
+  .note {
+    position: absolute; z-index: 2; font-size: 13px; color: #7a6f5c; letter-spacing: .3px;
+    text-shadow: 0 0 3px var(--paper), 0 0 5px var(--paper), 0 0 8px var(--paper);
+  }
+  .note::before { content: "✎ "; color: #b08968; }
+  svg.wires { position: absolute; left: 0; top: 0; z-index: 1; pointer-events: none; }
+
+  .legend {
+    position: absolute; left: 0; top: 1180px; width: 1400px; z-index: 2;
+    display: flex; justify-content: center; gap: 46px; align-items: center;
+    font-size: 13px; color: #6d5f4b;
+  }
+  .legend i {
+    display: inline-block; width: 48px; height: 0; vertical-align: middle;
+    margin-right: 8px; border-top: 2.5px solid #3f6fae; border-radius: 40%;
+  }
+  .legend .g i { border-top: 2.5px dashed #4c9469; }
+  .legend .s i { border-top: 2.5px solid #8a8578; }
+
+  .stain { position: absolute; right: 46px; bottom: 34px; opacity: .13; pointer-events: none; }
+</style>
+</head>
+<body>
+<div class="sheet">
+  <div class="head">
+    <div class="row">
+      <svg width="26" height="26" viewBox="0 0 26 26"><g stroke="#d9903f" stroke-width="2" stroke-linecap="round" fill="none"><path d="M13 3v20M4 8l18 10M22 8L4 18"/></g></svg>
+      <h1>见字如面系统架构图</h1>
+      <svg width="26" height="26" viewBox="0 0 26 26"><g stroke="#5d9c72" stroke-width="2" stroke-linecap="round" fill="none"><path d="M13 3v20M4 8l18 10M22 8L4 18"/></g></svg>
+    </div>
+    <svg class="squiggle" width="420" height="14" viewBox="0 0 420 14">
+      <path d="M6 8 C 40 2, 70 12, 105 7 S 175 3, 210 8 S 280 12, 315 6 S 385 4, 414 8"
+            fill="none" stroke="#d9903f" stroke-width="2.5" stroke-linecap="round"/>
+    </svg>
+    <p>前端提交任务 <b>-&gt;</b> FastAPI 路由鉴权 <b>-&gt;</b> chat_stream 编排（工具调用 / 意图改写） <b>-&gt;</b> BM25 + FAISS + RRF 混合检索 + Rerank <b>-&gt;</b> LLM 流式生成 <b>-&gt;</b> SSE 实时回传 <b>-&gt;</b> markdown-it 渲染交付</p>
+  </div>
+
+  <div class="canvas">
+
+    <!-- ============ 层带 ============ -->
+    <div class="band b1" style="top:90px;"><h3>用户交互层</h3></div>
+    <div class="band b2" style="top:276px;"><h3>API 与实时通信层</h3></div>
+    <div class="band b3" style="top:462px;"><h3>业务编排层</h3></div>
+    <div class="band b4" style="top:648px;"><h3>智能能力与工具层</h3></div>
+    <div class="band b5" style="top:834px;"><h3>模型服务层</h3></div>
+    <div class="band b6" style="top:1020px;"><h3>数据与存储层</h3></div>
+
+    <!-- 和纸胶带 -->
+    <div class="tape" style="left:64px;   top:78px;   background:#f0a0ae; transform:rotate(-5deg);"></div>
+    <div class="tape" style="left:1246px; top:264px;  background:#8cb4dc; transform:rotate(4deg);"></div>
+    <div class="tape" style="left:70px;   top:450px;  background:#f0d282; transform:rotate(-4deg);"></div>
+    <div class="tape" style="left:1240px; top:636px;  background:#b39ddb; transform:rotate(5deg);"></div>
+    <div class="tape" style="left:66px;   top:822px;  background:#80cbc4; transform:rotate(-5deg);"></div>
+    <div class="tape" style="left:1244px; top:1008px; background:#c5bba8; transform:rotate(4deg);"></div>
+
+    <!-- ============ 用户交互层 ============ -->
+    <div class="node n1 tilt-l" style="left:130px; top:140px; width:340px;">
+      <b>Vue 3 + Vite 前端</b>
+      <span>ChatView 对话 · markdown-it 渲染 · ConfigView 配置</span>
+    </div>
+    <div class="node n1 tilt-r" style="left:480px; top:140px; width:340px;">
+      <b>HTTP 命令通道</b>
+      <span>fetch + Bearer Token 上传 / 配置 / 管理</span>
+    </div>
+    <div class="node n1 tilt-l" style="left:830px; top:140px; width:340px;">
+      <b>SSE 实时通道</b>
+      <span>getReader 流式消费 status / token / done</span>
+    </div>
+
+    <!-- ============ API 与实时通信层 ============ -->
+    <div class="node n2 tilt-r" style="left:100px; top:326px; width:300px;">
+      <b>认证与权限</b>
+      <span>Token 滑动续期 · 角色 · 游客限流</span>
+    </div>
+    <div class="node n2 tilt-l" style="left:470px; top:326px; width:300px;">
+      <b>FastAPI main.py</b>
+      <span>CORS · 日志中间件 · lifespan · 健康检查</span>
+    </div>
+    <div class="node n2 tilt-r" style="left:850px; top:326px; width:300px;">
+      <b>业务路由 api/</b>
+      <span>chat · knowledge · config · auth · bookmark</span>
+    </div>
+
+    <!-- ============ 业务编排层 ============ -->
+    <div class="node n3 tilt-l" style="left:20px; top:512px; width:300px;">
+      <b>chat.py chat_stream</b>
+      <span>问答主链：会话→上下文→检索→流式生成</span>
+    </div>
+    <div class="node n3 tilt-r" style="left:330px; top:512px; width:300px;">
+      <b>tool_orchestrator.py</b>
+      <span>附件意图路由 upload/summarize/ocr · tool_calls 落库</span>
+    </div>
+    <div class="node n3 tilt-l" style="left:640px; top:512px; width:300px;">
+      <b>knowledge.py 解析管线</b>
+      <span>图片 OCR · Word/PDF · 表格→Markdown · LibreOffice 排版</span>
+    </div>
+    <div class="node n3 tilt-r" style="left:950px; top:512px; width:300px;">
+      <b>kb.py 知识库路由</b>
+      <span>多知识库 public/private 可见性隔离</span>
+    </div>
+
+    <!-- ============ 智能能力与工具层 ============ -->
+    <div class="node n4 tilt-r" style="left:20px; top:698px; width:256px;">
+      <b>聊天工具 tools/</b>
+      <span>image_ocr · image_upload · document_import · knowledge_summarize</span>
+    </div>
+    <div class="node n4 tilt-l" style="left:296px; top:698px; width:256px;">
+      <b>混合检索</b>
+      <span>FAISS 稠密 + BM25 稀疏 + RRF 融合</span>
+    </div>
+    <div class="node n4 tilt-r" style="left:572px; top:698px; width:256px;">
+      <b>reranker.py 重排</b>
+      <span>本地 CrossEncoder / DashScope 双提供商</span>
+    </div>
+    <div class="node n4 tilt-l" style="left:848px; top:698px; width:256px;">
+      <b>intent_rewriter.py</b>
+      <span>LLM 检索查询改写（超时保护）</span>
+    </div>
+    <div class="node n4 tilt-r" style="left:1124px; top:698px; width:256px;">
+      <b>web_search.py 联网搜索</b>
+      <span>多引擎结果注入上下文</span>
+    </div>
+
+    <!-- ============ 模型服务层 ============ -->
+    <div class="node n5 tilt-l" style="left:22px; top:884px; width:213px;">
+      <b>Ollama 本地</b>
+      <span>LLM + Embedding 本地推理</span>
+    </div>
+    <div class="node n5 tilt-r" style="left:250px; top:884px; width:213px;">
+      <b>OpenAI 兼容 / OpenRouter</b>
+      <span>DeepSeek · 通义千问 LLM 与 Embedding</span>
+    </div>
+    <div class="node n5 tilt-l" style="left:480px; top:884px; width:213px;">
+      <b>DashScope Rerank</b>
+      <span>qwen3-rerank 相关度打分</span>
+    </div>
+    <div class="node n5 tilt-r" style="left:709px; top:884px; width:213px;">
+      <b>阿里云百炼 OCR</b>
+      <span>多模态模型图像识别</span>
+    </div>
+    <div class="node n5 tilt-l" style="left:938px; top:884px; width:213px;">
+      <b>本地 OCR 引擎簇</b>
+      <span>PaddleOCR · EasyOCR · Tesseract 回退</span>
+    </div>
+    <div class="node n5 tilt-r" style="left:1166px; top:884px; width:213px;">
+      <b>搜索引擎</b>
+      <span>Bing · SerpAPI · AnySearch · DuckDuckGo</span>
+    </div>
+
+    <!-- ============ 数据与存储层 ============ -->
+    <div class="node n6 tilt-r" style="left:20px; top:1070px; width:256px;">
+      <b>SQLite app.db</b>
+      <span>users·sessions·messages·feedback·tool_calls·usage</span>
+    </div>
+    <div class="node n6 tilt-l" style="left:296px; top:1070px; width:256px;">
+      <b>FAISS 向量索引</b>
+      <span>faiss_index + metadata.json</span>
+    </div>
+    <div class="node n6 tilt-r" style="left:572px; top:1070px; width:256px;">
+      <b>BM25 稀疏索引</b>
+      <span>sparse_retriever 关键词召回</span>
+    </div>
+    <div class="node n6 tilt-l" style="left:848px; top:1070px; width:256px;">
+      <b>uploads 文件存储</b>
+      <span>知识库原件 + chat_attachments</span>
+    </div>
+    <div class="node n6 tilt-r" style="left:1124px; top:1070px; width:256px;">
+      <b>runtime_config.json</b>
+      <span>五类提供商在线配置 + 检索参数</span>
+    </div>
+
+    <!-- ============ 层间手写注释 ============ -->
+    <div class="note" style="left:760px; top:246px;">HTTP 发命令（Bearer Token）· SSE 流式回传 status / token / done 事件</div>
+    <div class="note" style="left:40px; top:434px;">AuthMiddleware 统一登录态校验：游客白名单 + IP 限流 · server 只做轻量编排，长耗时 OCR / 向量化走 asyncio.to_thread 线程池</div>
+    <div class="note" style="left:40px; top:620px;">知识检索与联网搜索 asyncio 并行、知识库优先 · 附件意图路由 upload / summarize / ocr，游客仅识别不入库</div>
+    <div class="note" style="left:40px; top:806px;">LLM / OCR / 搜索 / Embedding / Rerank 五类提供商均可在 ConfigView 在线配置，runtime_config.json 优先于 .env 默认值</div>
+    <div class="note" style="left:40px; top:992px;">services/* 业务持久化统一经 core/db.py 写入 SQLite · vector_store 管理 FAISS 索引与 metadata.json · BM25 稀疏索引关键词召回</div>
+
+    <!-- ============ 手绘连线 ============ -->
+    <svg class="wires" width="1400" height="1216" viewBox="0 0 1400 1216">
+      <defs>
+        <marker id="mB" markerWidth="10" markerHeight="9" refX="7.5" refY="4.5" orient="auto">
+          <path d="M1,1 L8.5,4.5 L1,8" fill="none" stroke="#3f6fae" stroke-width="2" stroke-linecap="round"></path>
+        </marker>
+        <marker id="mG" markerWidth="10" markerHeight="9" refX="7.5" refY="4.5" orient="auto">
+          <path d="M1,1 L8.5,4.5 L1,8" fill="none" stroke="#4c9469" stroke-width="2" stroke-linecap="round"></path>
+        </marker>
+        <marker id="mS" markerWidth="9" markerHeight="8" refX="6.5" refY="4" orient="auto">
+          <path d="M1,1 L7.5,4 L1,7" fill="none" stroke="#8a8578" stroke-width="1.8" stroke-linecap="round"></path>
+        </marker>
+      </defs>
+
+      <!-- 主链路：蓝色手绘实线 -->
+      <g fill="none" stroke="#3f6fae" stroke-width="2.4" stroke-linecap="round" marker-end="url(#mB)">
+        <path d="M650,216 C654,262 616,272 620,320"></path>
+        <path d="M1000,402 C1006,452 164,446 170,506"></path>
+        <path d="M1000,402 C996,452 794,450 790,506"></path>
+        <path d="M170,588 C166,636 152,644 148,692"></path>
+        <path d="M170,588 C174,640 420,638 424,692"></path>
+        <path d="M170,588 C166,648 980,640 976,692"></path>
+        <path d="M170,588 C176,652 1246,644 1252,692"></path>
+        <path d="M530,588 C534,642 156,646 160,692"></path>
+        <path d="M790,588 C786,642 440,646 436,692"></path>
+        <path d="M148,774 C144,826 819,822 815,878"></path>
+        <path d="M148,774 C152,830 1040,824 1044,878"></path>
+        <path d="M424,774 C420,826 124,824 120,878"></path>
+        <path d="M424,774 C428,828 353,826 357,878"></path>
+        <path d="M700,774 C696,826 590,824 586,878"></path>
+        <path d="M976,774 C980,830 132,826 136,878"></path>
+        <path d="M1252,774 C1248,826 1277,824 1273,878"></path>
+        <path d="M20,550 C14,550 10,548 10,556 L10,1102 C10,1110 12,1108 15,1108"></path>
+        <path d="M128,960 C124,1010 428,1008 424,1064"></path>
+      </g>
+
+      <!-- 层内调用：灰 -->
+      <g fill="none" stroke="#8a8578" stroke-width="2" stroke-linecap="round" marker-end="url(#mS)">
+        <path d="M770,364 C794,361 818,367 842,364"></path>
+      </g>
+
+      <!-- SSE 实时回传：绿色手绘虚线 -->
+      <g fill="none" stroke="#4c9469" stroke-width="2.4" stroke-linecap="round" stroke-dasharray="8 6" marker-end="url(#mG)">
+        <path d="M1150,364 C1210,360 1268,368 1325,364 L1325,178 C1325,178 1240,182 1178,178"></path>
+      </g>
+      <text x="1341" y="272" font-size="13" fill="#4c9469" transform="rotate(90 1341 272)" text-anchor="middle" font-family="Hannotate SC, HanziPen SC, Kaiti SC, KaiTi, cursive">SSE 实时回传</text>
+    </svg>
+
+    <!-- ============ 图例 ============ -->
+    <div class="legend">
+      <span><i></i>命令 / 数据流（主链路）</span>
+      <span class="g"><i></i>SSE 流式实时回传</span>
+      <span class="s"><i></i>层内调用</span>
+    </div>
+  </div>
+
+  <!-- 咖啡渍小装饰 -->
+  <svg class="stain" width="120" height="120" viewBox="0 0 120 120">
+    <g fill="none" stroke="#8a5a2b" stroke-linecap="round">
+      <circle cx="60" cy="60" r="46" stroke-width="5" stroke-dasharray="200 40 60 30"/>
+      <circle cx="60" cy="60" r="38" stroke-width="2" stroke-dasharray="150 60 40 20"/>
+      <path d="M18 78 C 14 70, 16 62, 14 55" stroke-width="3"/>
+    </g>
+  </svg>
+</div>
+</body>
+</html>

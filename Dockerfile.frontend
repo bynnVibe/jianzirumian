@@ -1,0 +1,38 @@
+# ============================================
+# 见字如养 - 前端 Dockerfile
+# ============================================
+# 基础镜像源：国内访问 Docker Hub 常不可达，默认走 DaoCloud 公共代理（不经过 docker.io）；
+# 如该源失效，构建时可通过 --build-arg REGISTRY=docker.io/library/ 等覆盖
+ARG REGISTRY=docker.m.daocloud.io/library/
+# --- 构建阶段 ---
+FROM ${REGISTRY}node:22-alpine AS builder
+
+WORKDIR /build
+
+# 仅复制依赖声明，利用 Docker 缓存
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+
+# 复制前端源码并构建
+COPY frontend/ ./
+RUN npm run build
+
+
+# --- 运行阶段 ---
+# 钉在 stable 版：nginx 1.31.3+ 在老内核宿主机（如 CentOS 7 的 3.10）上
+# 会因 pwrite() /run/nginx.pid EPERM 反复崩溃，见 nginx/docker-nginx#1059
+FROM ${REGISTRY}nginx:1.28-alpine
+
+# 安装 envsubst（gettext 包提供）
+RUN apk add --no-cache gettext
+
+# 复制构建产物
+COPY --from=builder /build/dist /usr/share/nginx/html
+
+# 复制 Nginx 配置模板（启动时通过 envsubst 替换 ${BACKEND_HOST}）
+COPY nginx.conf /etc/nginx/conf.d/default.conf.template
+
+EXPOSE 80
+
+# 启动时先替换 BACKEND_HOST 变量（默认 backend），再启动 nginx
+CMD ["/bin/sh", "-c", "BACKEND_HOST=${BACKEND_HOST:-backend} envsubst '${BACKEND_HOST}' < /etc/nginx/conf.d/default.conf.template > /etc/nginx/conf.d/default.conf && nginx -g 'daemon off;'"]

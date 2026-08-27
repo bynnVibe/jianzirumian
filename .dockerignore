@@ -1,0 +1,37 @@
+# ============================================
+# 见字如养 - Docker 构建忽略
+# ============================================
+
+# Python
+backend/.venv/
+backend/__pycache__/
+backend/*.pyc
+backend/app/__pycache__/
+backend/app/**/__pycache__/
+
+# Node
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Runtime data（由 volume 管理）
+data/
+backend/log/
+
+# Env
+backend/.env
+backend/.skills/anysearch/.env
+
+# Git
+.git/
+.gitignore

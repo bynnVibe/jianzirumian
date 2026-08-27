@@ -1,0 +1,83 @@
+# ============================================
+# 见字如面 - Docker Compose
+# ============================================
+# 使用方式：
+#   docker compose up -d
+#
+# 访问 http://localhost:5173 即可使用
+# 如需自定义配置，复制 .env.example 为 .env 并修改后重启
+# ============================================
+
+services:
+  redis:
+    image: docker.m.daocloud.io/library/redis:7-alpine
+    container_name: jianziruyang-redis
+    # 纯缓存用途：不开持久化；限制内存 512MB，满后 LRU 淘汰带 TTL 的缓存键
+    command: ["redis-server", "--maxmemory", "512mb", "--maxmemory-policy", "allkeys-lru", "--save", ""]
+    restart: unless-stopped
+    networks:
+      - jianziruyang-net
+
+  backend:
+    # 镜像名与 scripts/deploy-aliyun.sh 一致；服务器上 docker load 后直接复用，无需重新构建
+    image: jianzirumian-backend:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: jianziruyang-backend
+    ports:
+      - "8000:8000"
+    volumes:
+      # 持久化数据（向量库 + 上传图片）
+      - ./data:/app/data
+      # 持久化 SQLite 数据库（用户/会话/用量等业务数据）
+      - ./data/db:/app/backend/data
+      # 后端日志（按日期文件）挂载到宿主机 logs/backend
+      - ./logs/backend:/app/backend/log
+      # 挂载 .env 配置（如有）
+      - ./backend/.env:/app/backend/.env:ro
+    env_file:
+      - path: ./backend/.env
+        required: false
+    environment:
+      # 默认使用 Ollama（容器外），如需云端 API 请在 .env 中修改
+      - LLM_PROVIDER=${LLM_PROVIDER:-ollama}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      - EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER:-ollama}
+      - EMBEDDING_API_BASE=${EMBEDDING_API_BASE:-http://host.docker.internal:11434}
+      # CORS 跨域来源（逗号分隔），通过 .env 配置
+      - CORS_ORIGINS=${CORS_ORIGINS:-}
+      # Redis 文件缓存（compose 网络内服务名即 redis）
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+    extra_hosts:
+      # 让容器能访问宿主机的 localhost（如 Ollama）
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - redis
+    restart: unless-stopped
+    networks:
+      - jianziruyang-net
+
+  frontend:
+    image: jianzirumian-frontend:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    container_name: jianziruyang-frontend
+    ports:
+      - "5173:80"
+    volumes:
+      # Nginx 访问/错误日志挂载到宿主机 logs/frontend
+      - ./logs/frontend:/var/log/nginx
+    depends_on:
+      - backend
+    environment:
+      # docker-compose 网络中后端服务名就是 backend
+      - BACKEND_HOST=backend
+    restart: unless-stopped
+    networks:
+      - jianziruyang-net
+
+networks:
+  jianziruyang-net:
+    driver: bridge

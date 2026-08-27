@@ -1,0 +1,54 @@
+# ============================================
+# 见字如养 - 后端 Dockerfile
+# ============================================
+# 基础镜像源：国内访问 Docker Hub 常不可达，默认走 DaoCloud 公共代理（不经过 docker.io）；
+# 如该源失效，构建时可通过 --build-arg REGISTRY=docker.io/library/ 等覆盖
+ARG REGISTRY=docker.m.daocloud.io/library/
+FROM ${REGISTRY}python:3.11-slim AS builder
+
+WORKDIR /build
+
+# 仅复制依赖文件，利用 Docker 缓存
+COPY backend/requirements.txt .
+# PyPI 源：国内网络默认走阿里云镜像（官方 PyPI 经常只有几十 KB/s 导致构建超时），
+# 如需切回官方源：--build-arg PIP_INDEX_URL=https://pypi.org/simple
+ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
+# 升级 pip（新版解析器更快、重试更稳）；
+# 先安装 CPU 版 torch（sentence-transformers 依赖），
+# 避免默认拉取 CUDA 版本导致镜像膨胀 5GB+；torch 必须走官方 cpu 索引，
+# 阿里云镜像中的 torch 是 CUDA 版且不含 +cpu 构建；
+# 第三步需通过 PYTHONPATH 让 pip 识别 /install 中已装的 torch，防止重复拉取
+RUN pip install --no-cache-dir --upgrade pip -i ${PIP_INDEX_URL} \
+    && pip install --no-cache-dir --prefix=/install torch --index-url https://download.pytorch.org/whl/cpu \
+    && PYTHONPATH=/install/lib/python3.11/site-packages pip install --no-cache-dir --prefix=/install -r requirements.txt -i ${PIP_INDEX_URL}
+
+
+# --- 运行阶段 ---
+FROM ${REGISTRY}python:3.11-slim
+
+WORKDIR /app
+
+# 从 builder 阶段复制已安装的 Python 包
+COPY --from=builder /install /usr/local
+
+# 安装 LibreOffice Writer（无头）+ 中文字体：
+# 用于将 Word 原始文档转换为 PDF，供「原始文档分页预览 / 页码跳转」；
+# 未安装时后端自动降级为 mammoth 渲染预览
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libreoffice-writer-nogui fonts-noto-cjk \
+    && rm -rf /var/lib/apt/lists/*
+
+# 创建必要目录
+RUN mkdir -p /app/backend /app/data/uploads /app/data/vector_store /app/data/knowledge
+
+# 复制后端代码
+COPY backend/ ./backend/
+
+# 工作目录设为 backend，与项目代码中的 BASE_DIR 计算逻辑一致
+WORKDIR /app/backend
+
+# 暴露端口
+EXPOSE 8000
+
+# 默认启动命令
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
