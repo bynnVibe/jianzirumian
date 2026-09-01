@@ -1021,7 +1021,7 @@
           <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
         </svg>
         <p class="empty-title">知识库为空</p>
-        <p class="empty-desc">尚未上传任何手写笔记图片，请先到「上传笔记」页面添加内容</p>
+        <p class="empty-desc">尚未上传任何内容，请先到「知识库上传」页面上传图片 / Word / PDF</p>
         <router-link to="/upload" class="btn btn-primary">前往上传</router-link>
       </div>
 

@@ -1,59 +1,44 @@
 <template>
   <div class="upload-view">
-    <!-- 头部 -->
+    <!-- 头部 + 模块切换 -->
     <div class="page-header">
-      <h1 class="page-title">上传笔记</h1>
-      <p class="page-desc">支持 OCR 图片识别、Word 文档、PDF 文档导入，自动提取文字并存入知识库</p>
+      <div class="page-title-row">
+        <h1 class="page-title">知识库上传</h1>
+        <div class="module-tabs">
+          <button
+            class="module-tab"
+            :class="{ active: activeTab === 'upload' }"
+            @click="activeTab = 'upload'"
+          >
+            文件上传
+          </button>
+          <button
+            class="module-tab"
+            :class="{ active: activeTab === 'ingest' }"
+            @click="switchToIngest()"
+          >
+            知识入库
+            <span v-if="doneCount" class="tab-badge">{{ doneCount }}</span>
+          </button>
+        </div>
+      </div>
+      <p class="page-desc">图片 / Word / PDF 上传后后台多线程自动解析；在「知识入库」检查解析结果无误后，一键入库知识库与 llm-wiki 百科</p>
     </div>
 
-    <!-- 上传模块切换 -->
-    <div class="mode-tabs">
-      <button
-        class="mode-tab"
-        :class="{ active: uploadMode === 'ocr' }"
-        @click="uploadMode = 'ocr'"
-      >
-        OCR 图片识别
-      </button>
-      <button
-        class="mode-tab"
-        :class="{ active: uploadMode === 'word' }"
-        @click="uploadMode = 'word'"
-      >
-        Word 导入
-      </button>
-      <button
-        class="mode-tab"
-        :class="{ active: uploadMode === 'pdf' }"
-        @click="uploadMode = 'pdf'"
-      >
-        PDF 导入
-      </button>
-    </div>
+    <!-- ==================== Tab 1：文件上传 ==================== -->
+    <div v-show="activeTab === 'upload'" class="tab-panel">
+      <!-- ---------- 图片上传 ---------- -->
+      <div class="upload-section">
+        <div class="module-head">
+          <span class="module-badge img">图</span>
+          <div>
+            <div class="module-title">图片上传<span class="module-sub-inline">（手写笔记 OCR）</span></div>
+            <div class="module-sub">支持单张 / 批量上传；上传成功后后台自动 OCR 识别，点击可预览原始图片</div>
+          </div>
+        </div>
 
-    <!-- OCR 子模式切换 -->
-    <div v-if="uploadMode === 'ocr'" class="sub-mode-tabs">
-      <button
-        class="sub-mode-tab"
-        :class="{ active: ocrSubMode === 'single' }"
-        @click="ocrSubMode = 'single'"
-      >
-        单张识别
-      </button>
-      <button
-        class="sub-mode-tab"
-        :class="{ active: ocrSubMode === 'batch' }"
-        @click="ocrSubMode = 'batch'"
-      >
-        批量识别
-      </button>
-    </div>
-
-    <div class="upload-layout">
-      <!-- 左侧：上传区域 -->
-      <div class="upload-panel">
-        <!-- OCR 提供商选择 -->
-        <div v-if="uploadMode === 'ocr'" class="ocr-selector">
+        <!-- OCR 引擎 -->
+        <div class="ocr-selector">
           <label class="ocr-label">OCR 识别引擎</label>
           <div class="ocr-options">
             <button
@@ -68,620 +53,388 @@
           </div>
         </div>
 
-        <!-- 目标知识库 -->
-        <div class="ocr-selector visibility-selector">
-          <label class="ocr-label">目标知识库</label>
-          <div class="kb-selector-row">
-            <select v-model="kbVisibilityFilter" class="kb-select kb-filter" @change="onKbFilterChange">
-              <option value="public">公共知识库</option>
-              <option value="private">个人知识库</option>
-            </select>
-            <select v-model="selectedKbId" class="kb-select" @change="onKbChange">
-              <option v-for="kb in filteredKbList" :key="kb.id" :value="kb.id">
-                {{ kb.name }}（{{ kb.entry_count }} 条）
-              </option>
-            </select>
-            <button class="btn-new-kb" @click="openCreateKbModal">+ 新建知识库</button>
+        <!-- 单张 / 批量 子模式 -->
+        <div class="submode-row">
+          <button class="submode-btn" :class="{ active: ocrSubMode === 'single' }" @click="ocrSubMode = 'single'">单张上传</button>
+          <button class="submode-btn" :class="{ active: ocrSubMode === 'batch' }" @click="ocrSubMode = 'batch'">批量上传</button>
+        </div>
+
+        <!-- 单张上传 -->
+        <div
+          v-if="ocrSubMode === 'single'"
+          class="upload-zone"
+          :class="{ 'drag-over': imgDragOver }"
+          @dragover.prevent="imgDragOver = true"
+          @dragleave="imgDragOver = false"
+          @drop.prevent="handleImageDrop"
+          @click="triggerFileInput"
+        >
+          <input ref="fileInputRef" type="file" accept="image/*" class="file-input-hidden" @change="handleImageSelect" />
+          <input ref="cameraInputRef" type="file" accept="image/*" capture="environment" class="file-input-hidden" @change="handleImageSelect" />
+          <div class="upload-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="38" height="38">
+              <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+              <circle cx="8.5" cy="8.5" r="1.5"/>
+              <polyline points="21 15 16 10 5 21"/>
+            </svg>
+          </div>
+          <p class="upload-text">点击或拖拽图片到此处</p>
+          <p class="upload-hint">支持 JPG / PNG / BMP 等图片（≤5MB，超出自动压缩）</p>
+          <div class="upload-actions" @click.stop>
+            <button type="button" class="btn-upload-action" @click="triggerCameraInput">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" width="16" height="16">
+                <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
+                <circle cx="12" cy="13" r="4"/>
+              </svg>
+              拍照上传
+            </button>
+            <button type="button" class="btn-upload-action" @click="triggerFileInput">选择图片</button>
           </div>
         </div>
 
-        <!-- 保存标题（单张图片 / 文档） -->
-        <div v-if="uploadMode !== 'ocr' || ocrSubMode === 'single'" class="ocr-selector title-selector">
-          <label class="ocr-label">保存标题</label>
-          <input
-            v-model="saveTitle"
-            type="text"
-            class="title-input"
-            placeholder="留空默认使用文件名"
-          />
-        </div>
-
-        <!-- ===== 单文件 OCR 上传 ===== -->
-        <template v-if="uploadMode === 'ocr' && ocrSubMode === 'single'">
-          <!-- 拖拽上传 -->
+        <!-- 批量上传：待选列表 + 逐个/一键上传 -->
+        <template v-else>
           <div
             class="upload-zone"
-            :class="{ 'drag-over': isDragOver, 'has-file': selectedFile }"
-            @dragover.prevent="isDragOver = true"
-            @dragleave="isDragOver = false"
-            @drop.prevent="handleDrop"
-            @click="triggerFileInput"
-          >
-            <input
-              ref="fileInputRef"
-              type="file"
-              accept="image/*"
-              class="file-input-hidden"
-              @change="handleFileSelect"
-            />
-            <!-- 拍照专用 input：capture 属性在移动端直接唤起相机 -->
-            <input
-              ref="cameraInputRef"
-              type="file"
-              accept="image/*"
-              capture="environment"
-              class="file-input-hidden"
-              @change="handleFileSelect"
-            />
-
-            <template v-if="!selectedFile">
-              <div class="upload-icon">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="40" height="40">
-                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-                  <polyline points="17 8 12 3 7 8"/>
-                  <line x1="12" y1="3" x2="12" y2="15"/>
-                </svg>
-              </div>
-              <p class="upload-text">点击或拖拽图片到此处</p>
-              <p class="upload-hint">支持 JPG、PNG、BMP 格式，单张最大 5MB（超出会自动压缩）</p>
-              <!-- 移动端快捷入口：拍照直接唤起相机 -->
-              <div class="upload-actions" @click.stop>
-                <button type="button" class="btn-upload-action" @click="triggerCameraInput">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" width="16" height="16">
-                    <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
-                    <circle cx="12" cy="13" r="4"/>
-                  </svg>
-                  拍照上传
-                </button>
-                <button type="button" class="btn-upload-action" @click="triggerFileInput">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" width="16" height="16">
-                    <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
-                    <circle cx="8.5" cy="8.5" r="1.5"/>
-                    <polyline points="21 15 16 10 5 21"/>
-                  </svg>
-                  相册选择
-                </button>
-              </div>
-            </template>
-
-            <template v-else>
-              <div class="file-preview">
-                <img :src="filePreviewUrl" class="preview-image" alt="预览" />
-                <div class="file-info">
-                  <span class="file-name">{{ selectedFile.name }}</span>
-                  <span class="file-size">{{ formatSize(selectedFile.size) }}</span>
-                </div>
-              </div>
-            </template>
-          </div>
-
-          <!-- 单文件操作按钮 -->
-          <div class="action-buttons" v-if="selectedFile">
-            <button class="btn btn-secondary" @click="clearFile">
-              重新选择
-            </button>
-            <button class="btn btn-secondary" @click="openUploadPreview" title="查看最终上传给 OCR 的图片">
-              预览上传图片
-            </button>
-            <button
-              class="btn btn-primary"
-              :disabled="isProcessing"
-              @click="previewOCRHandler"
-            >
-              <div v-if="isPreviewing" class="spinner-sm"></div>
-              {{ isPreviewing ? '识别中...' : '预览识别结果' }}
-            </button>
-            <button
-              class="btn btn-success"
-              :disabled="isProcessing || !ocrText"
-              @click="processAndSave"
-            >
-              <div v-if="isSaving" class="spinner-sm"></div>
-              {{ isSaving ? '保存中...' : '保存到知识库' }}
-            </button>
-          </div>
-        </template>
-
-        <!-- ===== 批量 OCR 上传 ===== -->
-        <template v-if="uploadMode === 'ocr' && ocrSubMode === 'batch'">
-          <div
-            class="upload-zone"
-            :class="{ 'has-file': batchFiles.length > 0 }"
+            :class="{ 'drag-over': batchDragOver, 'has-file': batchFiles.length > 0 }"
+            @dragover.prevent="batchDragOver = true"
+            @dragleave="batchDragOver = false"
+            @drop.prevent="handleBatchDrop"
             @click="triggerBatchInput"
           >
-            <input
-              ref="batchInputRef"
-              type="file"
-              accept="image/*"
-              multiple
-              class="file-input-hidden"
-              @change="handleBatchSelect"
-            />
-            <!-- 批量模式拍照：capture 唤起相机，拍摄的照片追加到待识别列表 -->
-            <input
-              ref="batchCameraInputRef"
-              type="file"
-              accept="image/*"
-              capture="environment"
-              class="file-input-hidden"
-              @change="handleBatchCameraSelect"
-            />
-
+            <input ref="batchInputRef" type="file" accept="image/*" multiple class="file-input-hidden" @change="handleBatchSelect" />
+            <input ref="batchCameraInputRef" type="file" accept="image/*" capture="environment" multiple class="file-input-hidden" @change="handleBatchSelect" />
             <template v-if="batchFiles.length === 0">
               <div class="upload-icon">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="40" height="40">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="38" height="38">
                   <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
                   <polyline points="17 8 12 3 7 8"/>
                   <line x1="12" y1="3" x2="12" y2="15"/>
                 </svg>
               </div>
-              <p class="upload-text">点击选择多张图片</p>
-              <p class="upload-hint">可一次选择多张图片批量上传</p>
+              <p class="upload-text">点击或拖拽多张图片到此处</p>
+              <p class="upload-hint">可一次选择多张图片加入待上传列表，逐个上传或一键全部上传</p>
               <div class="upload-actions" @click.stop>
-                <button type="button" class="btn-upload-action" :disabled="isBatchRunning" @click="triggerBatchCamera">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" width="16" height="16">
-                    <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
-                    <circle cx="12" cy="13" r="4"/>
-                  </svg>
-                  拍照添加
-                </button>
+                <button type="button" class="btn-upload-action" @click="triggerBatchCamera">拍照追加</button>
+                <button type="button" class="btn-upload-action" @click="triggerBatchInput">选择多张图片</button>
               </div>
             </template>
-
             <template v-else>
-              <div class="batch-file-summary">
-                <span class="batch-count">已选择 {{ batchFiles.length }} 个文件</span>
-                <span class="batch-size">{{ formatSize(batchTotalSize) }}</span>
-              </div>
+              <div class="batch-summary">已选择 {{ batchFiles.length }} 张图片 · {{ formatSize(batchTotalSize) }}</div>
+              <p class="upload-hint">点击「全部上传」依次上传并后台自动解析；也可在下方列表逐张上传</p>
             </template>
           </div>
 
-          <!-- 批量文件列表 -->
-          <div v-if="batchFiles.length > 0" class="batch-file-list">
+          <div v-if="batchFiles.length > 0" class="batch-list">
             <div
               v-for="(bf, idx) in batchFiles"
-              :key="idx"
-              class="batch-file-item"
-              :class="[bf.status, { selected: selectedBatchIndex === idx }]"
-              @click="selectBatchItem(idx)"
+              :key="bf.localId"
+              class="batch-item"
+              :class="bf.status"
             >
-              <span class="bf-index">{{ idx + 1 }}</span>
-              <span class="bf-name" :title="bf.file.name">{{ bf.file.name }}</span>
-              <span class="bf-size">{{ formatSize(bf.file.size) }}</span>
-              <span class="bf-actions" @click.stop>
-                <button
-                  class="btn btn-sm btn-outline"
-                  :disabled="isBatchRunning || bf.status === 'recognizing' || bf.status === 'uploading'"
-                  @click="openBatchCrop(idx)"
-                  title="裁剪 / 旋转该图片"
-                >编辑</button>
-                <button
-                  v-if="bf.status === 'recognized'"
-                  class="btn btn-sm btn-success"
-                  :disabled="!bf.ocrText"
-                  @click="uploadBatchItem(idx)"
-                >上传</button>
-              </span>
-              <span class="bf-status">
-                <template v-if="bf.status === 'pending'">待识别</template>
-                <template v-else-if="bf.status === 'recognizing'">
-                  <span class="spinner-xs"></span> 识别中
-                </template>
-                <template v-else-if="bf.status === 'recognized'">
-                  <span class="status-icon success-icon">&#10003;</span> {{ (bf.ocrText || '').length }} 字
-                </template>
-                <template v-else-if="bf.status === 'uploading'">
-                  <span class="spinner-xs"></span> 上传中
-                </template>
-                <template v-else-if="bf.status === 'uploaded'">
-                  <span class="status-icon success-icon">&#10003;</span> 已入库
-                </template>
-                <template v-else-if="bf.status === 'error'">
-                  <span class="status-icon error-icon">&#10007;</span>
-                </template>
-              </span>
-              <span v-if="bf.status === 'error'" class="bf-error" :title="bf.error">{{ bf.error }}</span>
-            </div>
-          </div>
-
-          <p v-if="batchFiles.length > 0" class="batch-hint">识别完成后点击列表项，在右侧查看并编辑结果；之后可单条上传或一键全部上传入库</p>
-
-          <!-- 批量操作按钮 -->
-          <div class="action-buttons" v-if="batchFiles.length > 0">
-            <button class="btn btn-secondary" @click="clearBatch" :disabled="isBatchRunning">
-              重新选择
-            </button>
-            <button
-              class="btn btn-primary"
-              :disabled="isBatchRunning || isBatchCompressing || !batchHasWork"
-              @click="startBatchRecognize"
-            >
-              <div v-if="isBatchRunning" class="spinner-sm"></div>
-              {{ isBatchRunning ? `识别中 ${batchDoneCount}/${batchFiles.length}...` : '开始批量识别' }}
-            </button>
-            <button
-              class="btn btn-success"
-              :disabled="isBatchRunning || recognizedBatchCount === 0"
-              @click="uploadAllRecognized"
-            >
-              上传全部已识别 ({{ recognizedBatchCount }})
-            </button>
-          </div>
-
-          <!-- 批量进度条 -->
-          <div v-if="isBatchRunning || batchDoneCount > 0" class="batch-progress-bar">
-            <div class="progress-track">
-              <div
-                class="progress-fill"
-                :style="{ width: batchProgressPercent + '%' }"
-              ></div>
-            </div>
-            <span class="progress-text">{{ batchProgressPercent }}%</span>
-          </div>
-        </template>
-
-        <!-- ===== Word 文档导入 ===== -->
-        <template v-if="uploadMode === 'word'">
-          <div
-            class="upload-zone"
-            :class="{ 'has-file': docFile }"
-            @dragover.prevent="isDocDragOver = true"
-            @dragleave="isDocDragOver = false"
-            @drop.prevent="handleDocDrop"
-            @click="triggerDocInput"
-          >
-            <input
-              ref="docInputRef"
-              type="file"
-              accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-              class="file-input-hidden"
-              @change="handleDocSelect"
-            />
-
-            <template v-if="!docFile">
-              <div class="upload-icon">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="40" height="40">
-                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-                  <polyline points="14 2 14 8 20 8"/>
-                  <line x1="16" y1="13" x2="8" y2="13"/>
-                  <line x1="16" y1="17" x2="8" y2="17"/>
-                </svg>
-              </div>
-              <p class="upload-text">点击或拖拽 Word 文档到此处</p>
-              <p class="upload-hint">支持 .docx 格式，最大 20MB</p>
-            </template>
-
-            <template v-else>
-              <div class="file-preview">
-                <div class="doc-icon">W</div>
-                <div class="file-info">
-                  <span class="file-name">{{ docFile.name }}</span>
-                  <span class="file-size">{{ formatSize(docFile.size) }}</span>
+              <img
+                v-if="bf.thumb"
+                :src="bf.thumb"
+                class="batch-thumb"
+                title="点击图片编辑（裁剪 / 旋转）"
+                alt=""
+                @click.stop="openBatchCrop(idx)"
+              />
+              <span v-else class="fi-icon image">图</span>
+              <div class="fi-main" @click="(bf.status === 'ready' || bf.status === 'error') && openBatchCrop(idx)">
+                <div class="fi-name" :title="bf.name">{{ bf.name }}</div>
+                <div class="fi-meta">
+                  <span class="fi-size">{{ formatSize(bf.size) }}</span>
+                  <span v-if="bf.status === 'ready'" class="fi-status">待上传</span>
+                  <span v-else-if="bf.status === 'uploading'" class="fi-status">上传中 {{ bf.progress }}%</span>
+                  <span v-else-if="bf.status === 'uploaded'" class="status-ok">✓ 已上传，后台解析中</span>
+                  <span v-else class="status-err">✗ {{ bf.error || '上传失败' }}</span>
+                </div>
+                <div v-if="bf.status === 'uploading'" class="progress-track">
+                  <div class="progress-fill" :style="{ width: bf.progress + '%' }"></div>
                 </div>
               </div>
-            </template>
-          </div>
-
-          <div class="action-buttons" v-if="docFile">
-            <button class="btn btn-secondary" @click="clearDocFile">
-              重新选择
-            </button>
-            <button
-              class="btn btn-success"
-              :disabled="isDocPreviewing || isDocUploading"
-              @click="previewDocHandler('word')"
-            >
-              <div v-if="isDocPreviewing" class="spinner-sm"></div>
-              {{ isDocPreviewing ? '解析中...' : '解析文档' }}
-            </button>
+              <div class="fi-actions" @click.stop>
+                <button v-if="bf.status === 'ready' || bf.status === 'error'" class="btn btn-sm btn-outline" @click="openBatchCrop(idx)">编辑</button>
+                <button v-if="bf.status === 'ready' || bf.status === 'error'" class="btn btn-sm btn-primary" @click="uploadBatchItem(idx)">上传</button>
+                <button v-if="bf.status === 'ready' || bf.status === 'error'" class="btn btn-sm btn-outline-danger" @click="removeBatchItem(idx)">移除</button>
+              </div>
+            </div>
+            <div class="batch-actions">
+              <button class="btn btn-primary" :disabled="batchUploading || batchReadyCount === 0" @click="uploadAllBatch">
+                <span v-if="batchUploading" class="spinner-xs"></span>
+                全部上传（{{ batchReadyCount }}）
+              </button>
+              <button class="btn btn-secondary" :disabled="batchUploading" @click="clearBatchList">清空列表</button>
+            </div>
           </div>
         </template>
-
-        <!-- ===== PDF 文档导入 ===== -->
-        <template v-if="uploadMode === 'pdf'">
-          <div
-            class="upload-zone"
-            :class="{ 'has-file': docFile }"
-            @dragover.prevent="isDocDragOver = true"
-            @dragleave="isDocDragOver = false"
-            @drop.prevent="handleDocDrop"
-            @click="triggerDocInput"
-          >
-            <input
-              ref="docInputRef"
-              type="file"
-              accept=".pdf,application/pdf"
-              class="file-input-hidden"
-              @change="handleDocSelect"
-            />
-
-            <template v-if="!docFile">
-              <div class="upload-icon">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="40" height="40">
-                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-                  <polyline points="14 2 14 8 20 8"/>
-                  <line x1="16" y1="13" x2="8" y2="13"/>
-                  <line x1="16" y1="17" x2="8" y2="17"/>
-                </svg>
-              </div>
-              <p class="upload-text">点击或拖拽 PDF 文档到此处</p>
-              <p class="upload-hint">支持 .pdf 格式，最大 20MB</p>
-            </template>
-
-            <template v-else>
-              <div class="file-preview">
-                <div class="doc-icon">P</div>
-                <div class="file-info">
-                  <span class="file-name">{{ docFile.name }}</span>
-                  <span class="file-size">{{ formatSize(docFile.size) }}</span>
-                </div>
-              </div>
-            </template>
-          </div>
-
-          <div class="action-buttons" v-if="docFile">
-            <button class="btn btn-secondary" @click="clearDocFile">
-              重新选择
-            </button>
-            <button
-              class="btn btn-success"
-              :disabled="isDocPreviewing || isDocUploading"
-              @click="previewDocHandler('pdf')"
-            >
-              <div v-if="isDocPreviewing" class="spinner-sm"></div>
-              {{ isDocPreviewing ? '解析中...' : '解析文档' }}
-            </button>
-          </div>
-        </template>
-
-        <!-- 状态消息 -->
-        <div v-if="statusMessage" class="status-message" :class="statusType">
-          {{ statusMessage }}
-        </div>
       </div>
 
-      <!-- 右侧面板 -->
-      <div class="right-panel">
-        <!-- 右侧选项卡 -->
-        <div class="panel-tabs">
-          <button
-            class="panel-tab"
-            :class="{ active: rightTab === 'result' }"
-            @click="rightTab = 'result'"
-          >
-            识别结果
-          </button>
-          <button
-            class="panel-tab"
-            :class="{ active: rightTab === 'history' }"
-            @click="rightTab = 'history'; loadRecords()"
-          >
-            上传历史
-            <span v-if="recordTotal" class="tab-badge">{{ recordTotal }}</span>
-          </button>
-        </div>
-
-        <!-- 识别结果 -->
-        <div v-if="rightTab === 'result'" class="result-panel">
-          <div class="result-header">
-            <h3 class="result-title">识别 / 解析结果</h3>
-            <span v-if="selectedBatchItem" class="batch-editing-tag" :title="selectedBatchItem.file.name">{{ selectedBatchItem.file.name }}</span>
-            <span v-if="ocrText" class="char-count">{{ ocrText.length }} 字</span>
+      <!-- ---------- Word / PDF 上传 ---------- -->
+      <div class="upload-section">
+        <div class="module-head">
+          <span class="module-badge doc">文</span>
+          <div>
+            <div class="module-title">Word / PDF 上传</div>
+            <div class="module-sub">上传成功后后台自动逐页解析（Word 生成原始排版 PDF 预览），点击可预览原始文档</div>
           </div>
-
-          <div v-if="!ocrText && docPages.length === 0 && !isPreviewing && !isSaving" class="result-empty">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="32" height="32">
+        </div>
+        <div
+          class="upload-zone"
+          :class="{ 'drag-over': docDragOver }"
+          @dragover.prevent="docDragOver = true"
+          @dragleave="docDragOver = false"
+          @drop.prevent="handleDocDrop"
+          @click="triggerDocInput"
+        >
+          <input ref="docInputRef" type="file" accept=".docx,.pdf" multiple class="file-input-hidden" @change="handleDocSelect" />
+          <div class="upload-icon doc">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="38" height="38">
               <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
               <polyline points="14 2 14 8 20 8"/>
               <line x1="16" y1="13" x2="8" y2="13"/>
               <line x1="16" y1="17" x2="8" y2="17"/>
             </svg>
-            <p>上传图片或文档后查看提取结果</p>
           </div>
-
-          <div v-else-if="isPreviewing" class="result-loading">
-            <div class="spinner"></div>
-            <p>正在提取文字...</p>
+          <p class="upload-text">点击或拖拽 Word / PDF 文档到此处（可多选）</p>
+          <p class="upload-hint">支持 .docx、.pdf（≤20MB）</p>
+          <div class="upload-actions" @click.stop>
+            <button type="button" class="btn-upload-action" @click="triggerDocInput">选择文档</button>
           </div>
+        </div>
+      </div>
 
-          <div v-else class="result-content">
-            <!-- ===== 文档分页预览 ===== -->
-            <template v-if="docPages.length > 0">
-              <div class="doc-pages-toolbar">
-                <span class="doc-pages-info">
-                  共 {{ docPreviewInfo.total_pages }} 页，已保存 {{ savedPageNumbers.size }} 页
-                  <span v-if="docPreviewInfo.pdf_preview_path && docPreviewInfo.doc_type === 'word'" class="doc-preview-hint">（Word 已生成 PDF 预览）</span>
-                </span>
-                <div class="doc-pages-actions">
-                  <button class="btn btn-sm btn-outline" @click="selectAllPages">全选未保存</button>
-                  <button class="btn btn-sm btn-outline" @click="clearPageSelection">清空选择</button>
-                  <button
-                    class="btn btn-sm btn-success"
-                    :disabled="selectedPages.size === 0 || isDocUploading"
-                    @click="saveSelectedDocPages"
-                  >
-                    <span v-if="isDocUploading" class="spinner-xs"></span>
-                    {{ isDocUploading ? `保存中 ${docSaveProgress.saved}/${docSaveProgress.total}...` : `保存选中页 (${selectedPages.size})` }}
-                  </button>
-                </div>
-              </div>
+      <!-- ---------- 上传文件列表（实时进度 + 后台解析状态） ---------- -->
+      <div v-if="fileList.length" class="upload-section">
+        <div class="file-list-head">
+          <span>上传文件列表（后台多线程解析中）</span>
+          <span class="file-list-count">{{ fileList.length }} 个</span>
+        </div>
+        <div
+          v-for="f in fileList"
+          :key="f.id || f.localId"
+          class="file-item"
+          :class="['st-' + f.status]"
+        >
+          <span class="fi-icon" :class="f.source_type">{{ typeIcon(f.source_type) }}</span>
+          <div class="fi-main">
+            <div class="fi-name" :title="f.filename">{{ f.filename }}</div>
+            <div class="fi-meta">
+              <span class="fi-size">{{ formatSize(f.file_size || f.size || 0) }}</span>
+              <span class="fi-status">
+                <template v-if="f.status === 'uploading'">上传中 {{ f.progress }}%</template>
+                <template v-else-if="f.status === 'pending'">排队等待解析…</template>
+                <template v-else-if="f.status === 'parsing'"><span class="spinner-xs"></span> 后台解析中…</template>
+                <template v-else-if="f.status === 'done'">
+                  <span class="status-ok">✓ 解析完成</span>
+                  <span v-if="f.source_type === 'image'">{{ f.text_length }} 字</span>
+                  <span v-else>{{ f.page_count }} 页 / {{ f.text_length }} 字</span>
+                </template>
+                <template v-else-if="f.status === 'error'">
+                  <span class="status-err">✗ 解析失败</span>
+                </template>
+              </span>
+            </div>
+            <div v-if="f.status === 'uploading'" class="progress-track">
+              <div class="progress-fill" :style="{ width: f.progress + '%' }"></div>
+            </div>
+            <div v-if="f.status === 'error' && f.error" class="fi-error" :title="f.error">{{ f.error }}</div>
+          </div>
+          <div class="fi-actions" @click.stop>
+            <button v-if="f.status === 'done'" class="btn btn-sm btn-success" @click="goIngest(f)">去入库 →</button>
+            <button v-if="canPreview(f)" class="btn btn-sm btn-outline" @click="previewOriginal(f)">预览</button>
+            <button v-if="f.status === 'error'" class="btn btn-sm btn-primary" @click="retryParse(f)">重试</button>
+            <button v-if="f.status !== 'uploading'" class="btn btn-sm btn-outline-danger" @click="removeFile(f)">删除</button>
+          </div>
+        </div>
+      </div>
+    </div>
 
-              <div class="doc-pages-list">
-                <div
-                  v-for="page in docPages"
-                  :key="page.page_number"
-                  class="doc-page-card"
-                  :class="{
-                    'is-selected': selectedPages.has(page.page_number),
-                    'is-saved': savedPageNumbers.has(page.page_number),
-                  }"
-                >
-                  <div class="doc-page-header">
-                    <label class="doc-page-checkbox">
-                      <input
-                        type="checkbox"
-                        :checked="selectedPages.has(page.page_number)"
-                        :disabled="savedPageNumbers.has(page.page_number)"
-                        @change="togglePageSelected(page.page_number)"
-                      />
-                      <span class="doc-page-title">第 {{ page.page_number }} 页</span>
-                      <span v-if="savedPageNumbers.has(page.page_number)" class="doc-page-saved-tag">已保存</span>
-                    </label>
-                    <div class="doc-page-actions">
-                      <a
-                        v-if="getDocumentPageLink(page)"
-                        :href="getDocumentPageLink(page)"
-                        target="_blank"
-                        class="btn btn-sm btn-outline"
-                      >
-                        预览
-                      </a>
-                      <button
-                        class="btn btn-sm btn-primary"
-                        :disabled="polishingPageNumbers.has(page.page_number) || savedPageNumbers.has(page.page_number)"
-                        @click="polishPageHandler(page)"
-                      >
-                        <span v-if="polishingPageNumbers.has(page.page_number)" class="spinner-xs"></span>
-                        {{ polishingPageNumbers.has(page.page_number) ? '润色中...' : '一键润色' }}
-                      </button>
-                    </div>
-                  </div>
+    <!-- ==================== Tab 2：知识入库 ==================== -->
+    <div v-show="activeTab === 'ingest'" class="tab-panel">
+      <!-- 目标知识库 -->
+      <div class="upload-section">
+        <div class="module-head">
+          <span class="module-badge">库</span>
+          <div>
+            <div class="module-title">目标知识库</div>
+            <div class="module-sub">解析完成的文件将入库到所选知识库，并同步编译 llm-wiki 百科卡片</div>
+          </div>
+        </div>
+        <div class="kb-selector-row">
+          <select v-model="kbVisibilityFilter" class="kb-select kb-filter" @change="onKbFilterChange">
+            <option value="public">公共知识库</option>
+            <option value="private">个人知识库</option>
+          </select>
+          <select v-model="selectedKbId" class="kb-select">
+            <option v-for="kb in filteredKbList" :key="kb.id" :value="kb.id">
+              {{ kb.name }}（{{ kb.entry_count }} 条）
+            </option>
+          </select>
+          <button class="btn-new-kb" @click="openCreateKbModal">+ 新建知识库</button>
+        </div>
+      </div>
 
-                  <div class="doc-page-body">
-                    <textarea
-                      v-model="page.text"
-                      class="doc-page-textarea"
-                      rows="6"
-                      :disabled="savedPageNumbers.has(page.page_number)"
-                    ></textarea>
-                  </div>
-                </div>
-              </div>
-            </template>
-
-            <!-- ===== 单图片 OCR 结果 ===== -->
-            <template v-else>
-              <!-- 可编辑的 OCR 文本 -->
-              <div v-if="ocrTextEditMode" class="ocr-edit-area">
-                <textarea
-                  v-model="ocrText"
-                  class="ocr-textarea"
-                  rows="10"
-                ></textarea>
-                <div class="ocr-edit-actions">
-                  <button class="btn btn-sm btn-secondary" @click="exitEditMode">
-                    完成编辑
-                  </button>
-                </div>
-              </div>
-              <!-- 只读展示（支持 LaTeX 公式渲染） -->
-              <div v-else class="ocr-text-display" v-html="renderedOcrText"></div>
-              <!-- 操作栏 -->
-              <div v-if="ocrText" class="ocr-actions-bar">
-                <button class="btn btn-sm btn-outline" @click="toggleEditMode">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
-                    <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
-                    <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
-                  </svg>
-                  {{ ocrTextEditMode ? '退出编辑' : '编辑结果' }}
-                </button>
-                <button class="btn btn-sm btn-primary" @click="handlePolish" :disabled="isPolishing">
-                  <span v-if="isPolishing" class="spinner-xs"></span>
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
-                    <polyline points="23 4 23 10 17 10"/>
-                    <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
-                  </svg>
-                  {{ isPolishing ? '润色中...' : '一键润色' }}
-                </button>
-              </div>
-            </template>
+      <!-- 待入库列表（解析进展实时刷新） -->
+      <div class="upload-section">
+        <div class="module-head">
+          <span class="module-badge">入</span>
+          <div>
+            <div class="module-title">待入库列表</div>
+            <div class="module-sub">查看后台解析进展与处理效果（图片 OCR 文本 / 文档解析文本），检查无误后逐文件入库</div>
           </div>
         </div>
 
-        <!-- 上传历史 -->
-        <div v-if="rightTab === 'history'" class="history-panel">
-          <div v-if="isLoadingRecords" class="result-loading">
-            <div class="spinner"></div>
-            <p>加载上传记录...</p>
+        <!-- 入库实时进度 -->
+        <div
+          v-if="ingestProgress"
+          class="ingest-progress"
+          :class="{ done: ingestProgress.finished, 'has-fail': ingestProgress.fail > 0 }"
+        >
+          <div class="ip-row">
+            <span v-if="!ingestProgress.finished" class="ip-text">
+              <span class="spinner-xs"></span>
+              入库中 {{ ingestProgress.done + ingestProgress.fail }} / {{ ingestProgress.total }} · 《{{ ingestProgress.currentName }}》
+            </span>
+            <span v-else class="ip-text">
+              <template v-if="ingestProgress.fail === 0">✓ 全部入库成功：{{ ingestProgress.done }} 个文件已写入知识库，后台编译百科卡片中</template>
+              <template v-else>入库结束：成功 {{ ingestProgress.done }} 个，失败 {{ ingestProgress.fail }} 个</template>
+            </span>
+            <button v-if="ingestProgress.finished" class="ip-close" @click="ingestProgress = null" aria-label="关闭">✕</button>
           </div>
-
-          <div v-else-if="records.length === 0" class="result-empty">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="32" height="32">
-              <rect x="3" y="3" width="18" height="18" rx="2"/>
-              <line x1="9" y1="9" x2="15" y2="9"/>
-              <line x1="9" y1="13" x2="15" y2="13"/>
-              <line x1="9" y1="17" x2="12" y2="17"/>
-            </svg>
-            <p>暂无上传记录</p>
+          <div class="progress-track">
+            <div class="progress-fill" :class="{ 'fill-ok': ingestProgress.finished && ingestProgress.fail === 0 }" :style="{ width: ingestProgressPercent + '%' }"></div>
           </div>
+        </div>
 
-          <div v-else class="history-list">
+        <div v-if="!ingestItems.length" class="result-empty">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="32" height="32">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+            <polyline points="14 2 14 8 20 8"/>
+          </svg>
+          <p>暂无待入库文件</p>
+          <p class="empty-tip">在「文件上传」上传图片 / Word / PDF，解析完成后会出现在这里</p>
+        </div>
+
+        <template v-else>
+          <div class="ingest-list">
             <div
-              v-for="rec in records"
-              :key="rec.id"
-              class="history-item"
-              :class="{ expanded: expandedRecordId === rec.id }"
+              v-for="it in ingestItems"
+              :key="it.id"
+              class="ingest-item"
+              :class="{ active: selectedItemId === it.id, 'is-error': it.status === 'error' }"
+              @click="selectItem(it)"
             >
-              <div class="history-item-header" @click="toggleRecordExpand(rec.id)">
-                <div class="hi-info">
-                  <span class="hi-filename">{{ rec.filename }}</span>
-                  <span class="hi-date">{{ formatDate(rec.created_at) }}</span>
-                </div>
-                <div class="hi-meta">
-                  <span class="hi-source-type" :class="rec.source_type">{{ sourceTypeLabel(rec.source_type) }}</span>
-                  <span class="hi-chunks">{{ rec.chunk_count }} 段</span>
-                  <span class="hi-expand-arrow">{{ expandedRecordId === rec.id ? '&#9660;' : '&#9654;' }}</span>
-                </div>
-              </div>
-
-              <div v-if="expandedRecordId === rec.id" class="history-item-body">
-                <div class="hi-ocr-text" :class="{ editing: editingRecordId === rec.id }">
-                  <template v-if="editingRecordId === rec.id">
-                    <textarea
-                      v-model="editOcrText"
-                      class="edit-textarea"
-                      rows="6"
-                    ></textarea>
-                    <div class="edit-actions">
-                      <button class="btn btn-sm btn-secondary" @click="cancelEdit(rec.id)">
-                        取消
-                      </button>
-                      <button class="btn btn-sm btn-primary" @click="saveEdit(rec.id)">
-                        保存修改
-                      </button>
-                    </div>
+              <span class="fi-icon small" :class="it.source_type">{{ typeIcon(it.source_type) }}</span>
+              <div class="ii-main">
+                <div class="ii-name" :title="it.filename">{{ it.filename }}</div>
+                <div class="ii-meta">
+                  <template v-if="it.status === 'done'">
+                    <span class="status-ok">✓ 待入库</span>
+                    {{ it.source_type === 'image' ? `OCR ${it.text_length} 字` : `${it.page_count} 页 / ${it.text_length} 字` }}
                   </template>
                   <template v-else>
-                    <pre class="hi-text-pre">{{ rec.ocr_text }}</pre>
+                    <span class="status-err">✗ 解析失败，点击重试</span>
                   </template>
                 </div>
-                <div class="hi-actions" v-if="editingRecordId !== rec.id">
-                  <button class="btn btn-sm btn-outline" @click="startEdit(rec)">
-                    编辑结果
-                  </button>
-                  <button class="btn btn-sm btn-outline-danger" @click="handleDeleteRecord(rec.id)">
-                    删除
-                  </button>
+              </div>
+              <span class="ii-arrow">{{ selectedItemId === it.id ? '▼' : '▶' }}</span>
+            </div>
+          </div>
+
+          <button
+            v-if="doneCount > 1"
+            class="btn btn-success ingest-all-btn"
+            :disabled="ingestBusy"
+            @click="ingestAll"
+          >
+            <span v-if="ingestBusy" class="spinner-xs"></span>
+            全部入库（{{ doneCount }} 个）
+          </button>
+        </template>
+
+        <!-- 选中项：处理效果检查 / 编辑 / 入库 -->
+        <div v-if="detail" class="review-panel">
+          <div class="review-head">
+            <span class="review-title">处理效果检查 · {{ detail.filename }}</span>
+            <input
+              v-model="ingestTitle"
+              type="text"
+              class="title-input"
+              placeholder="入库标题（留空使用文件名）"
+            />
+          </div>
+
+          <template v-if="detail.status === 'error'">
+            <div class="review-error">解析失败：{{ detail.error }}</div>
+            <div class="review-actions">
+              <button class="btn btn-primary" @click="retryParse(detail)">重新解析</button>
+            </div>
+          </template>
+
+          <template v-else-if="detail.source_type === 'image'">
+            <!-- 图片：原图对照 + 可编辑 OCR 文本 -->
+            <div class="review-image-row">
+              <img :src="buildImageUrl(detail.file_path)" class="review-thumb" alt="原始图片" />
+              <textarea v-model="detail.parsed_text" class="ocr-textarea" rows="12" placeholder="OCR 识别文本"></textarea>
+            </div>
+          </template>
+
+          <template v-else>
+            <!-- 文档：逐页解析文本，可编辑，可跳回原始文档对应页 -->
+            <div class="doc-pages-toolbar">
+              <span class="doc-pages-info">
+                共 {{ detail.pages.length }} 页 · 合计 {{ detailTextLength }} 字
+                <span v-if="pdfPreviewName(detail) && detail.source_type === 'word'" class="doc-preview-hint">（Word 已生成原始排版 PDF 预览）</span>
+              </span>
+              <a
+                v-if="pdfPreviewName(detail)"
+                :href="pdfPreviewUrl(detail)"
+                target="_blank"
+                class="btn btn-sm btn-outline"
+              >预览原始文档</a>
+            </div>
+            <div class="doc-pages-list">
+              <div v-for="page in detail.pages" :key="page.page_number" class="doc-page-card">
+                <div class="doc-page-header">
+                  <span class="doc-page-title">第 {{ page.page_number }} 页</span>
+                  <div class="doc-page-actions">
+                    <a
+                      v-if="pdfPreviewName(detail)"
+                      :href="pageLink(detail, page.page_number)"
+                      target="_blank"
+                      class="btn btn-sm btn-outline"
+                    >预览</a>
+                    <button
+                      class="btn btn-sm btn-primary"
+                      :disabled="polishingPages.has(page.page_number)"
+                      @click="polishPage(page)"
+                    >
+                      <span v-if="polishingPages.has(page.page_number)" class="spinner-xs"></span>
+                      {{ polishingPages.has(page.page_number) ? '润色中...' : '一键润色' }}
+                    </button>
+                  </div>
                 </div>
+                <textarea v-model="page.text" class="doc-page-textarea" rows="6"></textarea>
               </div>
             </div>
+          </template>
 
-            <!-- 加载更多 -->
-            <div v-if="records.length < recordTotal" class="load-more">
-              <button class="btn btn-outline" @click="loadMoreRecords">
-                加载更多 ({{ records.length }}/{{ recordTotal }})
-              </button>
-            </div>
+          <div v-if="detail.status === 'done'" class="review-actions">
+            <button
+              v-if="detail.source_type === 'image'"
+              class="btn btn-primary"
+              :disabled="isPolishing"
+              @click="polishImageText"
+            >
+              <span v-if="isPolishing" class="spinner-xs"></span>
+              {{ isPolishing ? '润色中...' : '一键润色' }}
+            </button>
+            <button class="btn btn-success" :disabled="ingestBusy" @click="ingestSelected">
+              <span v-if="ingestBusy" class="spinner-xs"></span>
+              {{ ingestBusy ? '入库中...' : '确认入库（知识库 + llm-wiki）' }}
+            </button>
           </div>
         </div>
       </div>
@@ -691,7 +444,7 @@
     <div v-if="cropModalVisible" class="crop-modal" @click.self="closeCropModal">
       <div class="crop-modal-content">
         <div class="crop-modal-header">
-          <h3 class="crop-modal-title">裁剪图片</h3>
+          <h3 class="crop-modal-title">编辑图片（裁剪 / 旋转）</h3>
           <button class="crop-modal-close" @click="closeCropModal" aria-label="关闭">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
               <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
@@ -728,219 +481,288 @@
       </div>
     </div>
 
-    <!-- 上传图片预览弹窗：展示最终上传给 OCR 的图片实际效果 -->
-    <div v-if="uploadPreviewVisible" class="crop-modal" @click.self="closeUploadPreview">
-      <div class="crop-modal-content">
-        <div class="crop-modal-header">
-          <h3 class="crop-modal-title">上传预览 · OCR 实际接收的图片</h3>
-          <button class="crop-modal-close" @click="closeUploadPreview" aria-label="关闭">
+    <!-- 原始图片预览弹窗 -->
+    <div v-if="previewImageSrc" class="preview-modal" @click.self="previewImageSrc = ''">
+      <div class="preview-modal-content">
+        <div class="preview-modal-header">
+          <h3>原始文档预览</h3>
+          <button class="modal-close" @click="previewImageSrc = ''" aria-label="关闭">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
               <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
             </svg>
           </button>
         </div>
-        <div class="crop-modal-body upload-preview-body" @wheel.prevent="handlePreviewWheel">
-          <img
-            :src="filePreviewUrl"
-            class="upload-preview-img"
-            :style="{ transform: 'scale(' + previewZoom + ')' }"
-            alt="上传预览"
-          />
-        </div>
-        <div class="crop-modal-footer">
-          <span class="preview-meta">
-            {{ selectedFile?.name }} · {{ formatSize(selectedFile?.size || 0) }} · 缩放 {{ Math.round(previewZoom * 100) }}%（滚轮可缩放）
-          </span>
-          <button class="btn btn-secondary" @click="previewZoom = 1">重置缩放</button>
-          <button class="btn btn-primary" @click="closeUploadPreview">关闭</button>
-        </div>
+        <img :src="previewImageSrc" class="preview-img" alt="原始文档" />
       </div>
     </div>
 
     <!-- 新建知识库弹窗 -->
-    <div v-if="showCreateKbModal" class="kb-overlay" @click.self="showCreateKbModal = false">
-      <div class="kb-modal">
-        <div class="kb-modal-header">
+    <div v-if="showCreateKbModal" class="preview-modal" @click.self="showCreateKbModal = false">
+      <div class="preview-modal-content kb-modal">
+        <div class="preview-modal-header">
           <h3>新建知识库</h3>
-          <button class="kb-modal-close" @click="showCreateKbModal = false" aria-label="关闭">&times;</button>
+          <button class="modal-close" @click="showCreateKbModal = false" aria-label="关闭">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
+              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+            </svg>
+          </button>
         </div>
         <div class="kb-modal-body">
-          <div class="kb-form-group">
-            <label class="kb-form-label">知识库名称</label>
-            <input v-model="newKb.name" class="kb-input" placeholder="如：糖尿病饮食管理" />
+          <label class="ocr-label">知识库名称</label>
+          <input v-model="newKb.name" type="text" class="title-input" placeholder="如：中医养生笔记" />
+          <label class="ocr-label">可见范围</label>
+          <div class="kb-selector-row">
+            <select v-model="newKb.visibility" class="kb-select">
+              <option value="private">个人知识库（仅自己可见）</option>
+              <option v-if="kbIsAdmin" value="public">公共知识库（所有人可见）</option>
+            </select>
           </div>
-          <div class="kb-form-group">
-            <label class="kb-form-label">可见范围</label>
-            <div class="kb-vis-options">
-              <label class="kb-vis-option">
-                <input type="radio" v-model="newKb.visibility" value="private" />
-                <span>个人（仅自己可见）</span>
-              </label>
-              <label class="kb-vis-option" :class="{ disabled: !kbIsAdmin }">
-                <input type="radio" v-model="newKb.visibility" value="public" :disabled="!kbIsAdmin" />
-                <span>公共（所有人可见）</span>
-                <span v-if="!kbIsAdmin" class="kb-vis-hint">仅管理员可建</span>
-              </label>
-            </div>
+          <div class="review-actions">
+            <button class="btn btn-secondary" @click="showCreateKbModal = false">取消</button>
+            <button class="btn btn-primary" :disabled="creatingKb" @click="submitCreateKb">
+              <span v-if="creatingKb" class="spinner-xs"></span> 创建
+            </button>
           </div>
-        </div>
-        <div class="kb-modal-footer">
-          <button class="btn btn-secondary" @click="showCreateKbModal = false">取消</button>
-          <button class="btn btn-primary" :disabled="creatingKb" @click="submitCreateKb">
-            {{ creatingKb ? '创建中...' : '创建' }}
-          </button>
         </div>
       </div>
     </div>
+
+    <!-- 全局状态提示 -->
+    <div v-if="statusMessage" class="status-toast" :class="statusType">{{ statusMessage }}</div>
   </div>
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, nextTick, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { ref, computed, reactive, onMounted, onUnmounted, nextTick } from 'vue'
 import Cropper from 'cropperjs/dist/cropper.esm.js'
-import katex from 'katex'
-import 'katex/dist/katex.min.css'
 import {
-  uploadImage,
-  uploadDocument,
-  previewDocument,
-  saveDocumentPagesStream,
-  previewOCR,
-  getUploadRecords,
-  updateUploadRecord,
-  deleteUploadRecord,
+  uploadPendingFile,
+  listPendingUploads,
+  getPendingUpload,
+  ingestPendingUpload,
+  retryPendingParse,
+  deletePendingUpload,
   polishOCR,
   listKnowledgeBases,
   createKnowledgeBase,
   getImageUrl as buildImageUrl,
 } from '@/api'
-import { useChatStore } from '@/stores/chat'
-import { compressCanvasToFile, compressImageFile, MAX_UPLOAD_SIZE } from '@/utils/image'
+import { compressImageFile, compressCanvasToFile, MAX_UPLOAD_SIZE } from '@/utils/image'
 
-const router = useRouter()
-const store = useChatStore()
-
-// ---- 单文件上传状态 ----
-const selectedOCR = ref('aliyun')
-const selectedFile = ref(null)
-const filePreviewUrl = ref('')
-const ocrText = ref('')
-const isDragOver = ref(false)
-const isPreviewing = ref(false)
-const isSaving = ref(false)
-const isProcessing = computed(() => isPreviewing.value || isSaving.value)
-const statusMessage = ref('')
-const statusType = ref('info')
-const fileInputRef = ref(null)
-const cameraInputRef = ref(null)
-
-// ---- OCR 编辑 & 润色 ----
-const ocrTextEditMode = ref(false)
-const isPolishing = ref(false)
-
-/**
- * 将混合文本中的 LaTeX 公式渲染为 HTML
- * 支持 $$...$$ 块级公式和 $...$ 行内公式
- */
-function renderOcrText(text) {
-  if (!text) return ''
-  // 先处理块级公式 $$...$$
-  let html = text.replace(/\$\$([\s\S]*?)\$\$/g, (match, latex) => {
-    try {
-      return katex.renderToString(latex.trim(), { displayMode: true, throwOnError: false })
-    } catch (err) {
-      console.error('KaTeX 块级渲染失败:', err)
-      return match
-    }
-  })
-  // 再处理行内公式 $...$
-  html = html.replace(/\$([\s\S]*?)\$/g, (match, latex) => {
-    try {
-      return katex.renderToString(latex.trim(), { displayMode: false, throwOnError: false })
-    } catch (err) {
-      console.error('KaTeX 行内渲染失败:', err)
-      return match
-    }
-  })
-  // 将换行符转为 <br>
-  html = html.replace(/\n/g, '<br>')
-  return html
+// ---- 模块切换 ----
+const activeTab = ref('upload')
+function switchToIngest() {
+  activeTab.value = 'ingest'
+  refreshPending()
+  startPolling()
 }
 
-const renderedOcrText = computed(() => renderOcrText(ocrText.value))
-
-// ---- 上传模块状态 ----
-const uploadMode = ref('ocr')
+// ---- OCR 引擎选项 ----
+const ocrOptions = [
+  { value: 'local', label: '本地 OCR (EasyOCR)' },
+  { value: 'aliyun', label: '阿里云 OCR' },
+  { value: 'custom_api', label: '自定义 OCR API' },
+]
+const selectedOCR = ref('aliyun')
 const ocrSubMode = ref('single')
 
-// ---- 文档上传状态 ----
-const docInputRef = ref(null)
-const docFile = ref(null)
-const isDocDragOver = ref(false)
-const isDocUploading = ref(false)
-const isDocPreviewing = ref(false)
-const docPreviewInfo = ref(null)
-const docPages = ref([])
-const selectedPages = ref(new Set())
-const savedPageNumbers = ref(new Set())
-const polishingPageNumbers = ref(new Set())
-// 保存实时进度（SSE 逐页回传）
-const docSaveProgress = ref({ saved: 0, total: 0 })
-
-// 切换上传模块时清理残留状态
-watch(uploadMode, (_newMode, oldMode) => {
-  statusMessage.value = ''
-  if (oldMode === 'word' || oldMode === 'pdf') {
-    docFile.value = null
-    ocrText.value = ''
-    docPreviewInfo.value = null
-    docPages.value = []
-    selectedPages.value = new Set()
-    savedPageNumbers.value = new Set()
-    polishingPageNumbers.value = new Set()
-  }
-})
-
-// 批量模式下，右侧结果的编辑实时写回当前选中的批量条目
-watch(ocrText, (val) => {
-  if (uploadMode.value === 'ocr' && ocrSubMode.value === 'batch' && selectedBatchItem.value) {
-    selectedBatchItem.value.ocrText = val
-  }
-})
-
-// 切换单张/批量时重置右侧结果关联
-watch(ocrSubMode, () => {
-  selectedBatchIndex.value = null
-  ocrText.value = ''
-})
-
-// ---- 批量上传状态 ----
+// ---- 上传区状态 ----
+const fileInputRef = ref(null)
+const cameraInputRef = ref(null)
 const batchInputRef = ref(null)
 const batchCameraInputRef = ref(null)
+const docInputRef = ref(null)
+const imgDragOver = ref(false)
+const batchDragOver = ref(false)
+const docDragOver = ref(false)
+
+// ---- 文件列表：本地上传中条目 + 服务端待处理条目 ----
+const uploadingItems = ref([])
+const serverItems = ref([])
+const fileList = computed(() => [...uploadingItems.value, ...serverItems.value])
+
+// ---- 状态提示 ----
+const statusMessage = ref('')
+const statusType = ref('info')
+let statusTimer = null
+function showStatus(msg, type = 'info') {
+  statusMessage.value = msg
+  statusType.value = type
+  if (statusTimer) clearTimeout(statusTimer)
+  statusTimer = setTimeout(() => {
+    statusMessage.value = ''
+  }, 4000)
+}
+
+// ---- 文件类型识别 ----
+const IMAGE_EXTS = ['.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.webp']
+function detectType(file) {
+  const ext = '.' + ((file.name || '').split('.').pop() || '').toLowerCase()
+  if (IMAGE_EXTS.includes(ext)) return 'image'
+  if (ext === '.docx') return 'word'
+  if (ext === '.pdf') return 'pdf'
+  return null
+}
+function typeIcon(type) {
+  return type === 'image' ? '图' : type === 'word' ? 'W' : type === 'pdf' ? 'P' : '文'
+}
+function formatSize(bytes) {
+  if (!bytes && bytes !== 0) return ''
+  if (bytes < 1024) return bytes + ' B'
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB'
+  return (bytes / 1024 / 1024).toFixed(1) + ' MB'
+}
+const baseName = (p) => (p ? String(p).split('/').pop() : '')
+
+// ---- 图片单张上传 ----
+function triggerFileInput() {
+  fileInputRef.value?.click()
+}
+function triggerCameraInput() {
+  cameraInputRef.value?.click()
+}
+function handleImageSelect(e) {
+  const files = Array.from(e.target.files || [])
+  e.target.value = ''
+  handleImageFiles(files)
+}
+function handleImageDrop(e) {
+  imgDragOver.value = false
+  handleImageFiles(Array.from(e.dataTransfer.files || []))
+}
+function handleImageFiles(files) {
+  const images = []
+  for (const f of files) {
+    if (detectType(f) === 'image') images.push(f)
+    else showStatus(`《${f.name}》不是图片，请在下方 Word / PDF 区上传`, 'error')
+  }
+  if (!images.length) return
+  // 选择图片后先进入编辑界面（裁剪 / 旋转），确认后再上传
+  openCropEditor(images[0], { type: 'single' })
+  if (images.length > 1) {
+    showStatus(`单张上传仅取第一张图片，其余 ${images.length - 1} 张请使用批量上传`, 'info')
+  }
+}
+
+// ---- 图片批量上传（待选列表 + 逐个/一键上传） ----
 const batchFiles = ref([])
-const isBatchRunning = ref(false)
-const batchDoneCount = ref(0)
-const selectedBatchIndex = ref(null)
+const batchTotalSize = computed(() => batchFiles.value.reduce((s, f) => s + (f.size || 0), 0))
+const batchReadyCount = computed(() => batchFiles.value.filter((f) => f.status === 'ready' || f.status === 'error').length)
+const batchUploading = computed(() => batchFiles.value.some((f) => f.status === 'uploading'))
 
-const selectedBatchItem = computed(() =>
-  selectedBatchIndex.value != null ? batchFiles.value[selectedBatchIndex.value] || null : null
-)
-const recognizedBatchCount = computed(() =>
-  batchFiles.value.filter((bf) => bf.status === 'recognized').length
-)
-const batchHasWork = computed(() =>
-  batchFiles.value.some((bf) => bf.status === 'pending' || bf.status === 'error')
-)
+function triggerBatchInput() {
+  batchInputRef.value?.click()
+}
+function triggerBatchCamera() {
+  batchCameraInputRef.value?.click()
+}
+function handleBatchSelect(e) {
+  const files = Array.from(e.target.files || [])
+  e.target.value = ''
+  appendBatchFiles(files)
+}
+function handleBatchDrop(e) {
+  batchDragOver.value = false
+  appendBatchFiles(Array.from(e.dataTransfer.files || []))
+}
+function appendBatchFiles(files) {
+  for (const f of files) {
+    if (detectType(f) !== 'image') {
+      showStatus(`《${f.name}》不是图片，批量上传仅支持图片`, 'error')
+      continue
+    }
+    if (batchFiles.value.some((x) => x.name === f.name && x.size === f.size)) continue
+    batchFiles.value.push({
+      localId: `batch-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      file: f,
+      name: f.name,
+      size: f.size,
+      thumb: URL.createObjectURL(f),
+      status: 'ready',
+      progress: 0,
+      error: '',
+    })
+  }
+}
+function removeBatchItem(idx) {
+  const bf = batchFiles.value[idx]
+  if (bf?.thumb) URL.revokeObjectURL(bf.thumb)
+  batchFiles.value.splice(idx, 1)
+}
+function clearBatchList() {
+  batchFiles.value.forEach((f) => {
+    if (f.status !== 'uploading' && f.thumb) URL.revokeObjectURL(f.thumb)
+  })
+  batchFiles.value = batchFiles.value.filter((f) => f.status === 'uploading')
+}
 
-// ---- 图片裁剪 ----
+async function uploadBatchItem(idx) {
+  const bf = batchFiles.value[idx]
+  if (!bf || bf.status === 'uploading' || bf.status === 'uploaded') return
+  bf.status = 'uploading'
+  bf.progress = 0
+  startPolling()
+  try {
+    let toUpload = bf.file
+    if (bf.file.size > MAX_UPLOAD_SIZE) {
+      toUpload = await compressImageFile(bf.file)
+    }
+    const res = await uploadPendingFile(toUpload, selectedOCR.value, (p) => {
+      bf.progress = p
+    })
+    bf.status = 'uploaded'
+    if (res.data?.item && !serverItems.value.some((s) => s.id === res.data.item.id)) {
+      serverItems.value.unshift(res.data.item)
+    }
+    showStatus(`《${bf.name}》上传成功，后台正在解析…`, 'success')
+    refreshPending()
+    // 已上传的条目进入下方统一文件列表，待选列表自动移除
+    setTimeout(() => {
+      const i = batchFiles.value.findIndex((x) => x.localId === bf.localId)
+      if (i >= 0 && batchFiles.value[i].status === 'uploaded') batchFiles.value.splice(i, 1)
+    }, 1200)
+  } catch (e) {
+    bf.status = 'error'
+    bf.error = e.message || '上传失败'
+    showStatus(`《${bf.name}》上传失败：${e.message || '网络异常'}`, 'error')
+  }
+}
+
+async function uploadAllBatch() {
+  const targets = batchFiles.value.filter((f) => f.status === 'ready' || f.status === 'error')
+  for (const t of targets) {
+    const idx = batchFiles.value.findIndex((x) => x.localId === t.localId)
+    if (idx >= 0) await uploadBatchItem(idx)
+  }
+}
+
+// ---- 图片编辑（裁剪 / 旋转） ----
 const cropModalVisible = ref(false)
-// 裁剪弹窗服务对象：{ type: 'single' } 单张模式 或 { type: 'batch', index } 批量条目
+// 服务对象：{ type: 'single' } 单张模式 或 { type: 'batch', index } 批量条目
 const cropTarget = ref(null)
 const cropImageUrl = ref('')
 const cropperInstance = ref(null)
 const cropperImageRef = ref(null)
 const cropperWrapperRef = ref(null)
+const fileBeforeCrop = ref(null)
+const targetAngle = ref(0)
+
+const CROPPER_TEMPLATE = `
+  <cropper-canvas background>
+    <cropper-image initial-center-size="contain" rotatable scalable translatable></cropper-image>
+    <cropper-selection initial-coverage="0.8" movable resizable zoomable outlined>
+      <cropper-handle action="move" plain></cropper-handle>
+      <cropper-handle action="n-resize"></cropper-handle>
+      <cropper-handle action="e-resize"></cropper-handle>
+      <cropper-handle action="s-resize"></cropper-handle>
+      <cropper-handle action="w-resize"></cropper-handle>
+      <cropper-handle action="ne-resize"></cropper-handle>
+      <cropper-handle action="nw-resize"></cropper-handle>
+      <cropper-handle action="se-resize"></cropper-handle>
+      <cropper-handle action="sw-resize"></cropper-handle>
+    </cropper-selection>
+  </cropper-canvas>
+`
 
 // 长按拖动图片相关状态
 let longPressTimer = null
@@ -1001,7 +823,7 @@ function onWindowPointerMove(e) {
   panStart = { x: e.clientX, y: e.clientY }
 }
 
-function onWindowPointerUp(e) {
+function onWindowPointerUp() {
   if (isLongPressPanning) {
     isLongPressPanning = false
     if (cropperWrapperRef.value) {
@@ -1027,193 +849,6 @@ function detachPanListeners() {
   window.removeEventListener('pointermove', onWindowPointerMove)
   window.removeEventListener('pointerup', onWindowPointerUp)
 }
-const fileBeforeCrop = ref(null)
-
-// 已裁剪/压缩后待上传的 File
-const pendingUploadFile = ref(null)
-
-const batchTotalSize = computed(() =>
-  batchFiles.value.reduce((sum, bf) => sum + bf.file.size, 0)
-)
-
-const isBatchCompressing = ref(false)
-
-const batchProgressPercent = computed(() => {
-  if (batchFiles.value.length === 0) return 0
-  return Math.round((batchDoneCount.value / batchFiles.value.length) * 100)
-})
-
-// ---- 上传历史状态 ----
-const rightTab = ref('result')
-const records = ref([])
-const recordTotal = ref(0)
-const isLoadingRecords = ref(false)
-const expandedRecordId = ref(null)
-const editingRecordId = ref(null)
-const editOcrText = ref('')
-const recordsOffset = ref(0)
-const RECORDS_PAGE_SIZE = 20
-
-// ---- OCR 选项 ----
-const ocrOptions = [
-  { value: 'local', label: '本地 OCR (EasyOCR)' },
-  { value: 'aliyun', label: '阿里云 OCR' },
-  { value: 'custom_api', label: '自定义 OCR API' },
-]
-
-// ---- 目标知识库 ----
-const kbList = ref([])
-const kbIsAdmin = ref(false)
-const selectedKbId = ref('')
-// 先按公共/个人筛选，再按名称选择知识库
-const kbVisibilityFilter = ref('public')
-
-// ---- 保存标题 ----
-const saveTitle = ref('')
-
-// 选择文件时自动将默认标题设为文件名（不含扩展名）
-function autoFillTitle(file) {
-  if (!file) return
-  const name = file.name || ''
-  const dotIndex = name.lastIndexOf('.')
-  saveTitle.value = dotIndex > 0 ? name.slice(0, dotIndex) : name
-}
-
-const filteredKbList = computed(() =>
-  kbList.value.filter((kb) => kb.visibility === kbVisibilityFilter.value)
-)
-
-async function loadKnowledgeBases() {
-  try {
-    const res = await listKnowledgeBases()
-    kbList.value = res.data.bases || []
-    kbIsAdmin.value = !!res.data.is_admin
-    if (!selectedKbId.value && kbList.value.length > 0) {
-      selectedKbId.value = kbList.value[0].id
-    }
-    // 筛选器跟随当前选中知识库的可见性
-    const selected = kbList.value.find((k) => k.id === selectedKbId.value)
-    if (selected) kbVisibilityFilter.value = selected.visibility
-    syncVisibilityFromKb()
-  } catch (e) {
-    console.error('加载知识库列表失败:', e)
-  }
-}
-
-// 切换公共/个人筛选：当前选中项不在筛选结果中时自动选第一个
-function onKbFilterChange() {
-  if (!filteredKbList.value.some((kb) => kb.id === selectedKbId.value)) {
-    selectedKbId.value = filteredKbList.value[0]?.id || ''
-  }
-  syncVisibilityFromKb()
-}
-
-// 可见性由所属知识库决定（兼容原上传接口的 visibility 参数）
-function syncVisibilityFromKb() {
-  const kb = kbList.value.find((k) => k.id === selectedKbId.value)
-  visibility.value = kb ? kb.visibility : 'public'
-}
-
-function onKbChange() {
-  syncVisibilityFromKb()
-}
-
-const showCreateKbModal = ref(false)
-const creatingKb = ref(false)
-// topic 不再由用户选择，后端要求必传时默认归入“其他”
-const newKb = reactive({ name: '', topic: '其他', visibility: 'private' })
-
-function openCreateKbModal() {
-  newKb.name = ''
-  newKb.visibility = kbIsAdmin.value ? 'public' : 'private'
-  showCreateKbModal.value = true
-}
-
-async function submitCreateKb() {
-  if (!newKb.name.trim()) {
-    alert('请输入知识库名称')
-    return
-  }
-  creatingKb.value = true
-  try {
-    const res = await createKnowledgeBase({ ...newKb, name: newKb.name.trim() })
-    showCreateKbModal.value = false
-    await loadKnowledgeBases()
-    selectedKbId.value = res.data.kb.id
-    kbVisibilityFilter.value = res.data.kb.visibility || 'private'
-    syncVisibilityFromKb()
-  } catch (e) {
-    alert('创建知识库失败: ' + (e.response?.data?.detail || e.message))
-  } finally {
-    creatingKb.value = false
-  }
-}
-
-// 保留 visibility 状态：由目标知识库同步
-const visibility = ref('public')
-
-// ====== 单文件上传 ======
-
-function triggerFileInput() {
-  fileInputRef.value?.click()
-}
-
-// 移动端拍照入口：capture input 直接唤起相机（桌面端退化为文件选择）
-function triggerCameraInput() {
-  cameraInputRef.value?.click()
-}
-
-function handleFileSelect(e) {
-  const files = e.target.files
-  if (files && files.length > 0) {
-    setFile(files[0])
-  }
-}
-
-function handleDrop(e) {
-  isDragOver.value = false
-  const files = e.dataTransfer.files
-  if (files && files.length > 0) {
-    setFile(files[0])
-  }
-}
-
-function setFile(file) {
-  if (!file.type.startsWith('image/')) {
-    showStatus('请上传图片文件', 'error')
-    return
-  }
-  fileBeforeCrop.value = file
-  autoFillTitle(file)
-  cropImageUrl.value = ''
-  cropTarget.value = { type: 'single' }
-  cropModalVisible.value = true
-  pendingUploadFile.value = null
-
-  const reader = new FileReader()
-  reader.onload = (e) => {
-    cropImageUrl.value = e.target.result
-    nextTick(() => initCropper())
-  }
-  reader.readAsDataURL(file)
-}
-
-const CROPPER_TEMPLATE = `
-  <cropper-canvas background>
-    <cropper-image initial-center-size="contain" rotatable scalable translatable></cropper-image>
-    <cropper-selection initial-coverage="0.8" movable resizable zoomable outlined>
-      <cropper-handle action="move" plain></cropper-handle>
-      <cropper-handle action="n-resize"></cropper-handle>
-      <cropper-handle action="e-resize"></cropper-handle>
-      <cropper-handle action="s-resize"></cropper-handle>
-      <cropper-handle action="w-resize"></cropper-handle>
-      <cropper-handle action="ne-resize"></cropper-handle>
-      <cropper-handle action="nw-resize"></cropper-handle>
-      <cropper-handle action="se-resize"></cropper-handle>
-      <cropper-handle action="sw-resize"></cropper-handle>
-    </cropper-selection>
-  </cropper-canvas>
-`
 
 function initCropper() {
   if (cropperInstance.value) {
@@ -1230,8 +865,25 @@ function initCropper() {
   nextTick(() => attachPanListeners())
 }
 
-// 当前目标旋转角度：0° 为图片原始方向，正值顺时针，负值逆时针，范围 -360°~360°
-const targetAngle = ref(0)
+// 打开编辑界面：single=单张选择后；batch=批量列表条目
+function openCropEditor(file, target) {
+  fileBeforeCrop.value = file
+  cropImageUrl.value = ''
+  cropTarget.value = target
+  cropModalVisible.value = true
+  const reader = new FileReader()
+  reader.onload = (e) => {
+    cropImageUrl.value = e.target.result
+    nextTick(() => initCropper())
+  }
+  reader.readAsDataURL(file)
+}
+
+function openBatchCrop(idx) {
+  const bf = batchFiles.value[idx]
+  if (!bf || bf.status === 'uploading' || bf.status === 'uploaded') return
+  openCropEditor(bf.file, { type: 'batch', index: idx })
+}
 
 function normalizeRotation(deg) {
   let v = deg % 360
@@ -1244,13 +896,13 @@ function applyRotation(newAngle) {
   const cropperImage = cropperInstance.value?.getCropperImage?.()
   const delta = newAngle - targetAngle.value
   if (cropperImage && typeof cropperImage.$rotate === 'function' && delta !== 0) {
+    // cropperjs v2 的 $rotate 数字参数为弧度，必须传 'deg' 字符串
     cropperImage.$rotate(delta + 'deg')
   }
   targetAngle.value = normalizeRotation(newAngle)
 }
 
 function rotateCropImage(deg) {
-  // 按钮：每次相对当前角度顺时针/逆时针旋转 90°（与系统预览、相册一致）
   applyRotation(targetAngle.value + deg)
 }
 
@@ -1267,25 +919,6 @@ function resetTransform() {
   targetAngle.value = 0
 }
 
-// ---- 上传图片预览（查看最终传给 OCR 的实际图片） ----
-const uploadPreviewVisible = ref(false)
-const previewZoom = ref(1)
-
-function openUploadPreview() {
-  if (!selectedFile.value || !filePreviewUrl.value) return
-  previewZoom.value = 1
-  uploadPreviewVisible.value = true
-}
-
-function closeUploadPreview() {
-  uploadPreviewVisible.value = false
-}
-
-function handlePreviewWheel(e) {
-  const delta = e.deltaY > 0 ? -0.1 : 0.1
-  previewZoom.value = Math.min(5, Math.max(0.2, +(previewZoom.value + delta).toFixed(2)))
-}
-
 function closeCropModal() {
   cropModalVisible.value = false
   cropTarget.value = null
@@ -1298,6 +931,7 @@ function closeCropModal() {
   fileBeforeCrop.value = null
 }
 
+// 裁剪/压缩后的图片写回批量条目
 async function confirmCrop() {
   if (!cropperInstance.value || !fileBeforeCrop.value) return
   showStatus('正在处理图片...', 'info')
@@ -1326,17 +960,7 @@ async function confirmCrop() {
     const originalSize = fileBeforeCrop.value.size
     const file = await compressCanvasToFile(canvas, fileBeforeCrop.value.name, MAX_UPLOAD_SIZE)
     const message = file.size < originalSize ? `图片已裁剪并压缩至 ${formatSize(file.size)}` : '图片已裁剪'
-    if (cropTarget.value?.type === 'batch') {
-      applyBatchProcessedFile(file, message)
-    } else {
-      pendingUploadFile.value = file
-      selectedFile.value = file
-      filePreviewUrl.value = await readFileAsDataURL(file)
-      ocrText.value = ''
-      statusMessage.value = ''
-      showStatus(message, 'success')
-    }
-    closeCropModal()
+    finishCropEdit(file, message)
   } catch (err) {
     console.error('裁剪/压缩失败:', err)
     showStatus('图片处理失败: ' + (err.message || '请重试'), 'error')
@@ -1349,2259 +973,861 @@ async function skipCrop() {
   try {
     const originalSize = fileBeforeCrop.value.size
     const file = await compressImageFile(fileBeforeCrop.value, MAX_UPLOAD_SIZE)
-    if (cropTarget.value?.type === 'batch') {
-      applyBatchProcessedFile(file, file.size < originalSize ? `图片已压缩至 ${formatSize(file.size)}` : '已使用原图')
-    } else {
-      pendingUploadFile.value = file
-      selectedFile.value = file
-      filePreviewUrl.value = await readFileAsDataURL(file)
-      ocrText.value = ''
-      statusMessage.value = ''
-      if (file.size < originalSize) {
-        showStatus(`图片已压缩至 ${formatSize(file.size)}`, 'success')
-      }
-    }
-    closeCropModal()
+    const message = file.size < originalSize ? `图片已压缩至 ${formatSize(file.size)}` : '已使用原图'
+    finishCropEdit(file, message)
   } catch (err) {
     console.error('压缩失败:', err)
     showStatus('图片处理失败: ' + (err.message || '请重试'), 'error')
   }
 }
 
-function readFileAsDataURL(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = (e) => resolve(e.target.result)
-    reader.onerror = reject
-    reader.readAsDataURL(file)
-  })
-}
-
-function clearFile() {
-  selectedFile.value = null
-  filePreviewUrl.value = ''
-  ocrText.value = ''
-  statusMessage.value = ''
-  pendingUploadFile.value = null
-  fileBeforeCrop.value = null
-  saveTitle.value = ''
-}
-
-async function previewOCRHandler() {
-  if (!selectedFile.value) return
-  isPreviewing.value = true
-  statusMessage.value = ''
-
-  try {
-    const res = await previewOCR(selectedFile.value, selectedOCR.value)
-    ocrText.value = res.data.ocr_text || ''
-    if (!ocrText.value) {
-      showStatus('未识别到文字，请检查图片质量', 'warning')
-    }
-  } catch (err) {
-    const status = err.response?.status
-    const detail = typeof err.response?.data?.detail === 'string' ? err.response.data.detail : ''
-    const msg = detail || (status === 413
-      ? '图片过大被服务器拒绝，请压缩后重试'
-      : 'OCR 识别失败，请检查配置')
-    showStatus(msg, 'error')
-    ocrText.value = ''
-  } finally {
-    isPreviewing.value = false
+// 编辑结束：批量条目写回；单张模式直接上传
+function finishCropEdit(file, message) {
+  const target = cropTarget.value
+  const bf = target?.type === 'batch' ? batchFiles.value[target.index] : null
+  closeCropModal()
+  if (target?.type === 'batch') {
+    if (!bf) return
+    if (bf.thumb) URL.revokeObjectURL(bf.thumb)
+    bf.file = file
+    bf.size = file.size
+    bf.thumb = URL.createObjectURL(file)
+    bf.status = 'ready'
+    bf.error = ''
+    showStatus(message, 'success')
+  } else {
+    showStatus(message + '，开始上传…', 'success')
+    uploadOne(file, 'image', file.name)
   }
 }
 
-async function processAndSave() {
-  if (!selectedFile.value || !ocrText.value) return
-  isSaving.value = true
-  statusMessage.value = ''
-
-  try {
-    const res = await uploadImage(selectedFile.value, selectedOCR.value, visibility.value, selectedKbId.value, ocrText.value, saveTitle.value)
-    const data = res.data
-
-    if (data.success) {
-      showStatus(
-        `已保存到知识库！识别 ${data.chunk_count} 段文本`,
-        'success'
-      )
-      setTimeout(() => {
-        clearFile()
-      }, 1500)
+// ---- Word / PDF 上传 ----
+function triggerDocInput() {
+  docInputRef.value?.click()
+}
+function handleDocSelect(e) {
+  const files = Array.from(e.target.files || [])
+  e.target.value = ''
+  handleDocFiles(files)
+}
+function handleDocDrop(e) {
+  docDragOver.value = false
+  handleDocFiles(Array.from(e.dataTransfer.files || []))
+}
+function handleDocFiles(files) {
+  for (const f of files) {
+    const type = detectType(f)
+    if (type === 'word' || type === 'pdf') {
+      uploadOne(f, type, f.name)
     } else {
-      showStatus('未识别到文字内容', 'warning')
+      showStatus(`《${f.name}》不是 Word / PDF 文档，图片请在上方图片区上传`, 'error')
     }
-  } catch (err) {
-    const msg = err.response?.data?.detail || '保存失败'
-    showStatus(msg, 'error')
-  } finally {
-    isSaving.value = false
   }
 }
 
-// ====== OCR 文本编辑 & 润色 ======
-
-function toggleEditMode() {
-  ocrTextEditMode.value = !ocrTextEditMode.value
+// ---- 统一上传入口（单张图片 / 文档） ----
+async function uploadOne(file, type, displayName) {
+  const localId = `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  uploadingItems.value.push({
+    localId,
+    filename: displayName,
+    source_type: type,
+    size: file.size,
+    status: 'uploading',
+    progress: 0,
+  })
+  startPolling()
+  try {
+    let toUpload = file
+    if (type === 'image' && file.size > MAX_UPLOAD_SIZE) {
+      try {
+        toUpload = await compressImageFile(file)
+      } catch (err) {
+        showStatus(`图片压缩失败：${displayName}，${err.message || err}`, 'error')
+        uploadingItems.value = uploadingItems.value.filter((x) => x.localId !== localId)
+        return
+      }
+    }
+    const res = await uploadPendingFile(toUpload, selectedOCR.value, (p) => {
+      const it = uploadingItems.value.find((x) => x.localId === localId)
+      if (it) it.progress = p
+    })
+    // 上传成功：本地占位替换为服务端条目（后端已开始后台解析）
+    const idx = uploadingItems.value.findIndex((x) => x.localId === localId)
+    if (idx >= 0) uploadingItems.value.splice(idx, 1)
+    if (res.data?.item && !serverItems.value.some((s) => s.id === res.data.item.id)) {
+      serverItems.value.unshift(res.data.item)
+    }
+    showStatus(`《${displayName}》上传成功，后台正在解析…`, 'success')
+    refreshPending()
+  } catch (e) {
+    const it = uploadingItems.value.find((x) => x.localId === localId)
+    if (it) {
+      it.status = 'error'
+      it.error = e.message || '上传失败'
+    }
+    showStatus(`《${displayName}》上传失败：${e.message || '网络异常'}`, 'error')
+  }
 }
 
-function exitEditMode() {
-  ocrTextEditMode.value = false
+// ---- 轮询解析进展 ----
+let pollTimer = null
+function startPolling() {
+  if (pollTimer) return
+  pollTimer = setInterval(refreshPending, 2000)
+}
+function stopPolling() {
+  if (pollTimer) {
+    clearInterval(pollTimer)
+    pollTimer = null
+  }
+}
+async function refreshPending() {
+  try {
+    const res = await listPendingUploads()
+    serverItems.value = res.data.items || []
+  } catch (e) {
+    /* 静默：下个周期重试 */
+  }
+  const active = serverItems.value.some((i) => i.status === 'pending' || i.status === 'parsing')
+  if (!active && uploadingItems.value.length === 0 && !batchUploading.value) stopPolling()
 }
 
-async function handlePolish() {
-  if (!ocrText.value || isPolishing.value) return
+// ---- 文件操作：预览 / 重试 / 删除 ----
+const previewImageSrc = ref('')
+
+function canPreview(item) {
+  if (item.status === 'uploading' || item.status === 'error') return false
+  if (item.source_type === 'image') return true
+  // 文档：PDF 随时可预览；Word 需解析阶段生成 PDF 预览后
+  return item.source_type === 'pdf' || !!item.pdf_preview_path
+}
+
+function previewOriginal(item) {
+  if (item.source_type === 'image') {
+    previewImageSrc.value = buildImageUrl(item.file_path)
+    return
+  }
+  const pdfName = item.pdf_preview_path
+    ? baseName(item.pdf_preview_path)
+    : item.source_type === 'pdf' ? baseName(item.file_path) : ''
+  if (!pdfName) {
+    showStatus('原始文档预览生成中，请稍候…', 'info')
+    return
+  }
+  window.open(`/doc-preview?pdf=${encodeURIComponent(pdfName)}`, '_blank')
+}
+
+function pdfPreviewName(item) {
+  return item?.pdf_preview_path ? baseName(item.pdf_preview_path) : ''
+}
+function pdfPreviewUrl(item) {
+  return `/doc-preview?pdf=${encodeURIComponent(pdfPreviewName(item))}`
+}
+function pageLink(item, pageNumber) {
+  return `${buildImageUrl(item.pdf_preview_path)}#page=${pageNumber}`
+}
+
+async function retryParse(item) {
+  try {
+    await retryPendingParse(item.id)
+    showStatus(`《${item.filename}》已重新提交解析`, 'info')
+    startPolling()
+    refreshPending()
+  } catch (e) {
+    showStatus('重试失败：' + (e.response?.data?.detail || e.message), 'error')
+  }
+}
+
+async function removeFile(item) {
+  if (!item.id) {
+    // 本地上传失败条目，直接移除
+    uploadingItems.value = uploadingItems.value.filter((x) => x.localId !== item.localId)
+    return
+  }
+  if (!confirm(`确定删除《${item.filename}》吗？原始文件将一并删除`)) return
+  try {
+    await deletePendingUpload(item.id)
+    serverItems.value = serverItems.value.filter((x) => x.id !== item.id)
+    if (selectedItemId.value === item.id) clearDetail()
+    showStatus('已删除', 'info')
+  } catch (e) {
+    showStatus('删除失败：' + (e.response?.data?.detail || e.message), 'error')
+  }
+}
+
+// ---- 知识入库模块 ----
+const ingestItems = computed(() =>
+  serverItems.value.filter((i) => i.status === 'done' || i.status === 'error')
+)
+const doneCount = computed(() => serverItems.value.filter((i) => i.status === 'done').length)
+
+const selectedItemId = ref(null)
+const detail = ref(null)
+const ingestTitle = ref('')
+const ingestBusy = ref(false)
+const isPolishing = ref(false)
+const polishingPages = ref(new Set())
+
+function goIngest(item) {
+  // 「去入库」：切换到知识入库 Tab 并选中该项
+  switchToIngest()
+  selectItem(item)
+  setTimeout(() => {
+    document.querySelector('.review-panel')?.scrollIntoView({ behavior: 'smooth' })
+  }, 50)
+}
+
+async function selectItem(item) {
+  selectedItemId.value = item.id
+  ingestTitle.value = ''
+  detail.value = null
+  if (item.status === 'error') {
+    detail.value = { ...item }
+    return
+  }
+  try {
+    const res = await getPendingUpload(item.id)
+    detail.value = res.data.item
+  } catch (e) {
+    showStatus('加载解析结果失败：' + (e.response?.data?.detail || e.message), 'error')
+  }
+}
+
+function clearDetail() {
+  selectedItemId.value = null
+  detail.value = null
+  ingestTitle.value = ''
+}
+
+const detailTextLength = computed(() => {
+  if (!detail.value?.pages?.length) return 0
+  return detail.value.pages.reduce((sum, p) => sum + (p.text || '').length, 0)
+})
+
+// ---- 润色 ----
+async function polishImageText() {
+  if (!detail.value?.parsed_text?.trim()) return
   isPolishing.value = true
   try {
-    const res = await polishOCR(ocrText.value)
+    const res = await polishOCR(detail.value.parsed_text)
     if (res.data.success && res.data.polished_text) {
-      ocrText.value = res.data.polished_text
-      showStatus('润色完成，句子已连接通顺', 'success')
+      detail.value.parsed_text = res.data.polished_text
+      showStatus('润色完成，请检查后入库', 'success')
     } else {
-      showStatus(res.data.message || '润色失败', 'warning')
+      showStatus(res.data.message || '润色失败', 'error')
     }
-  } catch (err) {
-    const msg = err.response?.data?.detail || '润色请求失败'
-    showStatus(msg, 'error')
+  } catch (e) {
+    showStatus('润色失败：' + (e.message || '网络异常'), 'error')
   } finally {
     isPolishing.value = false
   }
 }
 
-// ====== 批量上传 ======
-
-function triggerBatchInput() {
-  if (!isBatchRunning.value) {
-    batchInputRef.value?.click()
-  }
-}
-
-function triggerBatchCamera() {
-  if (!isBatchRunning.value) {
-    batchCameraInputRef.value?.click()
-  }
-}
-
-// 拍照结果追加到待识别列表（不清空已选文件），拍完重置 input 以便连续拍摄
-function handleBatchCameraSelect(e) {
-  const files = Array.from(e.target.files || [])
-  for (const f of files) {
-    if (!f.type.startsWith('image/')) continue
-    batchFiles.value.push({
-      file: f,
-      status: 'pending',
-      chunk_count: 0,
-      error: '',
-      ocrText: '',
-    })
-  }
-  e.target.value = ''
-}
-
-async function handleBatchSelect(e) {
-  const rawFiles = Array.from(e.target.files || [])
-  batchFiles.value = rawFiles.map((f) => ({
-    file: f,
-    status: 'pending',
-    chunk_count: 0,
-    error: '',
-    ocrText: '',
-  }))
-  batchDoneCount.value = 0
-  selectedBatchIndex.value = null
-  ocrText.value = ''
-  statusMessage.value = ''
-  isBatchCompressing.value = true
-  await compressBatchFiles()
-  isBatchCompressing.value = false
-}
-
-async function compressBatchFiles() {
-  if (batchFiles.value.length === 0) return
-  for (const bf of batchFiles.value) {
-    if (bf.file.size > MAX_UPLOAD_SIZE) {
-      try {
-        bf.file = await compressImageFile(bf.file, MAX_UPLOAD_SIZE)
-      } catch (err) {
-        console.error('批量压缩失败:', err)
-        bf.error = '压缩失败'
-        bf.status = 'error'
-      }
-    }
-  }
-}
-
-function clearBatch() {
-  batchFiles.value = []
-  batchDoneCount.value = 0
-  isBatchRunning.value = false
-  selectedBatchIndex.value = null
-  ocrText.value = ''
-  statusMessage.value = ''
-}
-
-// 裁剪/压缩后的图片写回批量条目（图片已变化，需重新识别）
-function applyBatchProcessedFile(file, message) {
-  const idx = cropTarget.value?.index
-  const bf = idx != null ? batchFiles.value[idx] : null
-  if (!bf) return
-  bf.file = file
-  bf.status = 'pending'
-  bf.ocrText = ''
-  bf.error = ''
-  bf.chunk_count = 0
-  if (selectedBatchIndex.value === idx) {
-    selectedBatchIndex.value = null
-    ocrText.value = ''
-  }
-  showStatus(message, 'success')
-}
-
-// 复用单张模式的裁剪弹窗，编辑指定批量条目
-function openBatchCrop(idx) {
-  const bf = batchFiles.value[idx]
-  if (!bf || isBatchRunning.value) return
-  fileBeforeCrop.value = bf.file
-  cropImageUrl.value = ''
-  cropTarget.value = { type: 'batch', index: idx }
-  cropModalVisible.value = true
-  const reader = new FileReader()
-  reader.onload = (e) => {
-    cropImageUrl.value = e.target.result
-    nextTick(() => initCropper())
-  }
-  reader.readAsDataURL(bf.file)
-}
-
-// 批量识别：仅调用预览 OCR，不入库；结果留在列表供查看/编辑
-async function startBatchRecognize() {
-  if (batchFiles.value.length === 0 || isBatchRunning.value) return
-
-  isBatchRunning.value = true
-  statusMessage.value = ''
-  batchDoneCount.value = batchFiles.value.filter(
-    (bf) => bf.status === 'recognized' || bf.status === 'uploaded'
-  ).length
-
+async function polishPage(page) {
+  if (!page.text?.trim()) return
+  polishingPages.value.add(page.page_number)
   try {
-    for (let i = 0; i < batchFiles.value.length; i++) {
-      const bf = batchFiles.value[i]
-      if (bf.status !== 'pending' && bf.status !== 'error') continue
-      bf.status = 'recognizing'
-      bf.error = ''
-      try {
-        const res = await previewOCR(bf.file, selectedOCR.value)
-        const text = res.data.ocr_text || ''
-        if (text) {
-          bf.ocrText = text
-          bf.status = 'recognized'
-        } else {
-          bf.status = 'error'
-          bf.error = '未识别到文字'
-        }
-      } catch (err) {
-        bf.status = 'error'
-        bf.error = err.response?.data?.detail || err.message || '识别失败'
-      }
-      batchDoneCount.value = batchFiles.value.filter(
-        (b) => b.status !== 'pending' && b.status !== 'recognizing'
-      ).length
-    }
-
-    const okCount = batchFiles.value.filter(
-      (bf) => bf.status === 'recognized' || bf.status === 'uploaded'
-    ).length
-    const errCount = batchFiles.value.filter((bf) => bf.status === 'error').length
-    if (errCount > 0) {
-      showStatus(`批量识别完成：${okCount} 成功，${errCount} 失败，点击列表项查看结果`, 'warning')
+    const res = await polishOCR(page.text)
+    if (res.data.success && res.data.polished_text) {
+      page.text = res.data.polished_text
+      showStatus(`第 ${page.page_number} 页润色完成`, 'success')
     } else {
-      showStatus(`全部 ${okCount} 个文件识别完成！点击列表项在右侧编辑结果，确认后上传`, 'success')
+      showStatus(res.data.message || '润色失败', 'error')
     }
-    // 自动选中第一个已识别条目，便于立即在右侧查看/编辑
-    const firstIdx = batchFiles.value.findIndex((bf) => bf.status === 'recognized')
-    if (firstIdx >= 0) {
-      selectedBatchIndex.value = firstIdx
-      ocrText.value = batchFiles.value[firstIdx].ocrText || ''
-      rightTab.value = 'result'
-    }
+  } catch (e) {
+    showStatus('润色失败：' + (e.message || '网络异常'), 'error')
   } finally {
-    isBatchRunning.value = false
+    polishingPages.value.delete(page.page_number)
   }
 }
 
-// 点击批量列表项：在右侧查看/编辑该条目的识别结果
-function selectBatchItem(idx) {
-  const bf = batchFiles.value[idx]
-  if (!bf || isBatchRunning.value) return
-  if (bf.status === 'recognized' || bf.status === 'uploaded') {
-    selectedBatchIndex.value = idx
-    ocrText.value = bf.ocrText || ''
-    rightTab.value = 'result'
-  } else if (bf.status === 'error') {
-    showStatus('该图片识别失败：' + (bf.error || '未知错误'), 'warning')
+// ---- 入库 ----
+// 入库实时进度：{ total, done, fail, currentName, finished }
+const ingestProgress = ref(null)
+const ingestProgressPercent = computed(() => {
+  const p = ingestProgress.value
+  if (!p || !p.total) return 0
+  return Math.round(((p.done + p.fail) / p.total) * 100)
+})
+
+async function ingestCurrent() {
+  const d = detail.value
+  const payload = {
+    kb_id: selectedKbId.value,
+    title: ingestTitle.value.trim(),
   }
+  if (d.source_type === 'image') {
+    payload.parsed_text = d.parsed_text
+  } else {
+    payload.pages = d.pages.map((p) => ({ page_number: p.page_number, text: p.text }))
+  }
+  const res = await ingestPendingUpload(d.id, payload)
+  return res.data
 }
 
-// 单条上传入库（携带右侧编辑后的文本，跳过重复 OCR）
-async function uploadBatchItem(idx) {
-  const bf = batchFiles.value[idx]
-  if (!bf || bf.status !== 'recognized' || !bf.ocrText) return
-  bf.status = 'uploading'
+async function ingestSelected() {
+  if (!detail.value || ingestBusy.value) return
+  ingestBusy.value = true
+  ingestProgress.value = {
+    total: 1,
+    done: 0,
+    fail: 0,
+    currentName: detail.value.filename,
+    finished: false,
+  }
   try {
-    const res = await uploadImage(bf.file, selectedOCR.value, visibility.value, selectedKbId.value, bf.ocrText, saveTitle.value)
-    if (res.data.success) {
-      bf.status = 'uploaded'
-      bf.chunk_count = res.data.chunk_count || 0
-      showStatus(`「${bf.file.name}」已保存到知识库（${bf.chunk_count} 段）`, 'success')
-      if (rightTab.value === 'history') {
-        loadRecords()
+    const data = await ingestCurrent()
+    serverItems.value = serverItems.value.filter((x) => x.id !== detail.value.id)
+    const title = data.title || detail.value.filename
+    ingestProgress.value.done = 1
+    ingestProgress.value.currentName = title
+    showStatus(
+      `《${title}》已入库：${data.chunk_count} 个知识片段，后台正在编译 llm-wiki 百科卡片`,
+      'success'
+    )
+    clearDetail()
+  } catch (e) {
+    ingestProgress.value.fail = 1
+    showStatus('入库失败：' + (e.response?.data?.detail || e.message), 'error')
+  } finally {
+    ingestProgress.value.finished = true
+    ingestBusy.value = false
+  }
+}
+
+async function ingestAll() {
+  const targets = serverItems.value.filter((i) => i.status === 'done')
+  if (!targets.length || ingestBusy.value) return
+  if (!confirm(`将 ${targets.length} 个文件依次入库到当前选中的知识库，继续吗？`)) return
+  ingestBusy.value = true
+  ingestProgress.value = {
+    total: targets.length,
+    done: 0,
+    fail: 0,
+    currentName: targets[0].filename,
+    finished: false,
+  }
+  let ok = 0
+  let fail = 0
+  try {
+    // 当前选中且有编辑内容的条目走编辑入库，其余用服务端已存文本
+    if (detail.value && detail.value.status === 'done' && targets.some((t) => t.id === detail.value.id)) {
+      ingestProgress.value.currentName = detail.value.filename
+      try {
+        await ingestCurrent()
+        serverItems.value = serverItems.value.filter((x) => x.id !== detail.value.id)
+        ok++
+        ingestProgress.value.done = ok
+      } catch (e) {
+        fail++
+        ingestProgress.value.fail = fail
       }
-    } else {
-      bf.status = 'recognized'
-      showStatus('未识别到文字内容', 'warning')
+      clearDetail()
     }
-  } catch (err) {
-    bf.status = 'recognized'
-    showStatus('上传失败: ' + (err.response?.data?.detail || err.message), 'error')
-  }
-}
-
-// 一键上传全部已识别条目
-async function uploadAllRecognized() {
-  const idxList = batchFiles.value
-    .map((bf, i) => (bf.status === 'recognized' ? i : -1))
-    .filter((i) => i >= 0)
-  if (idxList.length === 0) return
-  isBatchRunning.value = true
-  try {
-    for (const i of idxList) {
-      await uploadBatchItem(i)
+    for (const item of targets) {
+      if (detail.value && item.id === detail.value.id) continue
+      if (!serverItems.value.some((x) => x.id === item.id)) continue
+      ingestProgress.value.currentName = item.filename
+      try {
+        await ingestPendingUpload(item.id, { kb_id: selectedKbId.value })
+        serverItems.value = serverItems.value.filter((x) => x.id !== item.id)
+        ok++
+        ingestProgress.value.done = ok
+      } catch (e) {
+        fail++
+        ingestProgress.value.fail = fail
+      }
     }
-    const uploaded = batchFiles.value.filter((bf) => bf.status === 'uploaded').length
-    showStatus(`批量上传完成：${uploaded}/${batchFiles.value.length} 条已入库`, 'success')
+    showStatus(
+      fail === 0
+        ? `全部入库完成：${ok} 个文件已写入知识库，后台正在编译百科卡片`
+        : `入库完成：成功 ${ok} 个，失败 ${fail} 个`,
+      fail === 0 ? 'success' : 'error'
+    )
   } finally {
-    isBatchRunning.value = false
+    ingestProgress.value.finished = true
+    ingestBusy.value = false
   }
 }
 
-// ====== 文档上传 ======
+// ---- 目标知识库 ----
+const kbList = ref([])
+const kbIsAdmin = ref(false)
+const selectedKbId = ref('')
+const kbVisibilityFilter = ref('public')
+const filteredKbList = computed(() =>
+  kbList.value.filter((kb) => kb.visibility === kbVisibilityFilter.value)
+)
 
-function triggerDocInput() {
-  docInputRef.value?.click()
-}
-
-function handleDocSelect(e) {
-  const files = e.target.files
-  if (files && files.length > 0) {
-    setDocFile(files[0])
+async function loadKnowledgeBases() {
+  try {
+    const res = await listKnowledgeBases()
+    kbList.value = res.data.bases || []
+    kbIsAdmin.value = !!res.data.is_admin
+    if (!selectedKbId.value && kbList.value.length > 0) {
+      selectedKbId.value = kbList.value[0].id
+    }
+    const selected = kbList.value.find((k) => k.id === selectedKbId.value)
+    if (selected) kbVisibilityFilter.value = selected.visibility
+  } catch (e) {
+    console.error('加载知识库列表失败:', e)
   }
 }
 
-function handleDocDrop(e) {
-  isDocDragOver.value = false
-  const files = e.dataTransfer.files
-  if (files && files.length > 0) {
-    setDocFile(files[0])
+function onKbFilterChange() {
+  if (!filteredKbList.value.some((kb) => kb.id === selectedKbId.value)) {
+    selectedKbId.value = filteredKbList.value[0]?.id || ''
   }
 }
 
-function setDocFile(file) {
-  const expectedExt = uploadMode.value === 'word' ? '.docx' : '.pdf'
-  const expectedType = uploadMode.value === 'word'
-    ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-    : 'application/pdf'
-  const extOk = file.name.toLowerCase().endsWith(expectedExt)
-  const typeOk = file.type === expectedType
-  if (!extOk && !typeOk) {
-    showStatus(`请上传 ${expectedExt} 文件`, 'error')
+const showCreateKbModal = ref(false)
+const creatingKb = ref(false)
+const newKb = reactive({ name: '', topic: '其他', visibility: 'private' })
+
+function openCreateKbModal() {
+  newKb.name = ''
+  newKb.visibility = kbIsAdmin.value ? 'public' : 'private'
+  showCreateKbModal.value = true
+}
+
+async function submitCreateKb() {
+  if (!newKb.name.trim()) {
+    showStatus('请输入知识库名称', 'error')
     return
   }
-  docFile.value = file
-  autoFillTitle(file)
-  ocrText.value = ''
-  statusMessage.value = ''
-}
-
-function clearDocFile() {
-  docFile.value = null
-  ocrText.value = ''
-  statusMessage.value = ''
-  saveTitle.value = ''
-  docPreviewInfo.value = null
-  docPages.value = []
-  selectedPages.value = new Set()
-  savedPageNumbers.value = new Set()
-  polishingPageNumbers.value = new Set()
-}
-
-async function previewDocHandler(docType) {
-  if (!docFile.value) return
-  isDocPreviewing.value = true
-  statusMessage.value = ''
+  creatingKb.value = true
   try {
-    const res = await previewDocument(docFile.value, docType)
-    const data = res.data
-    docPreviewInfo.value = {
-      filename: data.filename,
-      file_path: data.file_path,
-      doc_type: data.doc_type,
-      total_pages: data.total_pages,
-      pdf_preview_path: data.pdf_preview_path,
-    }
-    docPages.value = (data.pages || []).map((p) => ({ ...p, _dirty: false }))
-    selectedPages.value = new Set()
-    savedPageNumbers.value = new Set()
-    if (!docPages.value.length) {
-      showStatus('未提取到文字内容', 'warning')
-    } else {
-      rightTab.value = 'result'
-      showStatus(`已解析 ${data.total_pages} 页，请选择要保存的页面`, 'success')
-    }
-  } catch (err) {
-    const msg = err.response?.data?.detail || '文档解析失败'
-    showStatus(msg, 'error')
+    const res = await createKnowledgeBase({ ...newKb, name: newKb.name.trim() })
+    showCreateKbModal.value = false
+    await loadKnowledgeBases()
+    selectedKbId.value = res.data.kb.id
+    kbVisibilityFilter.value = res.data.kb.visibility || 'private'
+  } catch (e) {
+    showStatus('创建知识库失败：' + (e.response?.data?.detail || e.message), 'error')
   } finally {
-    isDocPreviewing.value = false
+    creatingKb.value = false
   }
 }
 
-async function saveSelectedDocPages() {
-  if (!docPreviewInfo.value || selectedPages.value.size === 0) return
-  isDocUploading.value = true
-  statusMessage.value = ''
-  const pagesToSave = docPages.value
-    .filter((p) => selectedPages.value.has(p.page_number))
-    .map((p) => ({ page_number: p.page_number, text: p.text }))
-
-  docSaveProgress.value = { saved: 0, total: pagesToSave.length }
-  const errors = []
-  let doneInfo = null
-
-  try {
-    // SSE 流式保存：每保存完一页立即回传，界面实时更新进度
-    await saveDocumentPagesStream(
-      {
-        file_path: docPreviewInfo.value.file_path,
-        doc_type: docPreviewInfo.value.doc_type,
-        visibility: visibility.value,
-        kb_id: selectedKbId.value,
-        title: saveTitle.value,
-        pages: pagesToSave,
-      },
-      (ev) => {
-        if (ev.event === 'page_saved') {
-          // 实时标记该页已保存，顶部计数与每页标签同步更新
-          savedPageNumbers.value.add(ev.page_number)
-          docSaveProgress.value = { saved: ev.saved, total: ev.total }
-        } else if (ev.event === 'page_error') {
-          errors.push(`第 ${ev.page_number || '?'} 页: ${ev.error}`)
-        } else if (ev.event === 'save_done') {
-          doneInfo = ev
-        }
-      }
-    )
-
-    if (doneInfo && doneInfo.success) {
-      selectedPages.value = new Set()
-      if (errors.length) {
-        showStatus(`已保存 ${doneInfo.chunk_count} 段；${errors.length} 页失败（${errors[0]}）`, 'warning')
-      } else {
-        showStatus(`已保存 ${doneInfo.chunk_count} 段文本到知识库`, 'success')
-      }
-      loadRecords()
-      // 全部页都已保存后清除文件
-      if (savedPageNumbers.value.size === docPages.value.length) {
-        docFile.value = null
-      }
-    } else if (errors.length) {
-      showStatus(`保存失败：${errors[0]}`, 'error')
-    } else {
-      showStatus('未保存到知识库', 'warning')
-    }
-  } catch (err) {
-    const msg = err.response?.data?.detail || err.message || '保存失败'
-    showStatus(msg, 'error')
-  } finally {
-    isDocUploading.value = false
-  }
-}
-
-async function polishPageHandler(page) {
-  if (!page.text.trim()) return
-  polishingPageNumbers.value.add(page.page_number)
-  try {
-    const res = await polishOCR({ ocr_text: page.text })
-    page.text = res.data.polished_text || page.text
-    page._dirty = true
-  } catch (err) {
-    const msg = err.response?.data?.detail || '润色失败'
-    showStatus(msg, 'error')
-  } finally {
-    polishingPageNumbers.value.delete(page.page_number)
-  }
-}
-
-function togglePageSelected(pageNumber) {
-  const next = new Set(selectedPages.value)
-  if (next.has(pageNumber)) {
-    next.delete(pageNumber)
-  } else {
-    next.add(pageNumber)
-  }
-  selectedPages.value = next
-}
-
-function selectAllPages() {
-  selectedPages.value = new Set(
-    docPages.value
-      .filter((p) => !savedPageNumbers.value.has(p.page_number))
-      .map((p) => p.page_number)
-  )
-}
-
-function clearPageSelection() {
-  selectedPages.value = new Set()
-}
-
-function getDocumentPageLink(page) {
-  if (!docPreviewInfo.value || !docPreviewInfo.value.pdf_preview_path) return null
-  const filename = docPreviewInfo.value.pdf_preview_path.split('/').pop()
-  // 带 token 访问受保护文件，#page= 定位到对应页
-  return `${buildImageUrl(filename)}#page=${page.page_number}`
-}
-
-// ====== 上传历史 ======
-
-async function loadRecords() {
-  isLoadingRecords.value = true
-  try {
-    const res = await getUploadRecords(RECORDS_PAGE_SIZE, 0)
-    records.value = res.data.records || []
-    recordTotal.value = res.data.total || 0
-    recordsOffset.value = records.value.length
-  } catch (err) {
-    console.error('加载上传记录失败:', err)
-  } finally {
-    isLoadingRecords.value = false
-  }
-}
-
-async function loadMoreRecords() {
-  isLoadingRecords.value = true
-  try {
-    const res = await getUploadRecords(RECORDS_PAGE_SIZE, recordsOffset.value)
-    const newRecords = res.data.records || []
-    records.value = records.value.concat(newRecords)
-    recordsOffset.value = records.value.length
-  } catch (err) {
-    console.error('加载更多记录失败:', err)
-  } finally {
-    isLoadingRecords.value = false
-  }
-}
-
-function toggleRecordExpand(recordId) {
-  expandedRecordId.value = expandedRecordId.value === recordId ? null : recordId
-  // 如果收起，同时取消编辑状态
-  if (expandedRecordId.value !== recordId) {
-    editingRecordId.value = null
-    editOcrText.value = ''
-  }
-}
-
-function startEdit(rec) {
-  editingRecordId.value = rec.id
-  editOcrText.value = rec.ocr_text
-}
-
-function cancelEdit(recordId) {
-  editingRecordId.value = null
-  editOcrText.value = ''
-}
-
-async function saveEdit(recordId) {
-  try {
-    await updateUploadRecord(recordId, editOcrText.value)
-    // 更新本地记录
-    const rec = records.value.find((r) => r.id === recordId)
-    if (rec) {
-      rec.ocr_text = editOcrText.value
-    }
-    editingRecordId.value = null
-    showStatus('OCR 文本已更新', 'success')
-  } catch (err) {
-    const msg = err.response?.data?.detail || '保存失败'
-    showStatus(msg, 'error')
-  }
-}
-
-async function handleDeleteRecord(recordId) {
-  try {
-    await deleteUploadRecord(recordId)
-    records.value = records.value.filter((r) => r.id !== recordId)
-    if (recordTotal.value > 0) recordTotal.value--
-    if (expandedRecordId.value === recordId) {
-      expandedRecordId.value = null
-    }
-    showStatus('记录已删除', 'success')
-  } catch (err) {
-    const msg = err.response?.data?.detail || '删除失败'
-    showStatus(msg, 'error')
-  }
-}
-
-// ====== 工具函数 ======
-
-function showStatus(msg, type) {
-  statusMessage.value = msg
-  statusType.value = type
-}
-
-function formatSize(bytes) {
-  if (bytes < 1024) return bytes + 'B'
-  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + 'KB'
-  return (bytes / (1024 * 1024)).toFixed(1) + 'MB'
-}
-
-function formatDate(isoStr) {
-  if (!isoStr) return ''
-  const d = new Date(isoStr)
-  const pad = (n) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
-}
-
-function sourceTypeLabel(type) {
-  const map = {
-    image: '图片',
-    word: 'Word',
-    pdf: 'PDF',
-  }
-  return map[type] || type || '未知'
-}
-
+// ---- 生命周期 ----
 onMounted(() => {
-  // 默认使用阿里云 OCR
-  selectedOCR.value = 'aliyun'
   loadKnowledgeBases()
+  refreshPending()
+  startPolling()
+})
+onUnmounted(() => {
+  stopPolling()
+  if (statusTimer) clearTimeout(statusTimer)
 })
 </script>
 
 <style scoped>
 .upload-view {
-  height: 100vh;
-  overflow-y: auto;
-  padding: 32px 40px;
-  max-width: 1200px;
+  max-width: 1100px;
   margin: 0 auto;
-}
-
-/* ---- 目标知识库选择 ---- */
-.kb-selector-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.kb-select {
-  flex: 1;
-  padding: 9px 12px;
-  border: 1px solid var(--color-border);
-  border-radius: 8px;
-  font-size: 13px;
-  color: var(--color-text);
-  background: white;
-  outline: none;
-  cursor: pointer;
-}
-
-.kb-select:focus {
-  border-color: var(--color-primary);
-}
-
-.btn-new-kb {
-  flex-shrink: 0;
-  padding: 8px 14px;
-  border: 1px dashed var(--color-primary);
-  border-radius: 8px;
-  background: var(--color-primary-light);
-  color: var(--color-primary);
-  font-size: 13px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-
-.btn-new-kb:hover {
-  background: var(--color-primary);
-  color: white;
-  border-style: solid;
-}
-
-/* ---- 保存标题输入 ---- */
-.title-input {
-  width: 100%;
-  padding: 9px 12px;
-  border: 1px solid var(--color-border);
-  border-radius: 8px;
-  font-size: 13px;
-  color: var(--color-text);
-  background: white;
-  outline: none;
-}
-
-.title-input:focus {
-  border-color: var(--color-primary);
-}
-
-/* ---- 新建知识库弹窗 ---- */
-.kb-overlay {
-  position: fixed;
-  top: 0;
-  left: 0;
-  width: 100%;
+  padding: 24px;
+  /* 父容器 .main-content 为 100vh + overflow:hidden，页面需自身承担滚动 */
   height: 100%;
-  background: rgba(0, 0, 0, 0.4);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 1000;
+  overflow-y: auto;
 }
-
-.kb-modal {
-  background: white;
-  border-radius: 14px;
-  width: 440px;
-  max-width: 90vw;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.2);
-  overflow: hidden;
+.page-header { margin-bottom: 18px; }
+.page-title-row {
+  display: flex; align-items: center; gap: 18px; flex-wrap: wrap; margin-bottom: 6px;
 }
-
-.kb-modal-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 16px 20px;
-  border-bottom: 1px solid #ede6dc;
-}
-
-.kb-modal-header h3 {
-  font-size: 16px;
-  font-weight: 600;
-  color: var(--color-text);
-  margin: 0;
-}
-
-.kb-modal-close {
-  border: none;
-  background: transparent;
-  font-size: 22px;
-  line-height: 1;
-  color: var(--color-text-secondary);
-  cursor: pointer;
-}
-
-.kb-modal-body {
-  padding: 18px 20px;
-}
-
-.kb-form-group {
-  margin-bottom: 14px;
-}
-
-.kb-form-label {
-  display: block;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--color-text-secondary);
-  margin-bottom: 6px;
-}
-
-.kb-input {
-  width: 100%;
-  padding: 9px 12px;
-  border: 1px solid #ede6dc;
-  border-radius: 8px;
-  font-size: 13px;
-  outline: none;
-  box-sizing: border-box;
-  background: white;
-  color: var(--color-text);
-}
-
-.kb-input:focus {
-  border-color: var(--color-primary);
-}
-
-.kb-vis-options {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.kb-vis-option {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-  color: var(--color-text);
-  cursor: pointer;
-}
-
-.kb-vis-option.disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.kb-vis-hint {
-  font-size: 11px;
-  color: var(--color-text-secondary);
-}
-
-.kb-modal-footer {
-  display: flex;
-  justify-content: flex-end;
-  gap: 10px;
-  padding: 14px 20px;
-  border-top: 1px solid #ede6dc;
-}
-
-.page-header {
-  margin-bottom: 24px;
-}
-
 .page-title {
-  font-size: 24px;
-  font-weight: 700;
-  color: var(--color-text);
-  margin-bottom: 6px;
+  font-size: 22px; font-weight: 700; color: #2d2a24;
 }
+.page-desc { font-size: 13px; color: #8a7e72; line-height: 1.6; }
 
-.page-desc {
-  font-size: 14px;
-  color: var(--color-text-secondary);
+/* ---------- 顶部模块切换 Tab ---------- */
+.module-tabs { display: flex; gap: 12px; }
+.module-tab {
+  position: relative; padding: 8px 22px; border-radius: 10px; font-size: 14.5px; font-weight: 600;
+  border: 2px solid #e0d5c5; background: #fff; color: #8a7e72; cursor: pointer;
+  transition: all 0.15s;
 }
-
-/* 模式切换 */
-.mode-tabs {
-  display: flex;
-  gap: 0;
-  margin-bottom: 24px;
-  border: 1px solid var(--color-border);
-  border-radius: 10px;
-  overflow: hidden;
-  width: fit-content;
-}
-
-.mode-tab {
-  padding: 8px 20px;
-  font-size: 13px;
-  font-weight: 500;
-  border: none;
-  background: white;
-  color: var(--color-text-secondary);
-  cursor: pointer;
-  transition: all 0.2s;
-}
-
-.mode-tab:not(:last-child) {
-  border-right: 1px solid var(--color-border);
-}
-
-.mode-tab.active {
-  background: var(--color-primary);
-  color: white;
-}
-
-.mode-tab:hover:not(.active) {
-  background: #f3efe9;
-}
-
-/* 布局 */
-.upload-layout {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 32px;
-}
-
-/* 左面板 */
-.upload-panel {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-
-.ocr-selector {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.ocr-label {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--color-text);
-}
-
-.ocr-options {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.ocr-option {
-  padding: 6px 14px;
-  border-radius: 8px;
-  border: 1px solid var(--color-border);
-  background: white;
-  font-size: 13px;
-  color: var(--color-text-secondary);
-  cursor: pointer;
-  transition: all 0.2s;
-}
-
-.ocr-option:hover {
-  border-color: var(--color-primary);
-}
-
-.ocr-option.selected {
-  background: var(--color-primary-light);
-  border-color: var(--color-primary);
-  color: var(--color-primary);
-  font-weight: 500;
-}
-
-/* 可见性选项 */
-.visibility-options {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 10px;
-}
-
-.visibility-option {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  padding: 12px 14px;
-  border: 1px solid var(--color-border);
-  border-radius: 10px;
-  background: white;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-
-.visibility-option:hover {
-  border-color: var(--color-primary);
-  background: var(--color-primary-light);
-}
-
-.visibility-option.selected {
-  border-color: var(--color-primary);
-  background: var(--color-primary-light);
-}
-
-.visibility-radio {
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  border: 2px solid var(--color-border);
-  flex-shrink: 0;
-  margin-top: 2px;
-  position: relative;
-  transition: all 0.2s;
-}
-
-.visibility-option.selected .visibility-radio {
-  border-color: var(--color-primary);
-}
-
-.visibility-option.selected .visibility-radio::after {
-  content: '';
-  position: absolute;
-  top: 3px;
-  left: 3px;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--color-primary);
-}
-
-.visibility-info {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.visibility-label {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--color-text);
-}
-
-.visibility-desc {
-  font-size: 11px;
-  color: var(--color-text-secondary);
-}
-
-/* 上传区域 */
-.upload-zone {
-  background: white;
-  border: 2px dashed var(--color-border);
-  border-radius: 16px;
-  padding: 48px 24px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 12px;
-  cursor: pointer;
-  min-height: 200px;
-  transition: all 0.2s;
-}
-
-.upload-zone:hover {
-  border-color: var(--color-primary);
-  background: var(--color-primary-light);
-}
-
-.upload-zone.drag-over {
-  border-color: var(--color-primary);
-  background: var(--color-primary-light);
-}
-
-.upload-zone.has-file {
-  border-style: solid;
-  padding: 16px;
-}
-
-.upload-icon {
-  color: var(--color-primary);
-  opacity: 0.6;
-}
-
-.upload-text {
-  font-size: 15px;
-  font-weight: 500;
-  color: var(--color-text);
-}
-
-.upload-hint {
-  font-size: 13px;
-  color: var(--color-text-secondary);
-}
-
-.file-input-hidden {
-  display: none;
-}
-
-/* 移动端快捷入口：拍照上传 / 相册选择 */
-.upload-actions {
-  display: flex;
-  gap: 12px;
-  margin-top: 14px;
-}
-
-.btn-upload-action {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 18px;
-  font-size: 14px;
-  font-weight: 500;
-  color: var(--color-primary);
-  background: transparent;
-  border: 1px solid var(--color-primary);
-  border-radius: 8px;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-
-.btn-upload-action:hover {
-  background: var(--color-primary);
-  color: white;
-}
-
-.btn-upload-action:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-/* 文件预览 */
-.file-preview {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 12px;
-  width: 100%;
-}
-
-.preview-image {
-  max-height: 200px;
-  max-width: 100%;
-  border-radius: 8px;
-  object-fit: contain;
-}
-
-.file-info {
-  display: flex;
-  gap: 12px;
-  align-items: center;
-}
-
-.file-name {
-  font-size: 14px;
-  font-weight: 500;
-  color: var(--color-text);
-}
-
-.file-size {
-  font-size: 12px;
-  color: var(--color-text-secondary);
-}
-
-/* 操作按钮 */
-.action-buttons {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.btn {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 10px 20px;
-  border-radius: 10px;
-  font-size: 14px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: all 0.2s;
-  border: 1px solid transparent;
-}
-
-.btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.btn-sm {
-  padding: 6px 14px;
-  font-size: 13px;
-  border-radius: 8px;
-}
-
-.btn-primary {
-  background: var(--color-primary);
-  color: white;
-  border-color: var(--color-primary);
-}
-
-.btn-primary:hover:not(:disabled) {
-  background: #c56d23;
-}
-
-.btn-secondary {
-  background: white;
-  color: var(--color-text);
-  border-color: var(--color-border);
-}
-
-.btn-secondary:hover:not(:disabled) {
-  background: #f3efe9;
-}
-
-.btn-success {
-  background: #4caf50;
-  color: white;
-  border-color: #4caf50;
-}
-
-.btn-success:hover:not(:disabled) {
-  background: #43a047;
-}
-
-.btn-outline {
-  background: white;
-  color: var(--color-text-secondary);
-  border-color: var(--color-border);
-}
-
-.btn-outline:hover:not(:disabled) {
-  border-color: var(--color-primary);
-  color: var(--color-primary);
-}
-
-.btn-outline-danger {
-  background: white;
-  color: #c62828;
-  border-color: #ffcdd2;
-}
-
-.btn-outline-danger:hover:not(:disabled) {
-  background: #fce4ec;
-  border-color: #c62828;
-}
-
-/* 旋转动画 */
-.spinner-sm {
-  width: 14px;
-  height: 14px;
-  border: 2px solid rgba(255,255,255,0.3);
-  border-top-color: white;
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
-}
-
-.spinner-xs {
-  display: inline-block;
-  width: 10px;
-  height: 10px;
-  border: 2px solid rgba(0,0,0,0.1);
-  border-top-color: var(--color-primary);
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
-  vertical-align: middle;
-}
-
-.spinner {
-  width: 32px;
-  height: 32px;
-  border: 3px solid var(--color-border);
-  border-top-color: var(--color-primary);
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
-}
-
-@keyframes spin {
-  to { transform: rotate(360deg); }
-}
-
-/* 状态消息 */
-.status-message {
-  padding: 12px 16px;
-  border-radius: 10px;
-  font-size: 14px;
-}
-
-.status-message.success {
-  background: #e8f5e9;
-  color: #2e7d32;
-}
-
-.status-message.error {
-  background: #fce4ec;
-  color: #c62828;
-}
-
-.status-message.warning {
-  background: #fff3e0;
-  color: #ef6c00;
-}
-
-.status-message.info {
-  background: #e3f2fd;
-  color: #1565c0;
-}
-
-/* ===== 批量上传 ===== */
-.batch-file-summary {
-  text-align: center;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.batch-count {
-  font-size: 15px;
-  font-weight: 600;
-  color: var(--color-primary);
-}
-
-.batch-size {
-  font-size: 12px;
-  color: var(--color-text-secondary);
-}
-
-.batch-file-list {
-  max-height: 300px;
-  overflow-y: auto;
-  border: 1px solid var(--color-border);
-  border-radius: 12px;
-  background: white;
-}
-
-.batch-file-item {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 14px;
-  font-size: 13px;
-  border-bottom: 1px solid var(--color-border);
-  transition: background 0.15s;
-  cursor: pointer;
-}
-
-.batch-file-item:last-child {
-  border-bottom: none;
-}
-
-.batch-file-item.done,
-.batch-file-item.recognized,
-.batch-file-item.uploaded {
-  background: #f1f8e9;
-}
-
-.batch-file-item.error {
-  background: #fce4ec;
+.module-tab:hover { border-color: #c98a4b; color: #c98a4b; }
+.module-tab.active {
+  border-color: #c98a4b; background: #f9eddb; color: #84431f;
 }
-
-.batch-file-item.processing,
-.batch-file-item.recognizing,
-.batch-file-item.uploading {
-  background: #fff8e1;
-}
-
-.batch-file-item.selected {
-  background: #fff3e0;
-  box-shadow: inset 3px 0 0 var(--color-primary);
-}
-
-.bf-index {
-  width: 22px;
-  height: 22px;
-  border-radius: 50%;
-  background: #f3efe9;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--color-text-secondary);
-  flex-shrink: 0;
-}
-
-.bf-name {
-  flex: 1;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  font-weight: 500;
-  color: var(--color-text);
-}
-
-.bf-size {
-  color: var(--color-text-secondary);
-  font-size: 12px;
-  flex-shrink: 0;
-}
-
-.bf-status {
-  width: 84px;
-  text-align: center;
-  flex-shrink: 0;
-  font-size: 12px;
-}
-
-.bf-actions {
-  display: flex;
-  gap: 6px;
-  flex-shrink: 0;
-}
-
-.batch-hint {
-  margin: 8px 2px 0;
-  font-size: 12px;
-  color: var(--color-text-secondary);
-}
-
-.batch-editing-tag {
-  max-width: 220px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 12px;
-  color: var(--color-primary);
-  background: #fff3e0;
-  border-radius: 6px;
-  padding: 2px 8px;
-}
-
-.bf-chunks {
-  color: var(--color-primary);
-  font-size: 12px;
-  flex-shrink: 0;
-}
-
-.bf-error {
-  color: #c62828;
-  font-size: 11px;
-  max-width: 120px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  flex-shrink: 0;
-}
-
-.status-icon {
-  font-weight: 700;
-  font-size: 14px;
-}
-
-.success-icon {
-  color: #4caf50;
-}
-
-.error-icon {
-  color: #c62828;
-}
-
-/* 批量进度条 */
-.batch-progress-bar {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
-.progress-track {
-  flex: 1;
-  height: 8px;
-  background: var(--color-border);
-  border-radius: 4px;
-  overflow: hidden;
-}
-
-.progress-fill {
-  height: 100%;
-  background: var(--color-primary);
-  border-radius: 4px;
-  transition: width 0.3s ease;
-}
-
-.progress-text {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--color-primary);
-  width: 40px;
-  text-align: right;
-}
-
-/* ===== 右侧面板 ===== */
-.right-panel {
-  display: flex;
-  flex-direction: column;
-  background: white;
-  border: 1px solid var(--color-border);
-  border-radius: 16px;
-  overflow: hidden;
-  max-height: calc(100vh - 200px);
-}
-
-.panel-tabs {
-  display: flex;
-  border-bottom: 1px solid var(--color-border);
-  flex-shrink: 0;
-}
-
-.panel-tab {
-  flex: 1;
-  padding: 14px 16px;
-  font-size: 14px;
-  font-weight: 500;
-  border: none;
-  background: white;
-  color: var(--color-text-secondary);
-  cursor: pointer;
-  transition: all 0.2s;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-}
-
-.panel-tab.active {
-  color: var(--color-primary);
-  border-bottom: 2px solid var(--color-primary);
-  background: var(--color-primary-light);
-}
-
-.panel-tab:hover:not(.active) {
-  background: #faf8f5;
-}
-
 .tab-badge {
-  background: var(--color-primary);
-  color: white;
-  font-size: 11px;
-  padding: 1px 6px;
-  border-radius: 8px;
-  font-weight: 600;
+  position: absolute; top: -8px; right: -8px; min-width: 20px; height: 20px;
+  padding: 0 5px; border-radius: 10px; background: #5a8a4a; color: #fff;
+  font-size: 11px; font-weight: 700; display: flex; align-items: center; justify-content: center;
+}
+.tab-panel { display: flex; flex-direction: column; gap: 18px; }
+
+/* ---------- 区块卡片 ---------- */
+.upload-section {
+  background: #fff; border: 1px solid #e8dfd2; border-radius: 14px; padding: 18px;
 }
 
-/* 识别结果 */
-.result-panel {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
+/* ---------- 模块头 ---------- */
+.module-head {
+  display: flex; align-items: flex-start; gap: 10px; margin-bottom: 14px;
+}
+.module-badge {
+  flex-shrink: 0; width: 30px; height: 30px; border-radius: 50%;
+  background: #c98a4b; color: #fff; font-size: 13px; font-weight: 700;
+  display: flex; align-items: center; justify-content: center;
+}
+.module-badge.img { background: #c98a4b; }
+.module-badge.doc { background: #4a6fa5; }
+.module-title { font-size: 16px; font-weight: 700; color: #2d2a24; }
+.module-sub-inline { font-size: 12.5px; font-weight: 400; color: #8a7e72; margin-left: 6px; }
+.module-sub { font-size: 12px; color: #8a7e72; margin-top: 3px; line-height: 1.5; }
+
+/* ---------- OCR 引擎 / 子模式 ---------- */
+.ocr-selector { margin-bottom: 12px; }
+.ocr-label {
+  display: block; font-size: 12.5px; color: #6b6156; margin-bottom: 6px; font-weight: 600;
+}
+.ocr-options { display: flex; gap: 8px; flex-wrap: wrap; }
+.ocr-option {
+  padding: 6px 12px; border-radius: 8px; font-size: 12.5px;
+  border: 1px solid #e0d5c5; background: #fdfbf7; color: #6b6156; cursor: pointer;
+  transition: all 0.15s;
+}
+.ocr-option:hover { border-color: #c98a4b; }
+.ocr-option.selected {
+  background: #f9eddb; border-color: #c98a4b; color: #84431f; font-weight: 600;
+}
+.submode-row { display: flex; gap: 8px; margin-bottom: 12px; }
+.submode-btn {
+  padding: 6px 16px; border-radius: 8px; font-size: 13px; cursor: pointer;
+  border: 1px solid #e0d5c5; background: #fdfbf7; color: #6b6156; transition: all 0.15s;
+}
+.submode-btn:hover { border-color: #c98a4b; }
+.submode-btn.active {
+  background: #c98a4b; border-color: #c98a4b; color: #fff; font-weight: 600;
 }
 
-.result-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 16px 20px;
-  border-bottom: 1px solid var(--color-border);
-  flex-shrink: 0;
+/* ---------- 知识库选择 ---------- */
+.kb-selector-row { display: flex; gap: 8px; flex-wrap: wrap; }
+.kb-select {
+  flex: 1; min-width: 130px; padding: 7px 10px; border-radius: 8px; font-size: 13px;
+  border: 1px solid #e0d5c5; background: #fdfbf7; color: #2d2a24; outline: none;
+}
+.kb-select:focus { border-color: #c98a4b; }
+.kb-filter { flex: 0 0 130px; }
+.btn-new-kb {
+  padding: 7px 12px; border-radius: 8px; font-size: 12.5px; white-space: nowrap;
+  border: 1.5px dashed #d9c9b4; background: #fff; color: #c98a4b; cursor: pointer;
+}
+.btn-new-kb:hover { background: #f9eddb; border-style: solid; }
+.title-input {
+  width: 100%; padding: 8px 12px; border-radius: 8px; font-size: 13px;
+  border: 1px solid #e0d5c5; background: #fdfbf7; color: #2d2a24; outline: none;
+}
+.title-input:focus { border-color: #c98a4b; }
+
+/* ---------- 上传区 ---------- */
+.upload-zone {
+  border: 2px dashed #d9c9b4; border-radius: 12px; background: #fdfbf7;
+  padding: 26px 20px; text-align: center; cursor: pointer; transition: all 0.2s;
+}
+.upload-zone:hover, .upload-zone.drag-over {
+  border-color: #c98a4b; background: #f9eddb;
+}
+.upload-zone.has-file { padding: 16px 20px; }
+.upload-icon { color: #c98a4b; margin-bottom: 10px; }
+.upload-icon.doc { color: #4a6fa5; }
+.upload-text { font-size: 14.5px; font-weight: 600; color: #2d2a24; margin-bottom: 5px; }
+.upload-hint { font-size: 12px; color: #8a7e72; margin-bottom: 12px; }
+.upload-actions { display: flex; gap: 10px; justify-content: center; }
+.btn-upload-action {
+  display: inline-flex; align-items: center; gap: 6px; padding: 8px 14px;
+  border-radius: 8px; font-size: 13px; cursor: pointer;
+  border: 1px solid #e0d5c5; background: #fff; color: #6b6156; transition: all 0.15s;
+}
+.btn-upload-action:hover { border-color: #c98a4b; color: #c98a4b; }
+.file-input-hidden { display: none; }
+
+/* ---------- 批量待选列表 ---------- */
+.batch-summary { font-size: 14px; font-weight: 700; color: #84431f; margin-bottom: 4px; }
+.batch-list { margin-top: 12px; }
+.batch-item {
+  display: flex; align-items: flex-start; gap: 10px; padding: 9px 12px;
+  border: 1px solid #ede6dc; border-radius: 10px; background: #fdfbf7; margin-bottom: 8px;
+}
+.batch-item.uploaded { border-color: #cfe3c8; background: #f6faf4; }
+.batch-item.error { border-color: #ecc9c9; background: #fdf6f6; }
+.batch-actions { display: flex; gap: 10px; margin-top: 10px; }
+
+/* ---------- 文件列表（上传进度 + 解析状态） ---------- */
+.file-list-head {
+  display: flex; justify-content: space-between; font-size: 13px; font-weight: 700;
+  color: #2d2a24; margin-bottom: 10px;
+}
+.file-list-count { color: #8a7e72; font-weight: 400; }
+.file-item {
+  display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px;
+  border: 1px solid #ede6dc; border-radius: 10px; background: #fdfbf7; margin-bottom: 8px;
+  transition: border-color 0.15s;
+}
+.file-item.st-done { border-color: #cfe3c8; background: #f6faf4; }
+.file-item.st-error { border-color: #ecc9c9; background: #fdf6f6; }
+.fi-icon {
+  flex-shrink: 0; width: 34px; height: 34px; border-radius: 8px; font-size: 13px;
+  font-weight: 700; display: flex; align-items: center; justify-content: center;
+  background: #f3ece2; color: #8a7e72;
+}
+.fi-icon.image { background: #f9eddb; color: #c98a4b; }
+.fi-icon.word { background: #e4edf9; color: #4a6fa5; }
+.fi-icon.pdf { background: #f9e2e2; color: #b05555; }
+.fi-icon.small { width: 28px; height: 28px; font-size: 11px; }
+.fi-main { flex: 1; min-width: 0; }
+.fi-name {
+  font-size: 13.5px; font-weight: 600; color: #2d2a24;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.fi-meta {
+  display: flex; gap: 10px; align-items: center; font-size: 12px; color: #8a7e72;
+  margin-top: 3px; flex-wrap: wrap;
+}
+.fi-status { display: inline-flex; align-items: center; gap: 5px; }
+.status-ok { color: #5a8a4a; font-weight: 600; }
+.status-err { color: #b05555; font-weight: 600; }
+.fi-error {
+  font-size: 11.5px; color: #b05555; margin-top: 4px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.fi-actions { display: flex; flex-direction: column; gap: 5px; flex-shrink: 0; }
+.progress-track {
+  height: 5px; background: #ede6dc; border-radius: 3px; margin-top: 7px; overflow: hidden;
+}
+.progress-fill {
+  height: 100%; background: #c98a4b; border-radius: 3px; transition: width 0.2s;
 }
 
-.result-title {
-  font-size: 15px;
-  font-weight: 600;
-  color: var(--color-text);
+/* ---------- 待入库列表 ---------- */
+.ingest-list { margin-top: 4px; }
+.ingest-item {
+  display: flex; align-items: center; gap: 10px; padding: 9px 12px; cursor: pointer;
+  border: 1px solid #ede6dc; border-radius: 10px; background: #fdfbf7; margin-bottom: 8px;
+  transition: all 0.15s;
 }
-
-.char-count {
-  font-size: 12px;
-  color: var(--color-text-secondary);
-  background: #f3efe9;
-  padding: 2px 8px;
-  border-radius: 8px;
+.ingest-item:hover { border-color: #c98a4b; }
+.ingest-item.active { border-color: #c98a4b; background: #f9eddb; }
+.ingest-item.is-error { border-color: #ecc9c9; background: #fdf6f6; }
+.ii-main { flex: 1; min-width: 0; }
+.ii-name {
+  font-size: 13px; font-weight: 600; color: #2d2a24;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+.ii-meta { font-size: 11.5px; color: #8a7e72; margin-top: 2px; }
+.ii-arrow { color: #b3a798; font-size: 10px; flex-shrink: 0; }
+.ingest-all-btn { width: 100%; margin: 4px 0 12px; }
 
-.result-empty {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 12px;
-  padding: 60px 24px;
-  color: var(--color-text-secondary);
-  opacity: 0.6;
+/* ---------- 处理效果检查 ---------- */
+.review-panel {
+  margin-top: 12px; border: 1px solid #e8dfd2; border-radius: 12px;
+  background: #fdfbf7; padding: 14px;
 }
-
-.result-empty p {
-  font-size: 14px;
+.review-head { margin-bottom: 12px; display: flex; flex-direction: column; gap: 8px; }
+.review-title { font-size: 13.5px; font-weight: 700; color: #2d2a24; }
+.review-error {
+  font-size: 13px; color: #b05555; background: #f9e2e2; border-radius: 8px;
+  padding: 10px 12px; margin-bottom: 10px; line-height: 1.5;
 }
-
-.result-loading {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 16px;
-  padding: 60px 24px;
-  color: var(--color-text-secondary);
+.review-image-row { display: flex; gap: 12px; align-items: flex-start; }
+.review-thumb {
+  width: 180px; max-height: 320px; object-fit: contain; border-radius: 8px;
+  border: 1px solid #e8dfd2; background: #fff; flex-shrink: 0;
 }
-
-.result-content {
-  flex: 1;
-  overflow-y: auto;
-  padding: 20px;
-}
-
-.ocr-text-display {
-  font-size: 14px;
-  line-height: 1.8;
-  color: var(--color-text);
-  white-space: pre-wrap;
-  word-wrap: break-word;
-}
-
-/* OCR 编辑 & 润色 */
-.ocr-edit-area {
-  margin-bottom: 16px;
-}
-
 .ocr-textarea {
-  width: 100%;
-  min-height: 160px;
-  padding: 12px;
-  border: 1px solid var(--color-primary);
-  border-radius: 8px;
-  font-size: 14px;
-  line-height: 1.8;
-  font-family: inherit;
-  resize: vertical;
-  outline: none;
-  background: #fffcf8;
+  flex: 1; min-width: 0; padding: 10px 12px; border-radius: 8px; font-size: 13px;
+  line-height: 1.7; border: 1px solid #e0d5c5; background: #fff; color: #2d2a24;
+  outline: none; resize: vertical; font-family: inherit;
 }
-
-.ocr-textarea:focus {
-  box-shadow: 0 0 0 2px rgba(215, 130, 50, 0.2);
+.ocr-textarea:focus { border-color: #c98a4b; }
+.doc-pages-toolbar {
+  display: flex; justify-content: space-between; align-items: center;
+  font-size: 12.5px; color: #6b6156; margin-bottom: 10px; flex-wrap: wrap; gap: 8px;
 }
-
-.ocr-edit-actions {
-  display: flex;
-  gap: 8px;
-  margin-top: 8px;
+.doc-preview-hint { color: #5a8a4a; }
+.doc-pages-list { display: flex; flex-direction: column; gap: 10px; max-height: 420px; overflow-y: auto; }
+.doc-page-card {
+  border: 1px solid #e8dfd2; border-radius: 10px; background: #fff; padding: 10px 12px;
 }
-
-.ocr-actions-bar {
-  display: flex;
-  gap: 8px;
-  margin-top: 16px;
-  padding-top: 12px;
-  border-top: 1px solid var(--color-border);
+.doc-page-header {
+  display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;
 }
-
-/* ===== 上传历史 ===== */
-.history-panel {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
+.doc-page-title { font-size: 12.5px; font-weight: 700; color: #84431f; }
+.doc-page-actions { display: flex; gap: 6px; }
+.doc-page-textarea {
+  width: 100%; padding: 8px 10px; border-radius: 8px; font-size: 13px; line-height: 1.7;
+  border: 1px solid #ede6dc; background: #fdfbf7; color: #2d2a24; outline: none;
+  resize: vertical; font-family: inherit;
 }
+.doc-page-textarea:focus { border-color: #c98a4b; background: #fff; }
+.review-actions { display: flex; gap: 10px; margin-top: 12px; justify-content: flex-end; }
 
-.history-list {
-  flex: 1;
-  overflow-y: auto;
-  padding: 8px;
+/* ---------- 空态 ---------- */
+.result-empty {
+  text-align: center; padding: 40px 20px; color: #b3a798;
 }
+.result-empty p { margin-top: 10px; font-size: 13px; }
+.empty-tip { font-size: 12px !important; color: #c9bfae; }
 
-.history-item {
-  border: 1px solid var(--color-border);
-  border-radius: 10px;
-  margin-bottom: 8px;
-  overflow: hidden;
-  transition: all 0.2s;
+/* ---------- 按钮 ---------- */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  padding: 8px 16px; border-radius: 8px; font-size: 13px; cursor: pointer;
+  border: none; transition: all 0.15s;
 }
-
-.history-item:hover {
-  border-color: #ccc;
+.btn:disabled { opacity: 0.55; cursor: not-allowed; }
+.btn-sm { padding: 4px 10px; font-size: 12px; border-radius: 6px; }
+.btn-primary { background: #c98a4b; color: #fff; }
+.btn-primary:hover:not(:disabled) { background: #b57a3f; }
+.btn-success { background: #5a8a4a; color: #fff; }
+.btn-success:hover:not(:disabled) { background: #4d7840; }
+.btn-secondary { background: #f3ece2; color: #6b6156; }
+.btn-secondary:hover:not(:disabled) { background: #e8dfd2; }
+.btn-outline {
+  background: #fff; border: 1px solid #e0d5c5; color: #6b6156;
 }
-
-.history-item.expanded {
-  border-color: var(--color-primary);
+.btn-outline:hover:not(:disabled) { border-color: #c98a4b; color: #c98a4b; }
+.btn-outline-danger {
+  background: #fff; border: 1px solid #ecc9c9; color: #b05555;
 }
+.btn-outline-danger:hover:not(:disabled) { background: #fdf6f6; }
 
-.history-item-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 12px 14px;
-  cursor: pointer;
-  transition: background 0.15s;
+/* ---------- 加载动画 ---------- */
+.spinner-xs, .spinner-sm {
+  display: inline-block; border-radius: 50%; border: 2px solid rgba(0,0,0,0.15);
+  border-top-color: currentColor; animation: spin 0.7s linear infinite;
 }
+.spinner-xs { width: 12px; height: 12px; }
+.spinner-sm { width: 15px; height: 15px; }
+@keyframes spin { to { transform: rotate(360deg); } }
 
-.history-item-header:hover {
-  background: #faf8f5;
+/* ---------- 弹窗 ---------- */
+.preview-modal {
+  position: fixed; inset: 0; background: rgba(45, 42, 36, 0.55); z-index: 1000;
+  display: flex; align-items: center; justify-content: center; padding: 24px;
 }
-
-.hi-info {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  flex: 1;
-  min-width: 0;
+.preview-modal-content {
+  background: #fff; border-radius: 14px; max-width: 860px; width: 100%;
+  max-height: 86vh; overflow: auto; padding: 18px;
 }
-
-.hi-filename {
-  font-size: 14px;
-  font-weight: 500;
-  color: var(--color-text);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+.preview-modal-content.kb-modal { max-width: 420px; }
+.preview-modal-header {
+  display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;
 }
-
-.hi-date {
-  font-size: 12px;
-  color: var(--color-text-secondary);
+.preview-modal-header h3 { font-size: 15px; font-weight: 700; color: #2d2a24; }
+.modal-close {
+  background: none; border: none; color: #8a7e72; cursor: pointer; padding: 4px;
+  border-radius: 6px; display: flex;
 }
-
-.hi-meta {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-shrink: 0;
+.modal-close:hover { background: #f3ece2; color: #2d2a24; }
+.preview-img {
+  max-width: 100%; max-height: 70vh; display: block; margin: 0 auto;
+  border-radius: 8px; border: 1px solid #ede6dc;
 }
+.kb-modal-body { display: flex; flex-direction: column; gap: 10px; }
 
-.hi-chunks {
-  font-size: 12px;
-  color: var(--color-primary);
-  background: var(--color-primary-light);
-  padding: 2px 8px;
-  border-radius: 8px;
+/* ---------- 状态提示 ---------- */
+.status-toast {
+  position: fixed; bottom: 28px; left: 50%; transform: translateX(-50%);
+  padding: 10px 20px; border-radius: 10px; font-size: 13px; z-index: 1100;
+  background: #2d2a24; color: #fff; box-shadow: 0 6px 20px rgba(0,0,0,0.18);
+  max-width: 80vw;
 }
+.status-toast.success { background: #5a8a4a; }
+.status-toast.error { background: #b05555; }
 
-.hi-expand-arrow {
-  font-size: 10px;
-  color: var(--color-text-secondary);
+/* ---------- 批量条目缩略图 ---------- */
+.batch-thumb {
+  flex-shrink: 0; width: 44px; height: 44px; object-fit: cover;
+  border-radius: 8px; border: 1px solid #e8dfd2; background: #fff; cursor: pointer;
+  transition: transform 0.15s;
 }
+.batch-thumb:hover { transform: scale(1.06); border-color: #c98a4b; }
 
-.history-item-body {
-  border-top: 1px solid var(--color-border);
-  padding: 14px;
+/* ---------- 入库实时进度 ---------- */
+.ingest-progress {
+  border: 1px solid #e0d5c5; background: #f9eddb; border-radius: 10px;
+  padding: 10px 14px; margin-bottom: 12px;
 }
-
-.hi-ocr-text {
-  margin-bottom: 12px;
+.ingest-progress.done { background: #f6faf4; border-color: #cfe3c8; }
+.ingest-progress.has-fail { background: #fdf6f6; border-color: #ecc9c9; }
+.ip-row {
+  display: flex; justify-content: space-between; align-items: center; gap: 10px;
+  margin-bottom: 7px;
 }
-
-.hi-text-pre {
-  font-size: 13px;
-  line-height: 1.6;
-  color: var(--color-text);
-  white-space: pre-wrap;
-  word-wrap: break-word;
-  font-family: inherit;
-  margin: 0;
-  max-height: 200px;
-  overflow-y: auto;
+.ip-text {
+  display: inline-flex; align-items: center; gap: 7px;
+  font-size: 12.5px; font-weight: 600; color: #84431f;
 }
-
-.edit-textarea {
-  width: 100%;
-  min-height: 120px;
-  padding: 12px;
-  border: 1px solid var(--color-primary);
-  border-radius: 8px;
-  font-size: 13px;
-  line-height: 1.6;
-  font-family: inherit;
-  resize: vertical;
-  outline: none;
+.ingest-progress.done .ip-text { color: #5a8a4a; }
+.ingest-progress.has-fail .ip-text { color: #b05555; }
+.ip-close {
+  background: none; border: none; color: #8a7e72; cursor: pointer;
+  font-size: 13px; padding: 2px 6px; border-radius: 6px;
 }
+.ip-close:hover { background: rgba(0,0,0,0.06); color: #2d2a24; }
+.progress-fill.fill-ok { background: #5a8a4a; }
 
-.edit-textarea:focus {
-  box-shadow: 0 0 0 2px rgba(215, 130, 50, 0.2);
-}
-
-.edit-actions {
-  display: flex;
-  gap: 8px;
-  margin-top: 8px;
-}
-
-.hi-actions {
-  display: flex;
-  gap: 8px;
-}
-
-.load-more {
-  text-align: center;
-  padding: 12px;
-}
-
-/* ===== 图片裁剪弹窗 ===== */
+/* ---------- 图片裁剪弹窗 ---------- */
 .crop-modal {
-  position: fixed;
-  inset: 0;
-  z-index: 50;
-  background: rgba(0, 0, 0, 0.85);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 20px;
+  position: fixed; inset: 0; z-index: 1050; background: rgba(0, 0, 0, 0.85);
+  display: flex; align-items: center; justify-content: center; padding: 20px;
   animation: fadeIn 0.2s ease;
 }
-
 .crop-modal-content {
-  background: white;
-  border-radius: 16px;
-  width: 100%;
-  max-width: 90vw;
-  height: min(90vh, 900px);
-  max-height: 90vh;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
+  background: #fff; border-radius: 16px; width: 100%; max-width: 90vw;
+  height: min(90vh, 900px); max-height: 90vh;
+  display: flex; flex-direction: column; overflow: hidden;
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
 }
-
 .crop-modal-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 14px 20px;
-  border-bottom: 1px solid var(--color-border);
-  flex-shrink: 0;
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 20px; border-bottom: 1px solid #e8dfd2; flex-shrink: 0;
 }
-
-.crop-modal-title {
-  font-size: 16px;
-  font-weight: 600;
-  color: var(--color-text);
-}
-
+.crop-modal-title { font-size: 16px; font-weight: 600; color: #2d2a24; }
 .crop-modal-close {
-  width: 32px;
-  height: 32px;
-  border: none;
-  border-radius: 8px;
-  background: transparent;
-  cursor: pointer;
-  color: var(--color-text-secondary);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: background 0.2s;
+  width: 32px; height: 32px; border: none; border-radius: 8px; background: transparent;
+  cursor: pointer; color: #8a7e72; display: flex; align-items: center; justify-content: center;
 }
-
-.crop-modal-close:hover {
-  background: #f3efe9;
-  color: var(--color-text);
-}
-
+.crop-modal-close:hover { background: #f3ece2; color: #2d2a24; }
 .crop-modal-body {
-  flex: 1;
-  overflow: hidden;
-  padding: 12px 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  min-height: 0;
+  flex: 1; overflow: hidden; padding: 12px 16px;
+  display: flex; flex-direction: column; gap: 8px; min-height: 0;
 }
-
 .cropper-wrapper {
-  flex: 1;
-  min-height: 0;
-  max-height: 100%;
-  background: #f3efe9;
-  border-radius: 12px;
-  overflow: hidden;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  flex: 1; min-height: 0; max-height: 100%; background: #f3ece2; border-radius: 12px;
+  overflow: hidden; display: flex; align-items: center; justify-content: center;
 }
-
-.cropper-image {
-  display: block;
-  max-width: 100%;
-  max-height: 100%;
-}
-
-:deep(cropper-canvas) {
-  display: block;
-  width: 100%;
-  height: 100%;
-}
-
+.cropper-image { display: block; max-width: 100%; max-height: 100%; }
+:deep(cropper-canvas) { display: block; width: 100%; height: 100%; }
 .crop-hint {
-  font-size: 12px;
-  color: var(--color-text-secondary);
-  text-align: center;
-  flex-shrink: 0;
+  font-size: 12px; color: #8a7e72; text-align: center; flex-shrink: 0;
 }
-
-/* 裁剪弹窗旋转工具栏 */
 .crop-toolbar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-  flex-shrink: 0;
-  padding: 2px 0 10px;
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  flex-shrink: 0; padding: 2px 0 10px;
 }
-
-.crop-toolbar .btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-}
-
+.crop-toolbar .btn { display: inline-flex; align-items: center; gap: 4px; }
 .crop-toolbar-hint {
-  margin-left: auto;
-  font-size: 12px;
-  color: var(--color-text-secondary);
+  margin-left: auto; font-size: 12px; color: #8a7e72;
 }
-
 .rotate-angle {
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-  min-width: 36px;
-  text-align: right;
-  color: var(--color-text-primary);
+  font-size: 12px; font-variant-numeric: tabular-nums; min-width: 36px;
+  text-align: right; color: #2d2a24;
 }
-
 .rotate-reset {
-  font-size: 12px;
-  padding: 2px 8px;
-  border-radius: 6px;
-  border: 1px solid var(--color-border, #e5ddd0);
-  background: transparent;
-  color: var(--color-text-secondary);
-  cursor: pointer;
+  font-size: 12px; padding: 2px 8px; border-radius: 6px;
+  border: 1px solid #e0d5c5; background: transparent; color: #8a7e72; cursor: pointer;
 }
-
-.rotate-reset:hover {
-  background: rgba(0, 0, 0, 0.04);
-}
-
-/* 上传图片预览弹窗 */
-.upload-preview-body {
-  overflow: hidden;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: #f3efe9;
-}
-
-.upload-preview-img {
-  max-width: 100%;
-  max-height: 100%;
-  object-fit: contain;
-  transition: transform 0.1s ease-out;
-  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.15);
-  background: #fff;
-}
-
-.preview-meta {
-  font-size: 12px;
-  color: var(--color-text-secondary);
-  margin-right: auto;
-}
-
+.rotate-reset:hover { background: rgba(0, 0, 0, 0.04); }
 .crop-modal-footer {
-  display: flex;
-  justify-content: flex-end;
-  gap: 10px;
-  padding: 12px 20px;
-  border-top: 1px solid var(--color-border);
-  flex-shrink: 0;
+  display: flex; justify-content: flex-end; gap: 10px;
+  padding: 12px 20px; border-top: 1px solid #e8dfd2; flex-shrink: 0;
 }
-
 @keyframes fadeIn {
   from { opacity: 0; }
   to { opacity: 1; }
-}
-
-/* ---- OCR 子模式切换 ---- */
-.sub-mode-tabs {
-  display: flex;
-  gap: 8px;
-  margin-bottom: 16px;
-}
-
-.sub-mode-tab {
-  padding: 6px 14px;
-  font-size: 13px;
-  font-weight: 500;
-  border: 1px solid var(--color-border);
-  border-radius: 8px;
-  background: white;
-  color: var(--color-text-secondary);
-  cursor: pointer;
-  transition: all 0.2s;
-}
-
-.sub-mode-tab:hover {
-  border-color: var(--color-primary);
-  color: var(--color-primary);
-}
-
-.sub-mode-tab.active {
-  background: var(--color-primary-light);
-  border-color: var(--color-primary);
-  color: var(--color-primary);
-}
-
-/* ---- 文档上传图标 ---- */
-.doc-icon {
-  width: 64px;
-  height: 64px;
-  border-radius: 12px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 24px;
-  font-weight: 700;
-  color: white;
-  background: #4caf50;
-  flex-shrink: 0;
-}
-
-/* ---- 来源类型标签 ---- */
-.hi-source-type {
-  font-size: 11px;
-  font-weight: 600;
-  padding: 2px 8px;
-  border-radius: 6px;
-  background: #e3f2fd;
-  color: #1565c0;
-}
-
-.hi-source-type.word {
-  background: #e8f5e9;
-  color: #2e7d32;
-}
-
-.hi-source-type.pdf {
-  background: #fff3e0;
-  color: #ef6c00;
-}
-
-/* ---- 移动端适配 ---- */
-@media (max-width: 768px) {
-  .upload-view {
-    padding: 16px;
-  }
-
-  .page-title {
-    font-size: 20px;
-  }
-
-  .page-desc {
-    font-size: 13px;
-  }
-
-  .mode-tabs {
-    width: 100%;
-  }
-
-  .mode-tab {
-    flex: 1;
-    text-align: center;
-    padding: 8px 12px;
-    font-size: 12px;
-  }
-
-  .upload-layout {
-    grid-template-columns: 1fr;
-    gap: 16px;
-  }
-
-  .upload-zone {
-    padding: 32px 16px;
-    min-height: 160px;
-  }
-
-  .upload-text {
-    font-size: 14px;
-  }
-
-  .action-buttons {
-    flex-direction: column;
-  }
-
-  .action-buttons .btn {
-    justify-content: center;
-  }
-
-  .right-panel {
-    max-height: none;
-  }
-
-  .result-content {
-    padding: 12px;
-  }
-
-  .ocr-textarea {
-    min-height: 120px;
-  }
-
-  .batch-file-item {
-    flex-wrap: wrap;
-    gap: 6px;
-    padding: 8px 10px;
-    font-size: 12px;
-  }
-
-  .bf-name {
-    width: 100%;
-    order: -1;
-  }
-
-  .bf-size {
-    font-size: 11px;
-  }
-
-  .batch-file-summary {
-    padding: 8px 0;
-  }
-
-  .history-item-header {
-    padding: 10px 12px;
-  }
-
-  .hi-filename {
-    font-size: 13px;
-  }
-
-  .history-item-body {
-    padding: 10px;
-  }
-
-  .ocr-actions-bar {
-    flex-wrap: wrap;
-  }
-
-  .visibility-options {
-    grid-template-columns: 1fr;
-  }
-
-  .crop-modal {
-    padding: 0;
-  }
-
-  .crop-modal-content {
-    max-width: 100vw;
-    width: 100vw;
-    height: 100vh;
-    max-height: 100vh;
-    border-radius: 0;
-  }
-
-  .crop-modal-header {
-    padding: 10px 16px;
-  }
-
-  .crop-modal-body {
-    padding: 8px 12px;
-  }
-
-  .cropper-wrapper {
-    min-height: 0;
-    border-radius: 8px;
-  }
-
-  .crop-modal-footer {
-    flex-direction: row;
-    padding: 10px 16px;
-  }
-
-  .crop-modal-footer .btn {
-    justify-content: center;
-    flex: 1;
-  }
-}
-
-/* ---- 文档分页预览 ---- */
-.doc-pages-toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 12px 16px;
-  background: #f8f9fa;
-  border-radius: 10px;
-  margin-bottom: 16px;
-  flex-wrap: wrap;
-}
-
-.doc-pages-info {
-  font-size: 13px;
-  color: var(--color-text-secondary);
-}
-
-.doc-preview-hint {
-  color: var(--color-primary);
-  margin-left: 6px;
-}
-
-.doc-pages-actions {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.doc-pages-list {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-
-.doc-page-card {
-  border: 1px solid var(--color-border);
-  border-radius: 12px;
-  background: white;
-  overflow: hidden;
-  transition: box-shadow 0.2s, border-color 0.2s;
-}
-
-.doc-page-card.is-selected {
-  border-color: var(--color-primary);
-  box-shadow: 0 0 0 2px var(--color-primary-light);
-}
-
-.doc-page-card.is-saved {
-  background: #f8fff8;
-  border-color: #81c784;
-}
-
-.doc-page-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 12px 16px;
-  background: #fafafa;
-  border-bottom: 1px solid var(--color-border);
-  flex-wrap: wrap;
-}
-
-.doc-page-checkbox {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  cursor: pointer;
-  font-weight: 500;
-}
-
-.doc-page-checkbox input[type="checkbox"] {
-  width: 16px;
-  height: 16px;
-  accent-color: var(--color-primary);
-}
-
-.doc-page-title {
-  font-size: 14px;
-  color: var(--color-text);
-}
-
-.doc-page-saved-tag {
-  font-size: 11px;
-  color: #2e7d32;
-  background: #e8f5e9;
-  padding: 2px 8px;
-  border-radius: 6px;
-}
-
-.doc-page-actions {
-  display: flex;
-  gap: 8px;
-}
-
-.doc-page-body {
-  padding: 16px;
-}
-
-.doc-page-textarea {
-  width: 100%;
-  min-height: 120px;
-  padding: 12px;
-  border: 1px solid var(--color-border);
-  border-radius: 8px;
-  font-size: 14px;
-  line-height: 1.7;
-  color: var(--color-text);
-  resize: vertical;
-  font-family: inherit;
-}
-
-.doc-page-textarea:disabled {
-  background: #f5f5f5;
-  color: var(--color-text-secondary);
-}
-
-.doc-page-tables {
-  margin-top: 16px;
-}
-
-.doc-page-table {
-  margin-bottom: 12px;
-}
-
-.markdown-table {
-  background: #f8f9fa;
-  border: 1px solid var(--color-border);
-  border-radius: 8px;
-  padding: 12px;
-  font-size: 13px;
-  line-height: 1.6;
-  overflow-x: auto;
-  white-space: pre;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 </style>

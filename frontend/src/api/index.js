@@ -323,6 +323,96 @@ export function previewOCR(file, ocrProvider) {
   })
 }
 
+// ============================================
+// 知识库上传流水线：统一上传 → 后台解析 → 确认入库
+// ============================================
+
+/**
+ * 统一文件上传（图片/Word/PDF 同一入口），XHR 实时上报上传进度。
+ * 上传成功后后端自动后台解析，不立即入库。
+ * @param {File} file
+ * @param {string} ocrProvider 图片 OCR 引擎（仅图片生效）
+ * @param {function} onProgress 进度回调 (0-100)
+ * @returns {Promise<object>} 响应 data：{ success, item }
+ */
+export function uploadPendingFile(file, ocrProvider = '', onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    xhr.open('POST', '/api/knowledge/pending/upload')
+    const token = localStorage.getItem('auth_token')
+    if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`)
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && onProgress) {
+        onProgress(Math.round((e.loaded / e.total) * 100))
+      }
+    }
+    xhr.onload = () => {
+      let data = null
+      try {
+        data = JSON.parse(xhr.responseText)
+      } catch (e) {
+        /* 忽略解析失败 */
+      }
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve({ data })
+      } else {
+        const err = new Error(data?.detail || `上传失败 HTTP ${xhr.status}`)
+        err.response = { data, status: xhr.status }
+        reject(err)
+      }
+    }
+    xhr.onerror = () => reject(new Error('网络异常，上传失败'))
+    const form = new FormData()
+    form.append('file', file)
+    if (ocrProvider) form.append('ocr_provider', ocrProvider)
+    xhr.send(form)
+  })
+}
+
+/**
+ * 待处理文件列表（含解析状态）
+ */
+export function listPendingUploads() {
+  return api.get('/knowledge/pending')
+}
+
+/**
+ * 待处理文件详情（含解析全文/分页）
+ */
+export function getPendingUpload(itemId) {
+  return api.get(`/knowledge/pending/${itemId}`)
+}
+
+/**
+ * 保存解析结果编辑（入库前检查修正）
+ */
+export function updatePendingUpload(itemId, payload) {
+  return api.put(`/knowledge/pending/${itemId}`, payload)
+}
+
+/**
+ * 确认入库：写入知识库 + 后台编译 llm-wiki 卡片
+ */
+export function ingestPendingUpload(itemId, payload) {
+  return api.post(`/knowledge/pending/${itemId}/ingest`, payload || {}, {
+    timeout: 300000,
+  })
+}
+
+/**
+ * 解析失败后重新解析
+ */
+export function retryPendingParse(itemId) {
+  return api.post(`/knowledge/pending/${itemId}/retry`)
+}
+
+/**
+ * 删除待入库文件（连同磁盘文件）
+ */
+export function deletePendingUpload(itemId) {
+  return api.delete(`/knowledge/pending/${itemId}`)
+}
+
 /**
  * 获取知识库统计
  */

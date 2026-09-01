@@ -31,7 +31,7 @@
     <!-- 空状态 -->
     <div v-else-if="wikiPages.length === 0" class="empty-state">
       <p>暂无百科词条</p>
-      <p class="empty-hint">上传笔记并保存后，系统会在后台自动编译生成百科词条</p>
+      <p class="empty-hint">在「知识库上传」入库后，系统会在后台自动编译生成百科词条</p>
     </div>
 
     <!-- 词条列表 -->

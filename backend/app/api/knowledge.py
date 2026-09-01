@@ -8,6 +8,7 @@ import os
 import re
 import uuid
 from pathlib import Path
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,7 @@ from app.models.schemas import (
 )
 from app.services.knowledge import DOC_TYPE_EXTENSIONS, knowledge_service
 from app.services.records import upload_records
+from app.services.upload_pipeline import upload_pipeline
 from app.services.wiki import wiki_service
 
 router = APIRouter(prefix="/api/knowledge", tags=["knowledge"])
@@ -432,7 +434,204 @@ async def upload_document(
 
 
 # ============================================
-# 文档分页预览
+# 上传流水线：统一上传 → 后台解析 → 确认入库（知识库上传页两大模块）
+# ============================================
+
+_IMAGE_EXTS = ALLOWED_TYPES
+
+
+def _detect_source_type(filename: str) -> str:
+    """按扩展名自动识别文件类型：image / word / pdf"""
+    ext = Path(filename).suffix.lower()
+    if ext in _IMAGE_EXTS:
+        return "image"
+    if ext in DOC_TYPE_EXTENSIONS["word"]:
+        return "word"
+    if ext in DOC_TYPE_EXTENSIONS["pdf"]:
+        return "pdf"
+    raise HTTPException(
+        status_code=400,
+        detail=f"不支持的文件类型: {ext}，支持图片({', '.join(sorted(_IMAGE_EXTS))})、.docx、.pdf",
+    )
+
+
+async def _save_pending_file(file: UploadFile, source_type: str) -> tuple[str, str]:
+    """保存统一上传的文件，返回 (save_path, file_id)；仅落盘不解析"""
+    ext = Path(file.filename).suffix.lower()
+    file_id = str(uuid.uuid4())
+    save_path = Path(settings.UPLOAD_DIR) / f"{file_id}{ext}"
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+
+    content = await file.read()
+    if source_type == "image":
+        _validate_size(content, file.filename)
+    else:
+        _validate_doc_size(content, file.filename)
+    with open(save_path, "wb") as f:
+        f.write(content)
+    if source_type == "word":
+        _normalize_docx(save_path)
+    return str(save_path), file_id
+
+
+def _check_pending_owner(item: dict, current_user: dict) -> None:
+    """权限：普通用户只能操作自己的待入库文件"""
+    user_id = current_user.get("id") or current_user.get("username") or ""
+    is_admin = current_user.get("role") == "admin"
+    if not is_admin and item.get("owner_id") and item["owner_id"] != user_id:
+        raise HTTPException(status_code=403, detail="只能操作自己上传的文件")
+
+
+class PendingIngestRequest(BaseModel):
+    """待入库文件确认入库请求（可附带入库前最新编辑结果）"""
+    kb_id: str = ""
+    title: str = ""
+    parsed_text: Optional[str] = None
+    pages: Optional[list] = None
+
+
+class PendingTextEditRequest(BaseModel):
+    """保存解析结果编辑（入库前检查修正）"""
+    parsed_text: Optional[str] = None
+    pages: Optional[list] = None
+
+
+@router.post("/pending/upload")
+async def pending_upload_file(
+    file: UploadFile = File(...),
+    ocr_provider: str = Form(""),
+    current_user: dict = Depends(get_current_user),
+):
+    """统一文件上传（图片/Word/PDF 同一入口）：仅落盘登记，
+    后台多线程自动解析（图片 OCR / 文档解析），不入库"""
+    source_type = _detect_source_type(file.filename)
+    owner_id = current_user.get("id") or current_user.get("username") or ""
+
+    try:
+        save_path, _file_id = await _save_pending_file(file, source_type)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"文件保存失败: {str(e)}")
+
+    item = upload_pipeline.create(
+        filename=file.filename,
+        source_type=source_type,
+        file_path=save_path,
+        owner_id=owner_id,
+        ocr_provider=ocr_provider,
+    )
+    # 后台多线程解析，上传接口立即返回（前端轮询状态）
+    upload_pipeline.schedule_parse(item["id"])
+    logger.info("知识库上传登记 [%s] %s", source_type, file.filename)
+    return {"success": True, "item": item}
+
+
+@router.get("/pending")
+async def list_pending_files(
+    current_user: dict = Depends(get_current_user),
+):
+    """待处理文件列表（含解析状态，前端轮询用）：普通用户只看自己的"""
+    user_id = current_user.get("id") or current_user.get("username") or ""
+    is_admin = current_user.get("role") == "admin"
+    items = upload_pipeline.list_items(owner_id=user_id, is_admin=is_admin)
+    # 附带文件大小（前端展示用；文件不存在时记 0）
+    for it in items:
+        try:
+            it["file_size"] = os.path.getsize(it["file_path"])
+        except OSError:
+            it["file_size"] = 0
+    return {"success": True, "items": items}
+
+
+@router.get("/pending/{item_id}")
+async def get_pending_file(
+    item_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """待处理文件详情（含解析全文/分页，供用户检查处理效果）"""
+    item = upload_pipeline.get(item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="文件不存在或已入库")
+    _check_pending_owner(item, current_user)
+    return {"success": True, "item": item}
+
+
+@router.put("/pending/{item_id}")
+async def update_pending_file(
+    item_id: str,
+    body: PendingTextEditRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """保存用户对解析结果的编辑（入库前检查修正）"""
+    item = upload_pipeline.get(item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="文件不存在或已入库")
+    _check_pending_owner(item, current_user)
+    updated = upload_pipeline.update_text(
+        item_id, parsed_text=body.parsed_text, pages=body.pages
+    )
+    return {"success": True, "item": updated}
+
+
+@router.post("/pending/{item_id}/retry")
+async def retry_pending_parse(
+    item_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """解析失败后重新触发后台解析"""
+    item = upload_pipeline.get(item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="文件不存在或已入库")
+    _check_pending_owner(item, current_user)
+    upload_pipeline.schedule_parse(item_id)
+    return {"success": True, "message": "已重新提交解析"}
+
+
+@router.post("/pending/{item_id}/ingest")
+async def ingest_pending_file(
+    item_id: str,
+    body: PendingIngestRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """确认入库：向量化写入知识库 + 上传记录 + 后台编译 llm-wiki 卡片。
+    与旧上传链路的原始文档/处理后文本对应逻辑完全一致"""
+    item = upload_pipeline.get(item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="文件不存在或已入库")
+    _check_pending_owner(item, current_user)
+    try:
+        result = await upload_pipeline.ingest(
+            item_id,
+            kb_id=body.kb_id,
+            title=body.title,
+            parsed_text=body.parsed_text,
+            pages=body.pages,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.warning("知识入库失败 [%s]: %s", item.get("filename"), e)
+        raise HTTPException(status_code=500, detail=f"入库失败: {str(e)}")
+    return {"success": True, **result}
+
+
+@router.delete("/pending/{item_id}")
+async def delete_pending_file(
+    item_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """删除待入库文件（连同磁盘文件）"""
+    item = upload_pipeline.get(item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="文件不存在或已入库")
+    _check_pending_owner(item, current_user)
+    upload_pipeline.delete(item_id)
+    return {"success": True, "message": "已删除"}
+
+
+# ============================================
+# 文档分页预览（旧链路兼容：聊天附件等仍在用）
 # ============================================
 
 

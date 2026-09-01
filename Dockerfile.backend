@@ -13,14 +13,24 @@ COPY backend/requirements.txt .
 # PyPI 源：国内网络默认走阿里云镜像（官方 PyPI 经常只有几十 KB/s 导致构建超时），
 # 如需切回官方源：--build-arg PIP_INDEX_URL=https://pypi.org/simple
 ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
+# 瘦身构建开关：--build-arg SLIM=1 时不安装 torch / sentence-transformers / transformers
+# （本地 CrossEncoder 重排序依赖，解压后约 1.5~2GB），实测镜像从 2.27GB 降到 574MB；
+# 前置条件：RERANKER_PROVIDER 使用远端提供商（如 dashscope）；
+# 本地 OCR（EasyOCR）本就不在依赖清单中，云端 OCR 不受影响。
+# 默认 SLIM=0 保持全量功能（含本地重排序）
+ARG SLIM=0
 # 升级 pip（新版解析器更快、重试更稳）；
 # 先安装 CPU 版 torch（sentence-transformers 依赖），
 # 避免默认拉取 CUDA 版本导致镜像膨胀 5GB+；torch 必须走官方 cpu 索引，
 # 阿里云镜像中的 torch 是 CUDA 版且不含 +cpu 构建；
-# 第三步需通过 PYTHONPATH 让 pip 识别 /install 中已装的 torch，防止重复拉取
+# 第三步需通过 PYTHONPATH 让 pip 识别 /install 中已装的 torch，防止重复拉取；
+# SLIM 模式下用 grep 过滤掉本地重排序依赖行，其余依赖照常安装；
+# 最后清理 __pycache__ 进一步压缩体积
 RUN pip install --no-cache-dir --upgrade pip -i ${PIP_INDEX_URL} \
-    && pip install --no-cache-dir --prefix=/install torch --index-url https://download.pytorch.org/whl/cpu \
-    && PYTHONPATH=/install/lib/python3.11/site-packages pip install --no-cache-dir --prefix=/install -r requirements.txt -i ${PIP_INDEX_URL}
+    && if [ "$SLIM" != "1" ]; then pip install --no-cache-dir --prefix=/install torch --index-url https://download.pytorch.org/whl/cpu; fi \
+    && if [ "$SLIM" = "1" ]; then grep -vE '^(sentence-transformers|transformers)' requirements.txt > /tmp/req.txt; else cp requirements.txt /tmp/req.txt; fi \
+    && PYTHONPATH=/install/lib/python3.11/site-packages pip install --no-cache-dir --prefix=/install -r /tmp/req.txt -i ${PIP_INDEX_URL} \
+    && find /install -name '__pycache__' -type d -exec rm -rf {} +
 
 
 # --- 运行阶段 ---
@@ -33,10 +43,14 @@ COPY --from=builder /install /usr/local
 
 # 安装 LibreOffice Writer（无头）+ 中文字体：
 # 用于将 Word 原始文档转换为 PDF，供「原始文档分页预览 / 页码跳转」；
-# 未安装时后端自动降级为 mammoth 渲染预览
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends libreoffice-writer-nogui fonts-noto-cjk \
-    && rm -rf /var/lib/apt/lists/*
+# 未安装时后端自动降级为 mammoth 渲染预览；
+# SLIM 模式（SLIM=1）跳过安装以节省 ~500MB，Word 预览自动降级
+ARG SLIM=0
+RUN if [ "$SLIM" != "1" ]; then \
+        apt-get update \
+        && apt-get install -y --no-install-recommends libreoffice-writer-nogui fonts-noto-cjk \
+        && rm -rf /var/lib/apt/lists/*; \
+    fi
 
 # 创建必要目录
 RUN mkdir -p /app/backend /app/data/uploads /app/data/vector_store /app/data/knowledge

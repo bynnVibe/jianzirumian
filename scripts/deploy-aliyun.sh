@@ -40,6 +40,15 @@ if [ -n "${PIP_INDEX_URL:-}" ]; then
     PIP_INDEX_BUILD_ARG="--build-arg PIP_INDEX_URL=${PIP_INDEX_URL}"
 fi
 
+# 后端镜像瘦身开关（默认开启）：不装 torch / sentence-transformers / LibreOffice，
+# 实测镜像从 2.27GB 降到 574MB（导出 tar.gz 从 ~745MB 降到 ~206MB），
+# 前提：.env 中 RERANKER_PROVIDER 使用远端提供商（如 dashscope），
+# Word 预览自动降级为 mammoth 渲染。
+# 需要本地重排序 + 原始排版 PDF 预览时：
+#   SLIM=0 bash scripts/deploy-aliyun.sh build
+SLIM="${SLIM:-1}"
+SLIM_BUILD_ARG="--build-arg SLIM=${SLIM}"
+
 # 颜色
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
@@ -73,14 +82,19 @@ cmd_build() {
 
     cd "$PROJECT_DIR"
 
-    # 构建后端镜像
-    info "构建后端镜像..."
+    # 构建后端镜像（SLIM=1 瘦身模式默认开启，导出包体积大幅缩小）
+    if [ "$SLIM" = "1" ]; then
+        info "构建后端镜像（瘦身模式：不含本地重排序 / LibreOffice）..."
+    else
+        info "构建后端镜像（全量模式：含本地重排序 / LibreOffice）..."
+    fi
     docker build \
         -t "$BACKEND_IMAGE" \
         -f Dockerfile.backend \
         --platform linux/amd64 \
         $REGISTRY_BUILD_ARG \
         $PIP_INDEX_BUILD_ARG \
+        $SLIM_BUILD_ARG \
         .
     log "后端镜像构建完成: $BACKEND_IMAGE"
 

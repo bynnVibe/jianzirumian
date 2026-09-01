@@ -39,7 +39,7 @@
           <polyline points="17 8 12 3 7 8"/>
           <line x1="12" y1="3" x2="12" y2="15"/>
         </svg>
-        上传笔记
+        知识库上传
       </router-link>
     </div>
 
@@ -265,7 +265,7 @@
               </div>
               <div class="usage-card">
                 <span class="usage-card-num">{{ usageData.total_upload_count }}</span>
-                <span class="usage-card-label">上传笔记</span>
+                <span class="usage-card-label">知识库上传</span>
               </div>
               <div class="usage-card">
                 <span class="usage-card-num">{{ usageData.total_tokens }}</span>

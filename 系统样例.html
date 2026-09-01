@@ -162,6 +162,17 @@ body {
 .flowbar { display: flex; gap: 5px; flex-wrap: wrap; margin-top: 13px; font-size: 11.5px; }
 .flow-step { background: #f6f1e8; border-radius: 999px; padding: 4px 11px; color: #8a7e72; }
 .flow-step.cur { background: var(--color-primary); color: #fff; font-weight: 600; }
+.module-tabs { display: flex; gap: 10px; margin: 4px 0 16px; }
+.module-tab { flex: 1; text-align: center; border: 1.5px solid var(--color-border); border-radius: 11px; padding: 11px 0; font-size: 14px; font-weight: 600; color: #8a7e72; background: #fff; cursor: pointer; position: relative; }
+.module-tab.active { border-color: var(--color-primary); color: var(--color-primary); background: #fff8ef; box-shadow: 0 2px 8px rgba(200,150,90,.12); }
+.module-tab .tab-badge { position: absolute; top: -7px; right: -6px; background: #4f7a4f; color: #fff; font-size: 10.5px; border-radius: 999px; padding: 1px 7px; font-weight: 600; }
+.zone-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.mini-zone { border: 2px dashed #d9c9b4; border-radius: 11px; padding: 18px 10px; text-align: center; color: #a2957f; background: #fdfaf5; font-size: 12.5px; line-height: 1.7; }
+.mini-zone b { display: block; color: #6b6156; font-size: 13px; }
+.file-row { display: flex; align-items: center; gap: 9px; border: 1px solid var(--color-border); border-radius: 10px; padding: 9px 12px; margin-top: 9px; background: #fffdf9; font-size: 12.5px; }
+.file-row .fname { flex: 1; color: #5c5348; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.progress-track { height: 6px; border-radius: 999px; background: #f0e9df; overflow: hidden; margin-top: 8px; }
+.progress-fill { height: 100%; width: 66%; border-radius: 999px; background: var(--color-primary); }
 /* ---------- 列表卡片（知识库/收藏/百科） ---------- */
 .filter-row { display: flex; gap: 9px; margin-bottom: 14px; flex-wrap: wrap; }
 .filter-row select, .filter-row input {
@@ -220,7 +231,7 @@ body {
     </div>
     <button class="nav-new" onclick="openChat(null)">＋ 新对话</button>
     <button class="nav-btn" data-view="upload" onclick="switchView('upload', this)">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>上传笔记</button>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>知识库上传</button>
     <button class="nav-btn" data-view="knowledge" onclick="switchView('knowledge', this)">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>知识库管理</button>
     <button class="nav-btn" data-view="bookmarks" onclick="switchView('bookmarks', this)">
@@ -327,34 +338,45 @@ body {
     <!-- ================= 上传视图 ================= -->
     <section class="view" id="view-upload">
       <div class="page-wrap">
-        <div class="page-head"><div><h2>上传笔记</h2><div class="page-desc">手写拍照 → OCR 识别 → 人工校对 → 入库并向量化</div></div></div>
+        <div class="page-head"><div><h2>知识库上传</h2><div class="page-desc">文件上传（落盘 + 后台多线程解析） → 检查解析效果 → 确认入库（知识库 + llm-wiki）</div></div></div>
+        <div class="module-tabs">
+          <div class="module-tab active">📤 文件上传</div>
+          <div class="module-tab">📥 知识入库<span class="tab-badge">3</span></div>
+        </div>
         <div class="upload-grid">
           <div class="panel">
-            <h3>① 选择文件 / 手写笔记照片</h3>
-            <div class="dropzone">
-              <div class="note-paper">丰隆：在小腿外侧，外踝尖上八寸……<br>古人奉为祛痰至宝，痰多宜向丰隆寻。<br>按摩本法，可健脾与和胃，化痰利湿……</div>
+            <h3>🖼 图片上传（单张进编辑器 / 批量待选列表）</h3>
+            <div class="zone-row">
+              <div class="mini-zone"><b>单张上传</b>选择后进入编辑器：旋转 / 复位 / 框选裁剪 / 长按拖动</div>
+              <div class="mini-zone"><b>批量上传</b>多选多张，待选列表逐张编辑或一键全部上传</div>
             </div>
-            <div class="note">拖拽图片/Word/PDF 到此处，或点击选择；支持旋转裁切后再识别。当前选中：文字记录2.jpg</div>
+            <div class="file-row"><span class="tag">图片</span><span class="fname">文字记录2.jpg（待选 · 缩略图可点击编辑）</span><button class="btn btn-outline btn-sm">编辑</button><button class="btn btn-primary btn-sm">上传</button></div>
+            <h3 style="margin-top:16px">📄 Word / PDF 文档</h3>
+            <div class="mini-zone"><b>Word / PDF 上传</b>拖拽或点击选择 .docx / .doc / .pdf，后台按页解析文字与表格</div>
           </div>
           <div class="panel">
-            <h3>② 识别结果校对（可编辑 / 一键润色）</h3>
-            <div class="form-row"><label>保存标题（默认文件名）</label><input value="丰隆穴按摩笔记"></div>
-            <div class="form-row"><label>目标知识库（公共 / 个人 → 具体库）</label>
-              <select><option>个人知识库 · 我的笔记</option><option>公共知识库 · 中医养生</option></select></div>
-            <div class="form-row"><label>OCR 文本</label>
-              <textarea rows="5">丰隆：在小腿外侧，外踝尖上八寸，条口穴外一寸。属足阳明胃经之络穴，古人奉为祛痰至宝，"痰多宜向丰隆寻"。按摩本法可健脾和胃、化痰利湿，适用于咳嗽、痰多等症。</textarea></div>
-            <div style="display:flex;gap:8px">
-              <button class="btn btn-outline btn-sm">✨ 一键润色</button>
-              <button class="btn btn-primary btn-sm">保存到知识库 →</button>
-            </div>
+            <h3>文件解析列表（实时进展 · 解析完成可预览原文）</h3>
+            <div class="file-row"><span class="tag green">已解析</span><span class="fname">丰隆穴按摩笔记.jpg · OCR 4559 字</span><button class="btn btn-outline btn-sm">查看</button></div>
+            <div class="file-row"><span class="tag blue">解析中</span><span class="fname">中医方剂汇编.docx · 已解析 3 / 12 页</span>
+              <div style="width:90px"><div class="progress-track"><div class="progress-fill" style="width:25%"></div></div></div></div>
+            <div class="file-row"><span class="tag green">已解析</span><span class="fname">药膳食谱整理.pdf · 8 页</span><button class="btn btn-outline btn-sm">查看</button></div>
             <div class="flowbar">
-              <span class="flow-step">分割成分块</span><span class="flow-step">向量化</span><span class="flow-step">FAISS 入库</span>
-              <span class="flow-step cur">后台编译 llm-wiki 百科卡片</span>
+              <span class="flow-step">落盘登记</span><span class="flow-step cur">后台并发解析（OCR / 分页提取）</span><span class="flow-step">人工检查效果</span><span class="flow-step">切「知识入库」确认入库</span>
+            </div>
+            <h3 style="margin-top:16px">📥 知识入库（切到入库 Tab 后）</h3>
+            <div class="form-row"><label>目标知识库（公共 / 个人）</label>
+              <select><option>个人知识库 · 我的笔记</option><option>公共知识库 · 中医养生</option></select></div>
+            <div class="file-row"><span class="tag">待入库</span><span class="fname">丰隆穴按摩笔记.jpg</span><button class="btn btn-outline btn-sm">查看/编辑</button><button class="btn btn-primary btn-sm">入库</button></div>
+            <div style="font-size:12px;color:#8a7e72;margin-top:8px">入库进度 2 / 3 ·《丰隆穴按摩笔记》（进度条实时显示直到全部成功）</div>
+            <div class="progress-track"><div class="progress-fill"></div></div>
+            <div class="flowbar">
+              <span class="flow-step">切分向量化</span><span class="flow-step">写入目标知识库</span><span class="flow-step cur">后台编译 llm-wiki 百科卡片</span>
             </div>
           </div>
         </div>
       </div>
     </section>
+
 
     <!-- ================= 知识库管理 ================= -->
     <section class="view" id="view-knowledge">

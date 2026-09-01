@@ -209,6 +209,25 @@ def init_db(conn: sqlite3.Connection):
         );
         CREATE INDEX IF NOT EXISTS idx_wiki_pages_kb ON wiki_pages(kb_id);
         CREATE INDEX IF NOT EXISTS idx_wiki_pages_source ON wiki_pages(source_image);
+
+        -- 知识库上传流水线：文件上传后先后台解析，用户确认后再入库。
+        -- status: pending(排队中) | parsing(解析中) | done(解析完成待入库) | error(解析失败)
+        CREATE TABLE IF NOT EXISTS pending_uploads (
+            id               TEXT PRIMARY KEY,
+            filename         TEXT NOT NULL,
+            source_type      TEXT NOT NULL DEFAULT 'image',
+            file_path        TEXT NOT NULL,
+            status           TEXT NOT NULL DEFAULT 'pending',
+            parsed_text      TEXT NOT NULL DEFAULT '',
+            pages            TEXT NOT NULL DEFAULT '[]',
+            pdf_preview_path TEXT,
+            ocr_provider     TEXT NOT NULL DEFAULT '',
+            error            TEXT NOT NULL DEFAULT '',
+            owner_id         TEXT NOT NULL DEFAULT '',
+            created_at       TEXT NOT NULL,
+            updated_at       TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_pending_owner ON pending_uploads(owner_id, created_at);
         """
     )
     _migrate(conn)

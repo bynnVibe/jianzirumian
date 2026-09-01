@@ -87,6 +87,12 @@ async def lifespan(app: FastAPI):
         kb_service.patch_legacy_metadata()
     except Exception as e:
         logger.warning("知识库存量补丁失败: %s", e)
+    # 上传流水线：恢复重启前未完成解析的文件（后台多线程继续解析）
+    try:
+        from app.services.upload_pipeline import upload_pipeline
+        upload_pipeline.recover()
+    except Exception as e:
+        logger.warning("上传流水线恢复失败: %s", e)
     print(f"[见字如面] 服务启动完成")
     print(f"  - LLM: {runtime_config.llm_provider or settings.LLM_PROVIDER} (默认: {settings.LLM_PROVIDER})")
     print(f"  - OCR: {runtime_config.ocr_provider or settings.OCR_PROVIDER} (默认: {settings.OCR_PROVIDER})")
