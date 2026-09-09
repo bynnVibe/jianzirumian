@@ -42,6 +42,12 @@ const routes = [
     meta: { requiresAuth: true },
   },
   {
+    path: '/ingest-detail/:recordId',
+    name: 'IngestDetail',
+    component: () => import('@/views/IngestDetailView.vue'),
+    meta: { requiresAuth: true },
+  },
+  {
     path: '/settings',
     redirect: '/management',
   },
@@ -85,6 +91,12 @@ const routes = [
     path: '/admin/users',
     name: 'UserManagement',
     component: () => import('@/views/UserManagementView.vue'),
+    meta: { requiresAuth: true, requiresAdmin: true },
+  },
+  {
+    path: '/eval',
+    name: 'Eval',
+    component: () => import('@/views/EvalView.vue'),
     meta: { requiresAuth: true, requiresAdmin: true },
   },
 ]

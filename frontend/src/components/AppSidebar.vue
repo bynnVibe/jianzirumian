@@ -82,6 +82,20 @@
         </svg>
         系统管理
       </router-link>
+
+      <!-- 回归评测（仅管理员可见：评测集 / 一键回归 / 运行对比） -->
+      <router-link
+        v-if="auth.isAdmin"
+        to="/eval"
+        class="btn-upload"
+        :class="{ active: isEvalPage }"
+        @click="handleNavClick"
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="btn-icon">
+          <path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
+        </svg>
+        回归评测
+      </router-link>
     </div>
 
     <!-- 聊天历史 -->
@@ -454,6 +468,7 @@ const isKnowledgePage = computed(() => route.path === '/knowledge')
 const isBookmarksPage = computed(() => route.path === '/bookmarks')
 const isWikiPage = computed(() => route.path === '/wiki')
 const isAdminUsersPage = computed(() => route.path === '/admin/users')
+const isEvalPage = computed(() => route.path === '/eval')
 
 onMounted(async () => {
   // 仅已登录用户加载会话列表（游客/未登录不发起请求，避免 401 触发跳转）

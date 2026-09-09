@@ -5,6 +5,7 @@
 import logging
 import sqlite3
 import threading
+from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
@@ -228,6 +229,54 @@ def init_db(conn: sqlite3.Connection):
             updated_at       TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_pending_owner ON pending_uploads(owner_id, created_at);
+
+        -- Agent 回归评测模块：评测集 → 用例 → 运行 → 逐用例结果
+        CREATE TABLE IF NOT EXISTS eval_datasets (
+            id          TEXT PRIMARY KEY,
+            name        TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            created_at  TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS eval_cases (
+            id               TEXT PRIMARY KEY,
+            dataset_id       TEXT NOT NULL,
+            question         TEXT NOT NULL,
+            expected_keywords TEXT NOT NULL DEFAULT '[]',
+            reference_answer TEXT NOT NULL DEFAULT '',
+            expected_source  TEXT NOT NULL DEFAULT '',
+            created_at       TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_eval_cases_dataset ON eval_cases(dataset_id);
+
+        -- status: running(执行中) | finished(完成) | failed(整体失败) | interrupted(重启中断)
+        CREATE TABLE IF NOT EXISTS eval_runs (
+            id          TEXT PRIMARY KEY,
+            dataset_id  TEXT NOT NULL,
+            status      TEXT NOT NULL DEFAULT 'running',
+            started_at  TEXT NOT NULL,
+            finished_at TEXT,
+            summary     TEXT NOT NULL DEFAULT '{}',
+            created_by  TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_eval_runs_dataset ON eval_runs(dataset_id, started_at);
+
+        CREATE TABLE IF NOT EXISTS eval_results (
+            id                TEXT PRIMARY KEY,
+            run_id            TEXT NOT NULL,
+            case_id           TEXT NOT NULL,
+            question          TEXT NOT NULL DEFAULT '',
+            answer            TEXT NOT NULL DEFAULT '',
+            retrieved_sources TEXT NOT NULL DEFAULT '[]',
+            retrieval_hit     INTEGER NOT NULL DEFAULT 0,
+            faithfulness_pass INTEGER NOT NULL DEFAULT 0,
+            judge_score       REAL,
+            judge_reason      TEXT NOT NULL DEFAULT '',
+            latency_ms        INTEGER NOT NULL DEFAULT 0,
+            status            TEXT NOT NULL DEFAULT 'ok',
+            error             TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_eval_results_run ON eval_results(run_id);
         """
     )
     _migrate(conn)
@@ -259,6 +308,20 @@ def _migrate(conn: sqlite3.Connection):
             "ALTER TABLE upload_records ADD COLUMN title TEXT NOT NULL DEFAULT ''"
         )
         logger.info("upload_records 补加列: title")
+
+    # 回归评测：服务启动时把上次进程遗留的 running 运行标记为 interrupted，
+    # 避免历史列表出现永远"执行中"的僵尸运行（后台任务随进程重启已丢失）
+    try:
+        cur = conn.execute(
+            "UPDATE eval_runs SET status = 'interrupted', finished_at = COALESCE(finished_at, ?)"
+            " WHERE status = 'running'",
+            (datetime.now().isoformat(),),
+        )
+        if cur.rowcount:
+            logger.info("eval_runs 遗留 running 运行标记为 interrupted: %d 条", cur.rowcount)
+    except sqlite3.OperationalError:
+        # 表尚未创建（首次建表在 executescript 中已完成，此处仅防御）
+        pass
 
 
 def query(sql: str, params: tuple = ()) -> List[dict]:

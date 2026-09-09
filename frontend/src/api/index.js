@@ -414,6 +414,24 @@ export function deletePendingUpload(itemId) {
 }
 
 /**
+ * 入库历史列表（仅本人成功入库记录），按入库时间倒序
+ * @param {number} limit 每页条数（默认 50）
+ * @param {number} offset 偏移量
+ */
+export function listIngestHistory(limit = 50, offset = 0) {
+  return api.get('/knowledge/ingest-history', { params: { limit, offset } })
+}
+
+/**
+ * 入库历史详情：某条记录的解析文档内容（文本片段，含页码）
+ * @param {string} recordId
+ */
+export function getIngestHistoryContent(recordId) {
+  return api.get(`/knowledge/ingest-history/${encodeURIComponent(recordId)}/content`)
+}
+
+
+/**
  * 获取知识库统计
  */
 export function getKnowledgeStats() {
@@ -835,6 +853,65 @@ export function getUsersStats() {
  */
 export function getUserStatsDetail(userId) {
   return api.get(`/auth/users/${userId}/stats`)
+}
+
+// ============================================
+// Agent 回归评测 API（管理员）
+// ============================================
+
+/** 评测集列表（含用例数与最近运行） */
+export function listEvalDatasets() {
+  return api.get('/eval/datasets')
+}
+
+/** 新建评测集 */
+export function createEvalDataset({ name, description = '' }) {
+  return api.post('/eval/datasets', { name, description })
+}
+
+/** 删除评测集（级联删除用例/运行/结果） */
+export function deleteEvalDataset(datasetId) {
+  return api.delete(`/eval/datasets/${datasetId}`)
+}
+
+/** 评测集内用例列表 */
+export function listEvalCases(datasetId) {
+  return api.get(`/eval/datasets/${datasetId}/cases`)
+}
+
+/** 新增单条用例 */
+export function createEvalCase(datasetId, payload) {
+  return api.post(`/eval/datasets/${datasetId}/cases`, payload)
+}
+
+/** 删除单条用例 */
+export function deleteEvalCase(caseId) {
+  return api.delete(`/eval/cases/${caseId}`)
+}
+
+/** JSON 批量导入用例：cases=[{question, expected_keywords?, reference_answer?, expected_source?}] */
+export function importEvalCases(datasetId, cases) {
+  return api.post(`/eval/datasets/${datasetId}/cases/import`, { cases })
+}
+
+/** 从点踩反馈导入用例（去重） */
+export function importEvalCasesFromFeedback(datasetId) {
+  return api.post(`/eval/datasets/${datasetId}/cases/from-feedback`)
+}
+
+/** 发起评测运行，返回 { run_id, status } */
+export function startEvalRun(datasetId) {
+  return api.post(`/eval/datasets/${datasetId}/runs`)
+}
+
+/** 运行历史（含 summary 与进度计数） */
+export function listEvalRuns(datasetId) {
+  return api.get('/eval/runs', { params: { dataset_id: datasetId } })
+}
+
+/** 运行详情（run + 结果明细 + 上一次 finished run 环比） */
+export function getEvalRun(runId) {
+  return api.get(`/eval/runs/${runId}`)
 }
 
 export default api

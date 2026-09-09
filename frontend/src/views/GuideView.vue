@@ -131,6 +131,9 @@
           <div class="callout callout-tip">
             小技巧：在图片编辑器里可以长按拖动查看细节、滚轮/双指缩放、90° 旋转；裁剪导出保持原图分辨率，不会损失识别清晰度。
           </div>
+          <div class="callout callout-info">
+            选图后系统会即时做清晰度检测：图片较模糊时会弹窗提示「图片较模糊，可能影响 OCR 识别效果」并引导重新选图；光线充足、平稳拍摄或扫描可显著提升识别率。
+          </div>
         </div>
 
         <div class="card">
@@ -144,6 +147,15 @@
           <div class="callout callout-tip">
             文档中的表格会自动解析为 Markdown 格式保留结构，入库后检索和展示都不会错乱；Word 文档还会生成与原始排版一致的预览版本，方便后续对照原文。
           </div>
+        </div>
+
+        <div class="card">
+          <h3 class="card-title">入库历史：回溯每次成功入库</h3>
+          <ol class="step-list">
+            <li>页面顶部第三个 Tab「入库历史」，按入库时间倒序列出你成功入库的记录（入库时间、知识来源、入库片段数）。</li>
+            <li>点击「知识来源」预览原始文件（图片 / Word 原始排版 PDF / PDF 原件）；源文件已删除时会置灰标注「源文件已删除」。</li>
+            <li>点击「查看解析文档」跳转详情页，按页回溯解析后的文本片段，随时核对「知识库到底存进了什么文字」。</li>
+          </ol>
         </div>
       </section>
 
@@ -354,6 +366,26 @@
       <section class="guide-section">
         <h2 class="section-title">
           <span class="section-num">10</span>
+          回归评测：防止优化回退（管理员）
+        </h2>
+        <div class="card">
+          <h3 class="card-title">对问答主链路跑离线回归</h3>
+          <ol class="step-list">
+            <li><b>建评测集</b>：侧边栏「回归评测」（仅管理员可见）新建评测集，用例可手工新增、JSON 批量导入，或从聊天「点踩」反馈一键去重导入。</li>
+            <li><b>一键回归</b>：选择评测集发起运行，系统对每条用例重放「检索 → 生成」全链路；同一评测集同时只跑一个任务。</li>
+            <li><b>看指标</b>：运行结束查看检索命中率、引用忠实度通过率、平均 judge 分与平均耗时，展开用例明细可看单条得分与耗时。</li>
+            <li><b>跨 run 对比</b>：调整 prompt / 检索 / 重排后再跑一次，对比两次指标变化，判断优化是否引入回退。</li>
+          </ol>
+          <div class="callout callout-info">
+            评测集建议覆盖高频问题与历史坏例：聊天中被点踩的问题可一键导入，让真实反馈直接变成回归用例。
+          </div>
+        </div>
+      </section>
+
+      <!-- 常见问题 -->
+      <section class="guide-section">
+        <h2 class="section-title">
+          <span class="section-num">11</span>
           常见问题
         </h2>
         <div class="faq-list">

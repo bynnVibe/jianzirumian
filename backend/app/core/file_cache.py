@@ -216,18 +216,30 @@ async def serve_cached_file(file_path, user: dict):
 
     filename = file_path.name
     # Word 转换出的预览 PDF 无独立记录，需按 pdf_preview_path 反查
-    rec = upload_records.get_record_by_source(str(file_path)) \
-        or upload_records.get_record_by_pdf_path(str(file_path))
+    # 同一文件路径可能存在多条记录（不同属主分别入库），需全部取出做权限判定
+    recs = upload_records.get_records_by_source(str(file_path)) \
+        or upload_records.get_records_by_pdf_path(str(file_path))
 
-    if rec:
-        visibility = rec.get("visibility", "public")
-        owner_id = rec.get("owner_id") or ""
+    if recs:
         user_id = user.get("id") or user.get("username") or ""
         is_admin = user.get("role") == "admin"
-        # 个人知识库文件：仅属主与管理员可访问，缓存也按属主隔离
-        if visibility != "public" and owner_id and owner_id != user_id and not is_admin:
+        # 在所有匹配记录中挑选一条当前请求者可访问的记录：
+        # 公共记录对所有人（含游客）可见；个人记录仅属主本人与管理员可见。
+        # 任一记录可访问即放行，避免按路径取第一条命中非属主记录导致合法属主被误拒。
+        rec = None
+        for r in recs:
+            visibility = r.get("visibility", "public")
+            owner_id = r.get("owner_id") or ""
+            if visibility == "public" or is_admin or (owner_id and owner_id == user_id):
+                rec = r
+                break
+        if rec is None:
             raise HTTPException(status_code=403, detail="无权访问该文件")
+        # 缓存键沿用可访问记录的可见性/属主，保持公共共享 / 个人隔离架构不变
+        visibility = rec.get("visibility", "public")
+        owner_id = rec.get("owner_id") or ""
         cache_key = file_cache.key_for(filename, visibility, owner_id)
+
         t0 = time.time()
         hit = await asyncio.to_thread(file_cache.get, cache_key)
         if hit:

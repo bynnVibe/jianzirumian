@@ -67,12 +67,30 @@
   <script>
     // Vue mount 后调用此函数收起启动屏
     window.__removeSplash = function() {
+      window.__splashDone = true;
       var el = document.getElementById('app-splash');
       if (el) {
         el.classList.add('fade-out');
         setTimeout(function() { el.remove(); }, 400);
       }
     };
+    // 看门狗：若 8 秒内 Vue 未挂载（典型场景：浏览器缓存了旧版 index.html，
+    // 其引用的旧哈希资源已不存在，模块脚本加载失败），在启动屏上给出
+    // 「点击刷新」自救入口，带缓存破坏参数强制重新拉取 index.html
+    setTimeout(function() {
+      if (window.__splashDone) return;
+      var el = document.getElementById('app-splash');
+      if (!el || document.getElementById('splash-reload')) return;
+      var tip = document.createElement('div');
+      tip.style.cssText = 'margin-top:20px;font-size:13px;color:#8c7e6e;text-align:center;line-height:2;';
+      tip.innerHTML = '页面资源加载失败（可能因浏览器缓存了旧版本）<br>' +
+        '<a href="#" id="splash-reload" style="color:#d4852e;text-decoration:underline;">点击刷新重试</a>';
+      el.appendChild(tip);
+      document.getElementById('splash-reload').onclick = function(e) {
+        e.preventDefault();
+        location.replace(location.pathname + '?r=' + Date.now());
+      };
+    }, 8000);
   </script>
   <script type="module" src="/src/main.js"></script>
 </body>

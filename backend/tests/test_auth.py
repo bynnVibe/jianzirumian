@@ -3,15 +3,19 @@ import time
 
 import pytest
 
+from app.core import db
 from app.services import auth
 
 
 @pytest.fixture(autouse=True)
-def isolate_users(tmp_path, monkeypatch):
-    """将用户文件与内存会话隔离到临时目录，避免污染真实数据"""
-    monkeypatch.setattr(auth, "USERS_FILE", tmp_path / "users.json")
+def isolate_db(tmp_path, monkeypatch):
+    """将 SQLite 数据库与内存会话隔离到临时文件，避免污染真实数据"""
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "app.db")
+    monkeypatch.setattr(db, "_conn", None)
     auth._active_sessions.clear()
     yield
+    if db._conn is not None:
+        db._conn.close()
     auth._active_sessions.clear()
 
 
@@ -47,20 +51,18 @@ def test_new_user_uses_pbkdf2():
 
 
 def test_legacy_sha256_user_can_login_and_is_upgraded():
-    # 手工构造一个旧格式（单轮 SHA-256、无 hash_algo 字段）的存量用户
+    # 手工构造一个旧格式（单轮 SHA-256、hash_algo 非 pbkdf2）的存量用户
     salt = "abcd1234"
     legacy_hash = auth._hash_password_legacy("oldpass", salt)
-    auth._save_users([{
-        "id": "legacy-user-1",
-        "username": "legacy",
-        "password_hash": legacy_hash,
-        "salt": salt,
-        "contact": "legacy@test.com",
-        "role": "admin",
-        "is_active": True,
-        "created_at": time.time(),
-        "updated_at": time.time(),
-    }])
+    now = time.time()
+    # 直接向 SQLite 写入一个旧格式用户（hash_algo != 'pbkdf2' 表示存量单轮 SHA-256）
+    db.execute(
+        "INSERT INTO users (id, username, password_hash, salt, hash_algo, contact,"
+        " role, is_active, created_at, updated_at, last_login_at)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        ("legacy-user-1", "legacy", legacy_hash, salt, "sha256", "legacy@test.com",
+         "admin", 1, now, now, None),
+    )
 
     token, info = auth.login("legacy", "oldpass")
     assert token and info["username"] == "legacy"
@@ -77,8 +79,14 @@ def test_token_expiry():
     token, _ = auth.login("alice", "pass123")
     assert auth.get_session_user(token) is not None
 
-    # 将会话置为已过期
-    auth._active_sessions[token]["expires_at"] = time.time() - 1
+    # 将会话置为已过期（权威数据在 SQLite auth_sessions，同时同步内存短缓存）
+    expired = time.time() - 1
+    db.execute(
+        "UPDATE auth_sessions SET expires_at = ? WHERE token_hash = ?",
+        (expired, auth._token_hash(token)),
+    )
+    if token in auth._active_sessions:
+        auth._active_sessions[token]["expires_at"] = expired
     assert auth.get_session_user(token) is None
 
 

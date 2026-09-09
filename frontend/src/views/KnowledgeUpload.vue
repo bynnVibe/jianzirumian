@@ -20,6 +20,13 @@
             知识入库
             <span v-if="doneCount" class="tab-badge">{{ doneCount }}</span>
           </button>
+          <button
+            class="module-tab"
+            :class="{ active: activeTab === 'history' }"
+            @click="switchToHistory()"
+          >
+            入库历史
+          </button>
         </div>
       </div>
       <p class="page-desc">图片 / Word / PDF 上传后后台多线程自动解析；在「知识入库」检查解析结果无误后，一键入库知识库与 llm-wiki 百科</p>
@@ -440,6 +447,100 @@
       </div>
     </div>
 
+    <!-- ==================== Tab 3：入库历史 ==================== -->
+    <div v-show="activeTab === 'history'" class="tab-panel">
+      <div class="upload-section">
+        <div class="module-head">
+          <span class="module-badge hist">史</span>
+          <div>
+            <div class="module-title">入库历史</div>
+            <div class="module-sub">已成功入库的知识文本记录；点击「知识来源」预览原始文件，点击「解析文档」查看解析后的文本片段</div>
+          </div>
+        </div>
+
+        <!-- 加载态 -->
+        <div v-if="historyLoading" class="result-empty">
+          <span class="spinner-xs"></span>
+          <p>正在加载入库历史…</p>
+        </div>
+
+        <!-- 空态 -->
+        <div v-else-if="!historyItems.length" class="result-empty">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="32" height="32">
+            <circle cx="12" cy="12" r="10"/>
+            <polyline points="12 6 12 12 16 14"/>
+          </svg>
+          <p>暂无入库记录</p>
+          <p class="empty-tip">在「知识入库」确认入库后，成功的记录会出现在这里</p>
+        </div>
+
+        <!-- 列表 -->
+        <template v-else>
+          <div class="history-table">
+            <div class="ht-row ht-head">
+              <span class="ht-seq">序号</span>
+              <span class="ht-time">入库时间</span>
+              <span class="ht-source">知识来源</span>
+              <span class="ht-doc">解析文档</span>
+            </div>
+            <div v-for="(item, idx) in historyItems" :key="item.record_id" class="ht-row">
+              <span class="ht-seq">{{ historyOffset + idx + 1 }}</span>
+              <span class="ht-time">{{ formatDateTime(item.ingested_at) }}</span>
+              <span class="ht-source">
+                <button
+                  v-if="item.source_file_exists"
+                  class="ht-link"
+                  :title="item.source_name"
+                  @click="openHistorySource(item)"
+                >
+                  <span class="fi-icon small" :class="item.source_type">{{ typeIcon(item.source_type) }}</span>
+                  <span class="ht-link-body">
+                    <span class="ht-link-text">{{ item.title || item.source_name }}</span>
+                    <span
+                      v-if="item.source_name && item.source_name !== item.title"
+                      class="ht-srcname"
+                    >{{ item.source_name }}</span>
+                  </span>
+                </button>
+                <span v-else class="ht-disabled" :title="item.source_name">
+                  <span class="fi-icon small" :class="item.source_type">{{ typeIcon(item.source_type) }}</span>
+                  <span class="ht-link-body">
+                    <span class="ht-link-text">{{ item.title || item.source_name }}</span>
+                    <span
+                      v-if="item.source_name && item.source_name !== item.title"
+                      class="ht-srcname"
+                    >{{ item.source_name }}</span>
+                  </span>
+                  <em class="ht-missing">源文件已删除</em>
+                </span>
+              </span>
+              <span class="ht-doc">
+                <button
+                  class="ht-link"
+                  :disabled="!item.has_parsed_content"
+                  @click="openHistoryDetail(item)"
+                >
+                  查看解析文档
+                  <span
+                    v-if="item.entry_count"
+                    class="ht-count"
+                    title="入库片段数（写入向量库的 chunk 数）"
+                  >入库 {{ item.entry_count }} 段</span>
+                </button>
+              </span>
+            </div>
+          </div>
+
+          <div v-if="historyHasMore" class="history-more">
+            <button class="btn btn-outline" :disabled="historyLoadingMore" @click="loadMoreHistory">
+              <span v-if="historyLoadingMore" class="spinner-xs"></span>
+              加载更多
+            </button>
+          </div>
+        </template>
+      </div>
+    </div>
+
     <!-- 图片裁剪弹窗 -->
     <div v-if="cropModalVisible" class="crop-modal" @click.self="closeCropModal">
       <div class="crop-modal-content">
@@ -527,6 +628,34 @@
       </div>
     </div>
 
+    <!-- 图片模糊确认弹窗 -->
+    <div v-if="blurModal.visible" class="preview-modal" @click.self="onBlurReselect">
+      <div class="preview-modal-content kb-modal">
+        <div class="preview-modal-header">
+          <h3>图片清晰度检测</h3>
+          <button class="modal-close" @click="onBlurReselect" aria-label="关闭">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
+              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+            </svg>
+          </button>
+        </div>
+        <div class="blur-modal-body">
+          <img v-if="blurModal.thumb" :src="blurModal.thumb" class="blur-preview" alt="待检测图片" />
+          <div class="blur-file-name" :title="blurModal.fileName">{{ blurModal.fileName }}</div>
+          <div class="blur-score-row">
+            清晰度分数
+            <span class="blur-score-value">{{ blurModal.score }}</span>
+            <span class="blur-score-ref">（参考阈值 {{ blurThreshold }}，越低越模糊）</span>
+          </div>
+          <p class="blur-warning">图片较模糊，可能影响 OCR 识别效果，请重新选择清晰图片</p>
+        </div>
+        <div class="review-actions">
+          <button class="btn btn-secondary" @click="onBlurUploadAnyway">仍要上传</button>
+          <button class="btn btn-primary" @click="onBlurReselect">重新选择</button>
+        </div>
+      </div>
+    </div>
+
     <!-- 全局状态提示 -->
     <div v-if="statusMessage" class="status-toast" :class="statusType">{{ statusMessage }}</div>
   </div>
@@ -534,6 +663,7 @@
 
 <script setup>
 import { ref, computed, reactive, onMounted, onUnmounted, nextTick } from 'vue'
+import { useRouter, useRoute } from 'vue-router'
 import Cropper from 'cropperjs/dist/cropper.esm.js'
 import {
   uploadPendingFile,
@@ -545,9 +675,15 @@ import {
   polishOCR,
   listKnowledgeBases,
   createKnowledgeBase,
+  listIngestHistory,
   getImageUrl as buildImageUrl,
 } from '@/api'
 import { compressImageFile, compressCanvasToFile, MAX_UPLOAD_SIZE } from '@/utils/image'
+import { analyzeImageBlur, BLUR_VARIANCE_THRESHOLD } from '@/utils/imageQuality'
+
+const router = useRouter()
+const route = useRoute()
+
 
 // ---- 模块切换 ----
 const activeTab = ref('upload')
@@ -556,6 +692,98 @@ function switchToIngest() {
   refreshPending()
   startPolling()
 }
+function switchToHistory() {
+  activeTab.value = 'history'
+  loadHistory(true)
+}
+
+// ---- 入库历史 ----
+const HISTORY_PAGE_SIZE = 50
+const historyItems = ref([])
+const historyTotal = ref(0)
+const historyOffset = ref(0)
+const historyLoading = ref(false)
+const historyLoadingMore = ref(false)
+const historyHasMore = computed(() => historyItems.value.length < historyTotal.value)
+
+function formatDateTime(iso) {
+  if (!iso) return ''
+  const d = new Date(iso)
+  if (isNaN(d.getTime())) return iso
+  const pad = (n) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
+/**
+ * 加载入库历史列表
+ * @param {boolean} reset true=从头加载（切 tab / 刷新），false=追加下一页
+ */
+async function loadHistory(reset = false) {
+  if (reset) {
+    historyLoading.value = true
+    historyOffset.value = 0
+  } else {
+    historyLoadingMore.value = true
+  }
+  try {
+    const offset = reset ? 0 : historyItems.value.length
+    const res = await listIngestHistory(HISTORY_PAGE_SIZE, offset)
+    const items = res.data.items || []
+    historyTotal.value = res.data.total || 0
+    historyItems.value = reset ? items : [...historyItems.value, ...items]
+    historyOffset.value = offset
+  } catch (e) {
+    showStatus('加载入库历史失败：' + (e.response?.data?.detail || e.message), 'error')
+  } finally {
+    historyLoading.value = false
+    historyLoadingMore.value = false
+  }
+}
+
+function loadMoreHistory() {
+  loadHistory(false)
+}
+
+/** 知识来源预览：图片走弹窗，Word/PDF 复用 /doc-preview 分页预览 */
+function openHistorySource(item) {
+  if (!item.source_file_exists) {
+    showStatus('源文件已删除，无法预览', 'info')
+    return
+  }
+  if (item.source_type === 'image') {
+    previewImageSrc.value = buildImageUrl(item.source_path)
+    return
+  }
+  // Word 记录必须有转换后的原始排版 PDF 才能分页预览；
+  // 缺失时不能让 PDF 阅读器加载 .docx，直接提示（图片记录已在上面返回，不受影响）
+  if (item.source_type === 'word' && !item.pdf_preview_path) {
+    showStatus('该记录未生成原始排版预览', 'info')
+    return
+  }
+  // pdf 参数：Word 用转换后的预览 PDF，PDF 直接用源文件本身
+  const pdfPath = item.source_type === 'word' ? item.pdf_preview_path : item.source_path
+  const pdfName = (pdfPath || '').split('/').pop()
+  if (!pdfName) {
+    showStatus('原始文档不可预览', 'info')
+    return
+  }
+  // file 必须是磁盘真实文件名（下载原文用）：Word 指向原始 docx（source_path），PDF 指向自身
+  const diskName = (item.source_path || '').split('/').pop()
+  const title = item.source_name || item.title || ''
+  const fileParam = diskName ? `&file=${encodeURIComponent(diskName)}` : ''
+  const titleParam = title ? `&title=${encodeURIComponent(title)}` : ''
+  window.open(`/doc-preview?pdf=${encodeURIComponent(pdfName)}${fileParam}${titleParam}`, '_blank')
+}
+
+/** 解析文档：跳转独立详情页 */
+function openHistoryDetail(item) {
+  router.push({
+    name: 'IngestDetail',
+    params: { recordId: item.record_id },
+    query: { src: item.source_path || '' },
+  })
+}
+
 
 // ---- OCR 引擎选项 ----
 const ocrOptions = [
@@ -592,6 +820,62 @@ function showStatus(msg, type = 'info') {
   statusTimer = setTimeout(() => {
     statusMessage.value = ''
   }, 4000)
+}
+
+// ---- 图片模糊检测（OCR 前置校验） ----
+const blurThreshold = BLUR_VARIANCE_THRESHOLD
+const blurModal = reactive({
+  visible: false,
+  fileName: '',
+  score: 0,
+  thumb: '',
+})
+let blurResolve = null
+
+/**
+ * 弹出模糊确认弹窗，等待用户决策
+ * @returns {Promise<boolean>} true=仍要上传（保留），false=重新选择（丢弃）
+ */
+function confirmBlurFile(file, score) {
+  return new Promise((resolve) => {
+    blurResolve = resolve
+    blurModal.fileName = file.name || '未命名图片'
+    blurModal.score = Number.isFinite(score) ? Math.round(score) : 0
+    blurModal.thumb = file ? URL.createObjectURL(file) : ''
+    blurModal.visible = true
+  })
+}
+function closeBlurModal(keep) {
+  blurModal.visible = false
+  if (blurModal.thumb) {
+    URL.revokeObjectURL(blurModal.thumb)
+    blurModal.thumb = ''
+  }
+  const r = blurResolve
+  blurResolve = null
+  if (r) r(keep)
+}
+function onBlurUploadAnyway() {
+  closeBlurModal(true)
+}
+function onBlurReselect() {
+  closeBlurModal(false)
+}
+
+/**
+ * 检测图片清晰度，模糊时弹窗确认。
+ * @returns {Promise<boolean>} true=可继续（清晰 或 用户选择仍要上传），false=丢弃
+ */
+async function checkBlurAndConfirm(file) {
+  let res
+  try {
+    res = await analyzeImageBlur(file)
+  } catch (e) {
+    // 检测异常一律放行，不阻断上传
+    return true
+  }
+  if (!res || !res.blurry) return true
+  return confirmBlurFile(file, res.score)
 }
 
 // ---- 文件类型识别 ----
@@ -637,8 +921,17 @@ function handleImageFiles(files) {
     else showStatus(`《${f.name}》不是图片，请在下方 Word / PDF 区上传`, 'error')
   }
   if (!images.length) return
-  // 选择图片后先进入编辑界面（裁剪 / 旋转），确认后再上传
-  openCropEditor(images[0], { type: 'single' })
+  // 选择图片后先做清晰度检测（模糊则弹窗确认），通过后进入编辑界面（裁剪 / 旋转）
+  processSingleImage(images)
+}
+async function processSingleImage(images) {
+  const first = images[0]
+  const ok = await checkBlurAndConfirm(first)
+  if (!ok) {
+    showStatus('已丢弃模糊图片，请重新选择清晰图片', 'info')
+    return
+  }
+  openCropEditor(first, { type: 'single' })
   if (images.length > 1) {
     showStatus(`单张上传仅取第一张图片，其余 ${images.length - 1} 张请使用批量上传`, 'info')
   }
@@ -666,11 +959,19 @@ function handleBatchDrop(e) {
   appendBatchFiles(Array.from(e.dataTransfer.files || []))
 }
 function appendBatchFiles(files) {
+  processBatchFiles(files)
+}
+async function processBatchFiles(files) {
   for (const f of files) {
     if (detectType(f) !== 'image') {
       showStatus(`《${f.name}》不是图片，批量上传仅支持图片`, 'error')
       continue
     }
+    if (batchFiles.value.some((x) => x.name === f.name && x.size === f.size)) continue
+    // 清晰度检测：模糊则弹窗确认，用户选择「重新选择」时跳过入队
+    const ok = await checkBlurAndConfirm(f)
+    if (!ok) continue
+    // 检测/确认期间列表可能已变化，再次去重
     if (batchFiles.value.some((x) => x.name === f.name && x.size === f.size)) continue
     batchFiles.value.push({
       localId: `batch-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -1115,14 +1416,23 @@ function previewOriginal(item) {
     showStatus('原始文档预览生成中，请稍候…', 'info')
     return
   }
-  window.open(`/doc-preview?pdf=${encodeURIComponent(pdfName)}`, '_blank')
+  // file 为磁盘真实文件名（下载原文用），title 为展示名
+  const diskName = item.file_path ? baseName(item.file_path) : ''
+  const title = item.source_name || item.filename || ''
+  const fileParam = diskName ? `&file=${encodeURIComponent(diskName)}` : ''
+  const titleParam = title ? `&title=${encodeURIComponent(title)}` : ''
+  window.open(`/doc-preview?pdf=${encodeURIComponent(pdfName)}${fileParam}${titleParam}`, '_blank')
 }
 
 function pdfPreviewName(item) {
   return item?.pdf_preview_path ? baseName(item.pdf_preview_path) : ''
 }
 function pdfPreviewUrl(item) {
-  return `/doc-preview?pdf=${encodeURIComponent(pdfPreviewName(item))}`
+  const diskName = item?.file_path ? baseName(item.file_path) : ''
+  const title = item?.source_name || item?.filename || ''
+  const fileParam = diskName ? `&file=${encodeURIComponent(diskName)}` : ''
+  const titleParam = title ? `&title=${encodeURIComponent(title)}` : ''
+  return `/doc-preview?pdf=${encodeURIComponent(pdfPreviewName(item))}${fileParam}${titleParam}`
 }
 function pageLink(item, pageNumber) {
   return `${buildImageUrl(item.pdf_preview_path)}#page=${pageNumber}`
@@ -1415,10 +1725,18 @@ onMounted(() => {
   loadKnowledgeBases()
   refreshPending()
   startPolling()
+  // 从入库详情页返回时，直接定位到对应 tab（如 ?tab=history）
+  const tab = route.query.tab
+  if (tab === 'history') {
+    switchToHistory()
+  } else if (tab === 'ingest') {
+    switchToIngest()
+  }
 })
 onUnmounted(() => {
   stopPolling()
   if (statusTimer) clearTimeout(statusTimer)
+  if (blurModal.thumb) URL.revokeObjectURL(blurModal.thumb)
 })
 </script>
 
@@ -1671,6 +1989,58 @@ onUnmounted(() => {
 .result-empty p { margin-top: 10px; font-size: 13px; }
 .empty-tip { font-size: 12px !important; color: #c9bfae; }
 
+/* ---------- 入库历史 ---------- */
+.module-badge.hist { background: #5a8a4a; }
+.history-table {
+  border: 1px solid #ede4d6; border-radius: 12px; overflow: hidden;
+}
+.ht-row {
+  display: grid;
+  grid-template-columns: 60px 160px 1fr 180px;
+  align-items: center; gap: 12px;
+  padding: 12px 16px; border-bottom: 1px solid #f0e9dd;
+}
+.ht-row:last-child { border-bottom: none; }
+.ht-head {
+  background: #f7f1e7; font-size: 12.5px; font-weight: 700; color: #84431f;
+  padding: 10px 16px;
+}
+.ht-row:not(.ht-head):hover { background: #fdfaf5; }
+.ht-seq { font-size: 13px; color: #a99a86; font-variant-numeric: tabular-nums; }
+.ht-head .ht-seq { color: #84431f; }
+.ht-time { font-size: 13px; color: #6b6156; font-variant-numeric: tabular-nums; }
+.ht-source, .ht-doc { min-width: 0; }
+.ht-link {
+  display: inline-flex; align-items: center; gap: 7px; max-width: 100%;
+  background: none; border: none; padding: 0; cursor: pointer;
+  font-size: 13.5px; font-weight: 600; color: #c98a4b; text-align: left;
+  transition: color 0.15s;
+}
+.ht-link:hover:not(:disabled) { color: #84431f; text-decoration: underline; }
+.ht-link:disabled { color: #b3a798; cursor: not-allowed; }
+.ht-link-text {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ht-link-body { display: flex; flex-direction: column; min-width: 0; }
+.ht-srcname {
+  font-size: 11px; color: #a2937f;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ht-count {
+  flex-shrink: 0; font-size: 11px; font-weight: 600; color: #8a7e72;
+  background: #f3ece2; border-radius: 10px; padding: 1px 8px;
+}
+.ht-disabled {
+  display: inline-flex; align-items: center; gap: 7px; max-width: 100%;
+  font-size: 13.5px; font-weight: 600; color: #b3a798;
+}
+.ht-missing {
+  flex-shrink: 0; font-size: 11px; font-style: normal; color: #c0392b;
+  background: #fbe6e2; border-radius: 10px; padding: 1px 8px;
+}
+.history-more { display: flex; justify-content: center; margin-top: 16px; }
+
+
 /* ---------- 按钮 ---------- */
 .btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 6px;
@@ -1727,6 +2097,28 @@ onUnmounted(() => {
   border-radius: 8px; border: 1px solid #ede6dc;
 }
 .kb-modal-body { display: flex; flex-direction: column; gap: 10px; }
+
+/* ---------- 图片模糊确认弹窗 ---------- */
+.blur-modal-body { display: flex; flex-direction: column; gap: 10px; }
+.blur-preview {
+  width: 100%; max-height: 220px; object-fit: contain; display: block;
+  border-radius: 8px; border: 1px solid #ede6dc; background: #fdfbf7;
+}
+.blur-file-name {
+  font-size: 13px; font-weight: 600; color: #2d2a24;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.blur-score-row { font-size: 12.5px; color: #6b6156; }
+.blur-score-value {
+  font-weight: 700; color: #b05555; font-variant-numeric: tabular-nums;
+  margin: 0 2px;
+}
+.blur-score-ref { color: #b3a798; font-size: 11.5px; }
+.blur-warning {
+  font-size: 13px; line-height: 1.6; color: #84431f;
+  background: #f9eddb; border: 1px solid #e8d6bb; border-radius: 8px;
+  padding: 10px 12px;
+}
 
 /* ---------- 状态提示 ---------- */
 .status-toast {

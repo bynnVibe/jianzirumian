@@ -126,6 +126,26 @@ class UploadRecordService:
         )
         return [_row_to_record(r) for r in rows], total
 
+    def list_ingest_history(
+        self, owner_id: str, limit: int = 50, offset: int = 0
+    ) -> tuple[list[dict], int]:
+        """入库历史：仅返回指定用户自己成功入库的记录，按入库时间倒序。
+
+        「成功入库」判定依据：upload_records 表中的记录仅在知识入库流水线
+        （upload_pipeline.ingest）确认写入向量库且 chunk_count > 0 后才创建，
+        因此表内每条记录即代表一次成功入库；chunk_count 即入库知识片段数。
+        """
+        total_row = db.query_one(
+            "SELECT COUNT(*) AS n FROM upload_records WHERE owner_id = ?", (owner_id,)
+        )
+        total = total_row["n"] if total_row else 0
+        rows = db.query(
+            "SELECT * FROM upload_records WHERE owner_id = ?"
+            " ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            (owner_id, limit, offset),
+        )
+        return [_row_to_record(r) for r in rows], total
+
     def get_record(self, record_id: str) -> Optional[dict]:
         """获取单条记录"""
         row = db.query_one("SELECT * FROM upload_records WHERE id = ?", (record_id,))
@@ -144,6 +164,24 @@ class UploadRecordService:
             "SELECT * FROM upload_records WHERE pdf_preview_path = ?", (pdf_path,)
         )
         return _row_to_record(row) if row else None
+
+    def get_records_by_source(self, source_image: str) -> list[dict]:
+        """按来源文件路径获取全部匹配记录。
+
+        同一文件路径可能存在多条记录（不同属主分别入库），文件下发权限判定
+        需遍历全部匹配记录，任一记录对当前请求者可访问即放行。
+        """
+        rows = db.query(
+            "SELECT * FROM upload_records WHERE image_path = ?", (source_image,)
+        )
+        return [_row_to_record(r) for r in rows]
+
+    def get_records_by_pdf_path(self, pdf_path: str) -> list[dict]:
+        """按 Word 预览 PDF 路径获取全部匹配记录（同 get_records_by_source 语义）。"""
+        rows = db.query(
+            "SELECT * FROM upload_records WHERE pdf_preview_path = ?", (pdf_path,)
+        )
+        return [_row_to_record(r) for r in rows]
 
     def enrich_sources(self, sources: Optional[list]):
         """按上传记录为历史来源回填 pdf_preview_path / source_type 等缺失字段。

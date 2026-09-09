@@ -7,12 +7,12 @@
           <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
           <polyline points="14 2 14 8 20 8"/>
         </svg>
-        <span class="doc-toolbar-title">{{ filename }}</span>
+        <span class="doc-toolbar-title">{{ displayTitle }}</span>
         <span v-if="pageNum" class="doc-toolbar-page">第 {{ pageNum }} 页</span>
         <span v-if="isPdfMode" class="doc-toolbar-page">原始文档分页预览</span>
       </div>
       <div class="doc-toolbar-right">
-        <a v-if="fileUrl" :href="fileUrl" :download="filename" class="toolbar-btn">
+        <a v-if="fileUrl" :href="fileUrl" :download="displayTitle" class="toolbar-btn">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="15" height="15">
             <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
             <polyline points="7 10 12 15 17 10"/>
@@ -38,19 +38,19 @@
           <line x1="12" y1="16" x2="12.01" y2="16"/>
         </svg>
         <p>文档加载失败：{{ error }}</p>
-        <a v-if="fileUrl" :href="fileUrl" :download="filename" class="toolbar-btn">下载原文查看</a>
+        <a v-if="fileUrl" :href="fileUrl" :download="displayTitle" class="toolbar-btn">下载原文查看</a>
       </div>
       <!-- 原始文档 PDF 分页预览（Word 原始排版转换 / PDF 原件），浏览器阅读器自带分页导航 -->
       <iframe
         v-else-if="isPdfMode"
         :src="pdfUrl"
         class="doc-pdf-frame"
-        :title="filename"
+        :title="displayTitle"
       ></iframe>
       <!-- Word 未生成原始 PDF 预览：不展示解析后的文本，仅提供下载 -->
       <div v-else-if="isWordWithoutPdf" class="doc-state">
         <p>原始 Word 文档尚未生成 PDF 预览，可下载原文查看</p>
-        <a v-if="fileUrl" :href="fileUrl" :download="filename" class="toolbar-btn">下载原文</a>
+        <a v-if="fileUrl" :href="fileUrl" :download="displayTitle" class="toolbar-btn">下载原文</a>
       </div>
       <!-- Word HTML 渲染（旧数据兼容：仅有 pdf 预览模式才走 iframe，其余不展示解析文本） -->
       <div v-else class="doc-paper">
@@ -81,6 +81,8 @@ const pageNum = ref(route.query.page ? parseInt(route.query.page) : null)
 const directUrl = ref(route.query.url || '')
 // Word 原始排版转换后的 PDF 文件名：存在时以 PDF 分页预览原始文档
 const pdfName = ref(route.query.pdf || '')
+// 可选显示标题：调用方传入的 source_name 等展示名（与真实磁盘文件名 file 解耦）
+const titleName = ref(route.query.title || '')
 const isPdfMode = computed(() => !!pdfName.value)
 const pdfUrl = computed(() => {
   if (!pdfName.value) return ''
@@ -94,6 +96,9 @@ const isWordWithoutPdf = computed(() => {
   return (name.endsWith('.docx') || name.endsWith('.doc')) && !pdfName.value
 })
 
+// 工具栏标题：优先用调用方传入的展示名 title，其次真实文件名，最后回退 pdf 名
+const displayTitle = computed(() => titleName.value || filename.value || pdfName.value || '')
+
 const loading = ref(true)
 const error = ref('')
 const docHtml = ref('')
@@ -102,17 +107,20 @@ const htmlContainer = ref(null)
 const pageAnchors = ref([])
 
 onMounted(async () => {
-  if (!filename.value) {
+  // 仅传 pdf 参数（原始文档分页预览）时无需 file，故 filename 与 pdf 均缺失才报错
+  if (!filename.value && !isPdfMode.value) {
     error.value = '未指定文件名'
     loading.value = false
     return
   }
 
   // 构造文件 URL：优先使用直传的分发地址，否则用带 token 的 /uploads 地址
-  fileUrl.value = directUrl.value || buildImageUrl(filename.value)
+  fileUrl.value = directUrl.value || (filename.value ? buildImageUrl(filename.value) : '')
 
   // PDF 模式：iframe 直接加载，无需 mammoth 解析
   if (isPdfMode.value) {
+    // 仅传 pdf 参数时没有 file，下载原文回退到 pdf 本身的分发地址
+    if (!fileUrl.value) fileUrl.value = buildImageUrl(pdfName.value)
     loading.value = false
     return
   }

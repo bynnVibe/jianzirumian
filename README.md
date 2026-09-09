@@ -109,6 +109,8 @@
 | **自动向量化** | 文本自动分割 → Embedding 向量化 → 存入 FAISS 向量库，并同步编译 llm-wiki 百科卡片 |
 | **入库实时进度** | 逐文件或一键全部入库，进度条实时显示 x / y 与当前文件，直到全部成功；失败项单独标红可重试 |
 | **批量处理** | 批量选择多张图片：批量识别 → 逐条查看/编辑/裁剪结果 → 单条或一键批量入库（识别与入库解耦，确认后才写入知识库） |
+| **图片模糊检测** | 选择图片后前端即时做清晰度分析（拉普拉斯方差），低于阈值弹窗提示「图片较模糊，可能影响 OCR 识别效果」并引导重新选图，避免模糊件入库拉低识别率 |
+| **入库历史** | 「知识库上传」页第三个 Tab：按入库时间倒序展示本人成功入库的记录（入库时间 / 知识来源 / 入库片段数）；来源可预览原始文件（源文件被删则置灰标注），「查看解析文档」跳转详情页按页回溯解析文本片段 |
 
 **支持 OCR 引擎：**
 
@@ -267,6 +269,43 @@
 
 **配置项**（backend/.env，页面设置优先）：`WIKI_COMPILE_ENABLED`、`WIKI_MAX_SOURCE_CHARS`（编译输入截断）、`WIKI_MIN_SOURCE_CHARS`（过短不编译）、`WIKI_COMPILE_INTERVAL`（相邻编译请求最小间隔秒数，缓解免费模型限流）。
 
+### 15. 回归评测（管理员）
+
+对问答主链路跑离线回归，量化「检索命中 / 引用忠实度 / 答案质量」，防止 prompt、检索、重排等优化引入回退。入口：侧边栏「回归评测」（仅管理员可见，路由 `/eval`）。
+
+| 功能 | 说明 |
+|------|------|
+| **评测集管理** | 新建/删除评测集；用例支持单条新增、JSON 批量导入，以及**从点踩反馈一键导入**（把聊天中被点踩的用户问题去重后转为用例，真实坏例直接进回归集） |
+| **用例字段** | 问题、参考答案、期望关键词、期望来源（文件名/标题），后两者用于检索命中判定 |
+| **一键回归** | 对评测集全部用例重放问答链路（检索 → 生成），同一评测集同时只允许一个 run 在跑；可选指定 LLM provider 对比不同模型 |
+| **run 级指标** | 检索命中率（期望关键词/期望来源命中）、引用忠实度通过率（LLM 判断答案是否被检索上下文支撑）、平均 judge 分（LLM 对照参考答案打分）、平均耗时 |
+| **运行对比** | 运行历史列表 + 用例结果明细（每条用例的检索命中/忠实度/judge 分/耗时/错误），跨 run 对比指标变化判断是否回退 |
+
+**接口一览**（`/api/eval`，仅管理员）：
+
+| 接口 | 说明 |
+|------|------|
+| `GET・POST /api/eval/datasets` / `DELETE /api/eval/datasets/{id}` | 评测集列表/新建/删除 |
+| `GET・POST /api/eval/datasets/{id}/cases` / `DELETE /api/eval/cases/{case_id}` | 用例列表/新增/删除 |
+| `POST /api/eval/datasets/{id}/cases/import` | JSON 批量导入用例 |
+| `POST /api/eval/datasets/{id}/cases/from-feedback` | 从点踩反馈（rating=dislike）去重导入用例 |
+| `POST /api/eval/datasets/{id}/runs` | 发起一次回归运行（并发运行返回 409） |
+| `GET /api/eval/runs` / `GET /api/eval/runs/{run_id}` | 运行历史 / 运行详情与用例结果明细 |
+
+### 16. Redis 文件缓存
+
+知识库原始文件（图片/Word/PDF/Word 转换预览 PDF）经 Redis 缓存加速问答来源跳转与预览：
+
+| 特性 | 说明 |
+|------|------|
+| **隔离策略** | 公共知识库文件全局共享缓存；个人知识库文件按属主隔离，仅属主/管理员可命中 |
+| **自动降级** | Redis 不可用时进入 60s 冷却并直读磁盘，功能不受影响；恢复后自动重试 |
+| **后台写入** | 缓存写入放后台线程（远程 Redis 上行慢时不阻塞请求事件循环） |
+| **可观测** | 后端日志按 `[HIT]/[MISS]/[SKIP]/[BYPASS]` 标签记录每次下发的来源与耗时；响应头 `X-File-Cache` 同值 |
+| **部署形态** | compose 内置 `redis:7-alpine`（512MB + allkeys-lru 纯缓存、无持久化）；本地开发可用 `jzry-redis-dev` 容器或自有 Redis |
+
+**配置项**（backend/.env，系统设置页优先）：`REDIS_URL`、`FILE_CACHE_ENABLED`、`FILE_CACHE_TTL`（默认 86400 秒）、`FILE_CACHE_MAX_MB`（单文件上限，默认 20MB）。
+
 ---
 
 ## 技术栈
@@ -387,6 +426,8 @@ cd frontend && npm run dev
 - [ ] <http://localhost:8000/docs> 能看到交互式 API 文档
 - [ ] 登录页提供游客模式，不注册也能直接体验对话
 - [ ] 上传一张手写笔记照片 → 后台 OCR 识别出文字 → 切「知识入库」确认入库（进度实时可见）→ 回到对话页提问，能得到带来源引用的回答
+- [ ] 「知识库上传 → 入库历史」Tab 能看到刚入库的记录，「查看解析文档」可回溯解析文本
+- [ ] 管理员账号侧边栏出现「回归评测」，可新建评测集并发起运行
 
 ### 关于仓库里“没有”的东西
 
@@ -439,7 +480,7 @@ docker compose up -d
 
 瘦身模式的影响（均有自动降级，不影响主流程）：
 - 本地 CrossEncoder 重排序不可用，需使用远端重排序提供商；
-- Word 原始排版 PDF 预览自动降级为 mammoth 渲染（分页预览仍可用）。
+- Word 原始排版 PDF 预览自动降级：管理页按解析内容逻辑分页展示，问答来源页提供下载原文（不影响解析与问答）。
 
 ### 数据持久化
 
@@ -452,6 +493,10 @@ compose 已配置以下挂载，重启/重建容器数据不丢失：
 | `./logs/backend` | `/app/backend/log` | 后端日志（按日期 `YYYY-MM-DD.log`） |
 | `./logs/frontend` | `/var/log/nginx` | Nginx 访问/错误日志 |
 | `./backend/.env` | `/app/backend/.env` | 环境变量（只读挂载） |
+
+> **注意**：Nginx 日志写入挂载目录 `logs/frontend/`（`access.log` / `error.log`），因此 `docker logs <frontend 容器>` 为空属设计行为，排查前端请求请查看该目录。
+>
+> **Redis 无需持久化**：compose 中的 `redis` 服务为纯文件缓存（512MB + allkeys-lru、`--save ""` 关闭落盘），不挂载任何 volume，重启/丢失缓存仅影响预热速度，不影响数据正确性。
 
 ### 自定义配置
 
@@ -551,7 +596,7 @@ bash scripts/deploy-aliyun.sh all
 > REGISTRY=docker.io/library/ bash scripts/deploy-aliyun.sh build   # 或其他可用代理前缀
 > ```
 >
-> **关于镜像体积（瘦身构建）**：脚本默认开启 `SLIM=1` 瘦身模式，后端镜像不装 torch / sentence-transformers / LibreOffice，实测镜像从 2.27GB 降到 574MB，导出包从 ~745MB 降到 ~206MB，低带宽上传耗时大幅缩短。前提是 `backend/.env` 中 `RERANKER_PROVIDER` 使用远端提供商（如 `dashscope`）；Word 原始排版预览会自动降级为 mammoth 渲染。需要本地重排序 + 原始排版 PDF 预览时：
+> **关于镜像体积（瘦身构建）**：脚本默认开启 `SLIM=1` 瘦身模式，后端镜像不装 torch / sentence-transformers / LibreOffice，实测镜像从 2.27GB 降到 574MB，导出包从 ~745MB 降到 ~206MB，低带宽上传耗时大幅缩短。前提是 `backend/.env` 中 `RERANKER_PROVIDER` 使用远端提供商（如 `dashscope`）；Word 原始排版预览会自动降级为解析内容逻辑分页展示。需要本地重排序 + 原始排版 PDF 预览时：
 >
 > ```bash
 > SLIM=0 bash scripts/deploy-aliyun.sh all   # 全量模式构建（体积大）
@@ -703,6 +748,7 @@ docker compose ps
 
 ```
 NAME                  IMAGE                        STATUS         PORTS
+jianziruyang-redis    redis:7-alpine               Up 2 minutes   6379/tcp
 jianziruyang-backend  jianzirumian-backend:latest  Up 2 minutes   0.0.0.0:8000->8000/tcp
 jianziruyang-frontend jianzirumian-frontend:latest Up 2 minutes   0.0.0.0:5173->80/tcp
 ```
@@ -890,6 +936,9 @@ crontab -e
 - [ ] HTTPS 证书有效（如已配置域名）
 - [ ] 数据目录 `data/` 已持久化（重启容器后数据不丢失）
 - [ ] 日志正常落盘：`logs/backend/YYYY-MM-DD.log` 与 `logs/frontend/access.log` 有实时输出
+- [ ] `docker compose ps` 显示 redis / backend / frontend 三个容器均为 Up
+- [ ] 「知识库上传 → 入库历史」Tab 列出本人成功入库记录，可跳转解析文档详情
+- [ ] 管理员侧边栏可见「回归评测」，能新建评测集、导入用例并发起回归运行
 
 ---
 
@@ -922,6 +971,17 @@ crontab -e
 → 查看/编辑解析效果（可一键润色）→ 确认入库（进度实时显示直到全部成功）
 → 文本分割 → 向量化 → FAISS 存储 + （后台）llm-wiki 百科卡片自动编译（可开关）
 ```
+
+### 入库历史与解析文档回溯
+
+「知识库上传」页第三个 Tab「入库历史」，按入库时间倒序列出本人成功入库的记录：
+
+- **知识来源**：点击预览原始文件（图片 / Word 原始排版 PDF / PDF 原件）；源文件已被删除时置灰标注「源文件已删除」
+- **解析文档**：点击「查看解析文档」跳转详情页，按页回溯解析后的文本片段（图片为整篇单片段），并显示入库片段数
+
+### 回归评测（管理员）
+
+侧边栏「回归评测」：建评测集 → 加用例（手工新增 / JSON 批量导入 / 从聊天点踩反馈一键导入）→ 一键回归 → 查看 run 级指标（检索命中率 / 引用忠实度通过率 / 平均 judge 分 / 平均耗时）与用例明细，跨 run 对比判断优化是否引入回退。同一评测集同时只允许一个 run 运行。
 
 ### 问答交互流程
 
@@ -1077,6 +1137,28 @@ data: {"event":"done","session_id":"xxx","message":{...}}
 
 返回匹配的文档片段列表，每个片段包含：`text`（片段文本）、`relevance`（相关度 0~99%）、`source_image`（来源文件）、`page_number`（所在页码）、`source_type`（image/word/pdf）、`pdf_preview_path`（PDF 预览路径）、`title`（文档标题）、`kb_name`（知识库名称）等完整上下文字段。
 
+#### `GET /api/knowledge/ingest-history` — 入库历史列表（仅本人）
+
+参数 `limit` / `offset`；返回本人成功入库记录（入库时间、来源文件、标题、类型、入库片段数、源文件是否仍存在、是否有解析内容）。
+
+#### `GET /api/knowledge/ingest-history/{record_id}/content` — 入库记录解析文档（仅本人）
+
+返回该记录的解析文本片段列表（Word/PDF 带页码，图片为整篇单片段）与记录概要。
+
+### 回归评测相关（仅管理员）
+
+#### `GET・POST /api/eval/datasets`、`DELETE /api/eval/datasets/{id}` — 评测集管理
+
+#### `GET・POST /api/eval/datasets/{id}/cases`、`DELETE /api/eval/cases/{case_id}` — 用例管理
+
+#### `POST /api/eval/datasets/{id}/cases/import` — JSON 批量导入用例
+
+#### `POST /api/eval/datasets/{id}/cases/from-feedback` — 从点踩反馈去重导入用例
+
+#### `POST /api/eval/datasets/{id}/runs` — 发起回归运行（并发运行 409）
+
+#### `GET /api/eval/runs`、`GET /api/eval/runs/{run_id}` — 运行历史 / 运行详情与用例明细
+
 ### 知识收藏相关
 
 #### `POST /api/bookmarks` — 创建收藏
@@ -1143,7 +1225,9 @@ jianziruyang/
 │       │   ├── chat.py               #   聊天 API（SSE 流式 + 会话管理）
 │       │   ├── auth_api.py           #   认证 API（注册/登录/用户管理）
 │       │   ├── config_api.py         #   配置 API（提供商切换 + 连接测试）
-│       │   ├── knowledge.py          #   知识库 API（上传 + OCR + CRUD）
+│       │   ├── knowledge.py          #   知识库 API（上传 + OCR + CRUD + 入库历史）
+│       │   ├── wiki.py               #   知识百科 API（llm-wiki 编译层）
+│       │   ├── eval.py               #   回归评测 API（仅管理员）
 │       │   └── bookmark_api.py       #   知识收藏 API
 │       │
 │       ├── core/                     # 核心抽象层（工厂模式）
@@ -1164,7 +1248,8 @@ jianziruyang/
 │       │   ├── knowledge.py          #   知识处理（OCR/文档解析 + 向量化 + 权限检索）
 │       │   ├── config_manager.py     #   运行时配置管理器
 │       │   ├── guest_limiter.py      #   游客免费次数限制
-│       │   ├── records.py            #   上传记录管理
+│       │   ├── records.py            #   上传记录管理（含入库历史查询）
+│       │   ├── evaluation.py         #   回归评测引擎（检索命中/忠实度/judge 打分）
 │       │   ├── usage.py              #   用量统计（按用户按天聚合）
 │       │   └── web_search.py         #   联网搜索
 │       │
@@ -1188,11 +1273,17 @@ jianziruyang/
 │       │   ├── LoginView.vue         # 登录页（含系统使用指导入口）
 │       │   ├── RegisterView.vue      # 注册页
 │       │   ├── GuideView.vue         # 系统使用指南页（/guide，免登录）
-│       │   ├── KnowledgeUpload.vue   # 知识上传页（图片/Word/PDF）
+│       │   ├── KnowledgeUpload.vue   # 知识上传页（文件上传/知识入库/入库历史三 Tab）
+│       │   ├── IngestDetailView.vue  # 入库记录解析文档详情页
 │       │   ├── ManagementView.vue    # 知识库管理 + 系统设置
+│       │   ├── WikiView.vue          # 知识百科页（llm-wiki 词条浏览）
+│       │   ├── EvalView.vue          # 回归评测页（仅管理员）
 │       │   ├── BookmarksView.vue     # 知识收藏页
 │       │   ├── UserManagementView.vue # 用户管理页
 │       │   └── ConfigView.vue        # 提供商配置页
+│       ├── utils/
+│       │   ├── image.js              # 图片压缩/预处理
+│       │   └── imageQuality.js       # 图片清晰度（模糊度）检测
 │       └── components/
 │           ├── AppSidebar.vue        # 侧边栏（含用户菜单/信息修改/使用看板弹窗）
 │           ├── ChatMessage.vue       # 消息组件（含收藏/点赞点踩）
@@ -1347,7 +1438,7 @@ API 层 (路由) → 服务层 (业务逻辑) → 核心层 (抽象接口)
 | 问答流水线 | 知识库检索与联网搜索并行；同步检索移入线程池；意图改写/证据判断 15s 超时保护 | 检索期间不阻塞事件循环，双开时省一段完整搜索耗时 |
 | 事件循环解阻塞 | 本地 OCR 推理、Rerank 打分、文本分割 + Embedding 向量化、批量上传等所有同步重计算统一 `asyncio.to_thread` | 长耗时 OCR/向量化不再卡住其他并发请求，多用户同时使用不互相拖慢 |
 | 向量检索 | metadata.json 按 mtime 失效的内存缓存 | 检索路径零磁盘 IO |
-| 前端构建 | manualChunks 拆分 vue/markdown/misc vendor；mammoth 等重依赖按路由懒加载 | 首屏约 78KB gzip，并行下载、独立缓存 |
+| 前端构建 | 路由级动态 import 自然分块（不配 manualChunks：Vite 8 rolldown 下强拆 vendor 会引发跨 chunk 循环初始化运行时错误）；mammoth 等重依赖按路由懒加载 | 首屏约 78KB gzip，并行下载、独立缓存 |
 | Nginx（生产） | gzip + `/assets/` 30 天 immutable 缓存 + index.html no-cache + 上传上限 50m | 首屏显著提速，大图上传不再被 413 拒绝 |
 
 ---

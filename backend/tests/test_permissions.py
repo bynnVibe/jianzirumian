@@ -3,6 +3,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.api import deps
+from app.core import db
 from app.services.chat import ChatService
 
 
@@ -12,9 +13,13 @@ from app.services.chat import ChatService
 
 @pytest.fixture
 def svc(tmp_path, monkeypatch):
-    """独立的 ChatService 实例，持久化到临时目录"""
-    monkeypatch.setattr(ChatService, "SESSIONS_FILE", tmp_path / "sessions.json")
-    return ChatService()
+    """独立的 ChatService 实例，会话持久化到临时 SQLite 数据库"""
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "app.db")
+    monkeypatch.setattr(db, "_conn", None)
+    service = ChatService()
+    yield service
+    if db._conn is not None:
+        db._conn.close()
 
 
 def test_get_user_session_blocks_other_user(svc):

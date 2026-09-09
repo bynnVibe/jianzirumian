@@ -34,24 +34,9 @@ export default defineConfig({
     },
   },
   build: {
-    rollupOptions: {
-      output: {
-        // 拆分 vendor：多个小 chunk 可并行下载、独立缓存，降低首屏阻塞
-        // 注意：Vite 8 (rolldown) 仅支持函数形式
-        manualChunks(id) {
-          if (!id.includes('node_modules')) return undefined
-          if (/[\\/]node_modules[\\/](vue|@vue|@vueuse|vue-router|pinia)[\\/]/.test(id)) {
-            return 'vue-vendor'
-          }
-          if (/[\\/]node_modules[\\/](markdown-it|katex)[\\/]/.test(id)) {
-            return 'markdown-vendor'
-          }
-          if (/[\\/]node_modules[\\/](axios|cropperjs)[\\/]/.test(id)) {
-            return 'misc-vendor'
-          }
-          return undefined
-        },
-      },
-    },
+    // 不再配置 manualChunks：Vite 8 (rolldown) 下强制把 axios 等拆进独立 vendor chunk
+    // 会产生跨 chunk 循环初始化（misc-vendor 顶层调用 api chunk 尚未初始化的导出，
+    // 生产包抛 "e is not a function"，dev 不打包故本地正常）。
+    // 路由级动态 import 仍会自然分块，缓存与并行下载不受明显影响。
   },
 })

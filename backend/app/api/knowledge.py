@@ -791,9 +791,9 @@ async def convert_word_pdf(
         raise HTTPException(status_code=500, detail=f"转换失败: {str(e)}")
 
     if not pdf_path:
-        raise HTTPException(
-            status_code=500, detail="转换失败：未安装 LibreOffice 或转换超时"
-        )
+        # LibreOffice 未安装（如 SLIM 瘦身镜像）或转换失败：不抛 500，
+        # 返回结构化结果，由前端自动降级为解析文本的逻辑分页预览
+        return {"success": False, "pdf_preview_path": None, "reason": "libreoffice_unavailable"}
 
     # 同步更新上传记录与向量元数据，使问答来源链接也能定位到原始 PDF
     upload_records.update_pdf_preview_path_by_source(str(file_path), pdf_path)
@@ -979,6 +979,89 @@ async def delete_record(record_id: str, _admin: dict = Depends(require_admin)):
     if not ok:
         raise HTTPException(status_code=404, detail="记录不存在")
     return {"message": "记录已删除"}
+
+
+# ============================================
+# 入库历史（仅本人成功入库记录）
+# ============================================
+
+
+def _build_history_item(rec: dict) -> dict:
+    """上传记录 → 入库历史列表项"""
+    source_path = rec.get("image_path") or ""
+    ocr_text = (rec.get("ocr_text") or "").strip()
+    pages = rec.get("pages") or []
+    return {
+        "record_id": rec["id"],
+        "ingested_at": rec.get("created_at", ""),
+        "source_name": rec.get("filename") or Path(source_path).name,
+        "title": rec.get("title") or "",
+        "source_type": rec.get("source_type", "image"),
+        "source_path": source_path,
+        "pdf_preview_path": rec.get("pdf_preview_path") or "",
+        "source_file_exists": bool(source_path) and os.path.exists(source_path),
+        "entry_count": rec.get("chunk_count", 0),
+        "has_parsed_content": bool(ocr_text or pages),
+    }
+
+
+@router.get("/ingest-history")
+async def list_ingest_history(
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    current_user: dict = Depends(get_current_user),
+):
+    """入库历史列表：仅返回当前登录用户自己成功入库的知识记录（含 admin）。
+
+    成功入库判定：upload_records 表中的记录仅在入库流水线确认写入向量库后创建，
+    故每条记录即代表一次成功入库；created_at 即入库时间，chunk_count 即入库片段数。
+    """
+    user_id = current_user.get("id") or current_user.get("username") or ""
+    records, total = upload_records.list_ingest_history(
+        owner_id=user_id, limit=limit, offset=offset
+    )
+    items = [_build_history_item(r) for r in records]
+    return {"success": True, "items": items, "total": total, "limit": limit, "offset": offset}
+
+
+@router.get("/ingest-history/{record_id}/content")
+async def get_ingest_history_content(
+    record_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """入库历史详情：返回该记录的解析文档内容（解析/OCR 后的文本片段，含页码）。
+
+    仅本人可查看，保持数据隔离一致性。
+    """
+    user_id = current_user.get("id") or current_user.get("username") or ""
+    rec = upload_records.get_record(record_id)
+    if not rec:
+        raise HTTPException(status_code=404, detail="记录不存在")
+    if rec.get("owner_id") != user_id:
+        raise HTTPException(status_code=403, detail="只能查看自己的入库记录")
+
+    # 组装解析文本片段：Word/PDF 按页返回（带页码），图片整篇作为单一片段
+    fragments = []
+    pages = rec.get("pages") or []
+    if pages:
+        for p in pages:
+            text = (p.get("text") or "").strip()
+            if not text:
+                continue
+            fragments.append({
+                "page_number": p.get("page_number"),
+                "text": text,
+            })
+    else:
+        ocr_text = (rec.get("ocr_text") or "").strip()
+        if ocr_text:
+            fragments.append({"page_number": None, "text": ocr_text})
+
+    return {
+        "success": True,
+        "record": _build_history_item(rec),
+        "fragments": fragments,
+    }
 
 
 # ============================================

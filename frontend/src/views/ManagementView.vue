@@ -1245,6 +1245,14 @@
                 <span>正在生成原始文档预览...</span>
               </div>
               <iframe v-else-if="previewPdfUrl" :src="previewPdfUrl" class="preview-pdf-frame" :title="previewFilename"></iframe>
+              <!-- 无 LibreOffice（瘦身镜像）时降级：展示解析的逻辑分页内容 -->
+              <div v-else-if="previewDocPages.length > 0" class="preview-doc-pages">
+                <div class="preview-word-note">服务器未安装 LibreOffice，无法生成原始排版预览，以下按解析内容逻辑分页展示（页码可能与原文排版不完全一致）；可「下载原文」查看完整文档。</div>
+                <div v-for="pg in previewDocPages" :key="pg.page_number" class="preview-doc-page">
+                  <div class="preview-doc-page-num">第 {{ pg.page_number }} 页</div>
+                  <div class="preview-doc-page-text">{{ pg.text }}</div>
+                </div>
+              </div>
               <div v-else class="preview-word-content preview-word-fallback">
                 <div v-if="wordHtmlError" class="preview-word-error">{{ wordHtmlError }}</div>
                 <div v-else>原始文档预览不可用，可下载原文查看</div>
@@ -2443,18 +2451,24 @@ async function convertWordPdfAndPreview(entry) {
   if (!entry?.source_image) return
   wordHtmlLoading.value = true
   wordHtmlError.value = ''
+  const hasPagesFallback = Array.isArray(entry.pages) && entry.pages.length > 0
   try {
     const res = await convertWordPdf(entry.source_image)
     const pdfPath = res.data?.pdf_preview_path
     if (pdfPath) {
       entry.pdf_preview_path = pdfPath
       previewPdfUrl.value = getPdfUrl(pdfPath)
-    } else {
-      wordHtmlError.value = '未能生成 PDF 预览'
+    } else if (!hasPagesFallback) {
+      // 无 PDF 且无解析分页兜底时才提示（有分页时模板自动降级展示）
+      wordHtmlError.value = res.data?.reason === 'libreoffice_unavailable'
+        ? '服务器未安装 LibreOffice，无法生成原始排版预览'
+        : '未能生成 PDF 预览'
     }
   } catch (err) {
     console.error('Word 转 PDF 预览失败:', err)
-    wordHtmlError.value = err.response?.data?.detail || String(err)
+    if (!hasPagesFallback) {
+      wordHtmlError.value = err.response?.data?.detail || String(err)
+    }
   } finally {
     wordHtmlLoading.value = false
   }
@@ -2483,10 +2497,9 @@ function openPreview(entry) {
 
   const isDocument = entry.source_type === 'word' || entry.source_type === 'pdf'
 
-  // Word 类型：只展示原始文档（PDF 分页预览），不展示解析文本；
-  // 已有 pdf_preview_path 直接预览，否则按需调用后端转换
+  // Word 类型：优先原始排版 PDF 预览；无 PDF 时保留解析分页作为降级展示
   if (entry.source_type === 'word') {
-    previewDocPages.value = []
+    previewDocPages.value = entry.pages || []
     wordHtmlError.value = ''
     previewPdfUrl.value = entry.pdf_preview_path ? getPdfUrl(entry.pdf_preview_path) : ''
     if (!entry.pdf_preview_path) {
@@ -4270,6 +4283,18 @@ function formatUserDate(ts) {
   padding: 8px 12px;
   margin-bottom: 12px;
   word-break: break-all;
+}
+
+/* 降级提示：无 LibreOffice 时按逻辑分页展示解析内容 */
+.preview-word-note {
+  font-size: 12px;
+  color: #8a7e72;
+  background: #faf6ef;
+  border: 1px solid #e8ddc9;
+  border-radius: 6px;
+  padding: 8px 12px;
+  margin-bottom: 12px;
+  line-height: 1.7;
 }
 
 /* ---- 文档类型缩略图 ---- */

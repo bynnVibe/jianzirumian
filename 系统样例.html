@@ -240,6 +240,8 @@ body {
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l3 6 7 1-5 5 1 7-6-3-6 3 1-7-5-5 7-1z"/></svg>知识百科</button>
     <button class="nav-btn" data-view="settings" onclick="switchView('settings', this)">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-2.83 1.17V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68h.08a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>系统管理</button>
+    <button class="nav-btn" data-view="eval" onclick="switchView('eval', this)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>回归评测</button>
     <button class="nav-btn" data-view="login" onclick="switchView('login', this)">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>登录页</button>
     <div class="side-title"><span>对话历史</span><span>4</span></div>
@@ -342,6 +344,7 @@ body {
         <div class="module-tabs">
           <div class="module-tab active">📤 文件上传</div>
           <div class="module-tab">📥 知识入库<span class="tab-badge">3</span></div>
+          <div class="module-tab">🕘 入库历史</div>
         </div>
         <div class="upload-grid">
           <div class="panel">
@@ -373,6 +376,13 @@ body {
               <span class="flow-step">切分向量化</span><span class="flow-step">写入目标知识库</span><span class="flow-step cur">后台编译 llm-wiki 百科卡片</span>
             </div>
           </div>
+        </div>
+        <div class="panel" style="margin-top:16px">
+          <h3>🕘 入库历史（第三个 Tab · 按入库时间倒序 · 仅本人记录）</h3>
+          <div class="file-row"><span class="tag green">入库 227 段</span><span class="fname">02 第二章 增值税.docx · 2026-09-01 16:53</span><button class="btn btn-outline btn-sm">知识来源</button><button class="btn btn-outline btn-sm">查看解析文档</button></div>
+          <div class="file-row"><span class="tag green">入库 12 段</span><span class="fname">丰隆穴按摩笔记.jpg · 2026-08-30 10:12</span><button class="btn btn-outline btn-sm">知识来源</button><button class="btn btn-outline btn-sm">查看解析文档</button></div>
+          <div class="file-row"><span class="tag pink">源文件已删除</span><span class="fname">旧笔记扫描.jpg · 2026-08-12 09:00</span><button class="btn btn-outline btn-sm">查看解析文档</button></div>
+          <div class="note">「知识来源」预览原始文件（图片 / Word 原始排版 PDF / PDF 原件）；「查看解析文档」跳转详情页按页回溯解析文本片段。</div>
         </div>
       </div>
     </section>
@@ -469,6 +479,37 @@ body {
               </span>
             </div>
             <div class="note">编译产物双写：wiki_pages 表 + 向量库（检索命中前置）+ data/wiki/*.md 镜像；删除来源时联动清理卡片与向量条目；LLM 失败静默降级不阻塞上传。</div></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= 回归评测 ================= -->
+    <section class="view" id="view-eval">
+      <div class="page-wrap">
+        <div class="page-head"><div><h2>回归评测 <span class="badge-admin">仅管理员</span></h2><div class="page-desc">对问答主链路跑离线回归：检索命中 / 引用忠实度 / 答案质量，防止优化引入回退</div></div></div>
+        <div class="upload-grid">
+          <div class="panel">
+            <h3>📚 评测集 · 核心问答集（12 用例）</h3>
+            <div class="file-row"><span class="tag blue">用例</span><span class="fname">丰隆穴有什么功效？（期望来源：丰隆穴按摩笔记.jpg）</span><button class="btn btn-outline btn-sm">编辑</button></div>
+            <div class="file-row"><span class="tag blue">用例</span><span class="fname">增值税的纳税人包括哪些？（期望关键词：纳税人）</span><button class="btn btn-outline btn-sm">编辑</button></div>
+            <div class="zone-row">
+              <div class="mini-zone"><b>新增用例</b>问题 / 参考答案 / 期望关键词 / 期望来源</div>
+              <div class="mini-zone"><b>批量导入</b>JSON 批量导入，或从聊天「点踩」反馈一键去重导入</div>
+            </div>
+            <div class="flowbar">
+              <span class="flow-step cur">一键回归</span><span class="flow-step">重放检索 → 生成</span><span class="flow-step">聚合 run 级指标</span>
+            </div>
+            <div class="note">同一评测集同时只允许一个 run 运行；可选指定 LLM provider 对比不同模型。</div>
+          </div>
+          <div class="panel">
+            <h3>📊 运行历史（跨 run 对比指标）</h3>
+            <div class="file-row"><span class="tag green">已完成</span><span class="fname">run-0902 · 命中 91.7% · 忠实 83.3% · judge 4.2 · 均耗 4.1s</span><button class="btn btn-outline btn-sm">明细</button></div>
+            <div class="file-row"><span class="tag green">已完成</span><span class="fname">run-0825 · 命中 75.0% · 忠实 75.0% · judge 3.6 · 均耗 5.8s</span><button class="btn btn-outline btn-sm">明细</button></div>
+            <h3 style="margin-top:16px">用例结果明细（run-0902）</h3>
+            <div class="file-row"><span class="tag green">命中</span><span class="fname">丰隆穴有什么功效？ · 忠实度 ✓ · judge 5 · 3.2s</span></div>
+            <div class="file-row"><span class="tag pink">未命中</span><span class="fname">健脾药膳怎么做？ · 检索未命中期望来源 · judge 2 · 4.4s</span></div>
+            <div class="note">调整 prompt / 检索 / 重排后再跑一次，对比两次 run 的指标变化即可判断优化是否引入回退。</div>
+          </div>
         </div>
       </div>
     </section>

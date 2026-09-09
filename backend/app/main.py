@@ -27,6 +27,7 @@ from app.api import knowledge as knowledge_api
 from app.api import auth_api
 from app.api import bookmark_api
 from app.api import wiki as wiki_api
+from app.api import eval as eval_api
 from app.services import auth as auth_service
 from app.config import settings
 from app.core.log_setup import setup_logging, current_username
@@ -142,6 +143,7 @@ app.include_router(config_api.router)
 app.include_router(auth_api.router)
 app.include_router(bookmark_api.router)
 app.include_router(wiki_api.router)
+app.include_router(eval_api.router)
 
 
 # ---- 鉴权中间件：除 /api/auth/* 和 /api/health 外都需要登录 ----

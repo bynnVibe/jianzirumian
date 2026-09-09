@@ -9,6 +9,15 @@
 # ============================================
 
 services:
+  redis:
+    image: docker.m.daocloud.io/library/redis:7-alpine
+    container_name: jianziruyang-redis
+    # 纯缓存用途：不开持久化；限制内存 512MB，满后 LRU 淘汰带 TTL 的缓存键
+    command: ["redis-server", "--maxmemory", "512mb", "--maxmemory-policy", "allkeys-lru", "--save", ""]
+    restart: unless-stopped
+    networks:
+      - jianziruyang-net
+
   backend:
     # 镜像名与 scripts/deploy-aliyun.sh 一致；服务器上 docker load 后直接复用，无需重新构建
     image: jianzirumian-backend:latest
@@ -38,9 +47,13 @@ services:
       - EMBEDDING_API_BASE=${EMBEDDING_API_BASE:-http://host.docker.internal:11434}
       # CORS 跨域来源（逗号分隔），通过 .env 配置
       - CORS_ORIGINS=${CORS_ORIGINS:-}
+      # Redis 文件缓存（compose 网络内服务名即 redis）
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
     extra_hosts:
       # 让容器能访问宿主机的 localhost（如 Ollama）
       - "host.docker.internal:host-gateway"
+    depends_on:
+      - redis
     restart: unless-stopped
     networks:
       - jianziruyang-net
