@@ -89,12 +89,14 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import MarkdownIt from 'markdown-it'
 import { getWikiPages, getWikiPage, deleteWikiPage, listKnowledgeBases } from '@/api'
 import { useAuthStore } from '@/stores/auth'
+import { useAssistantStore } from '@/stores/assistant'
 
 const authStore = useAuthStore()
+const assistant = useAssistantStore()
 const md = new MarkdownIt({ html: false, linkify: true, breaks: true })
 
 const wikiPages = ref([])
@@ -171,7 +173,35 @@ onMounted(async () => {
     console.error('加载知识库列表失败:', e)
   }
   await loadPages()
+  window.addEventListener('wiki:page-updated', onWikiPageUpdated)
 })
+
+onUnmounted(() => {
+  window.removeEventListener('wiki:page-updated', onWikiPageUpdated)
+  assistant.clearPageContext()
+})
+
+// 打开/关闭词条详情时同步知识助手的「当前页面」上下文
+watch(detailPage, (p) => {
+  if (p) {
+    assistant.setContext({ page_id: p.id, page_title: p.title })
+  } else {
+    assistant.clearPageContext()
+  }
+})
+
+// 知识助手应用编辑后刷新列表与已打开的详情
+function onWikiPageUpdated() {
+  loadPages()
+  if (detailPage.value) {
+    getWikiPage(detailPage.value.id)
+      .then((res) => {
+        if (res.data.page) detailPage.value = res.data.page
+      })
+      .catch(() => {})
+  }
+}
+
 </script>
 
 <style scoped>

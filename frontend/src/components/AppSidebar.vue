@@ -96,6 +96,20 @@
         </svg>
         回归评测
       </router-link>
+
+      <!-- Agent 可观测性（仅管理员可见：日志/指标/全链路追踪） -->
+      <router-link
+        v-if="auth.isAdmin"
+        to="/observability"
+        class="btn-upload"
+        :class="{ active: isObservabilityPage }"
+        @click="handleNavClick"
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="btn-icon">
+          <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+        </svg>
+        Agent 可观测性
+      </router-link>
     </div>
 
     <!-- 聊天历史 -->
@@ -469,6 +483,7 @@ const isBookmarksPage = computed(() => route.path === '/bookmarks')
 const isWikiPage = computed(() => route.path === '/wiki')
 const isAdminUsersPage = computed(() => route.path === '/admin/users')
 const isEvalPage = computed(() => route.path === '/eval')
+const isObservabilityPage = computed(() => route.path === '/observability')
 
 onMounted(async () => {
   // 仅已登录用户加载会话列表（游客/未登录不发起请求，避免 401 触发跳转）

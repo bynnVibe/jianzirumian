@@ -28,6 +28,9 @@
     <main class="main-content" :class="{ 'no-sidebar': !showSidebar, 'sidebar-open': sidebarOpen }">
       <router-view />
     </main>
+
+    <!-- 知识助手：非对话页面右侧可折叠问答栏（组件内部按路由/登录态自行决定显隐） -->
+    <WikiAssistant />
   </div>
 </template>
 
@@ -35,6 +38,7 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
 import AppSidebar from '@/components/AppSidebar.vue'
+import WikiAssistant from '@/components/WikiAssistant.vue'
 import { useAuthStore } from '@/stores/auth'
 
 const route = useRoute()

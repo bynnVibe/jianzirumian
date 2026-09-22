@@ -194,6 +194,8 @@ def init_db(conn: sqlite3.Connection):
 
         -- llm-wiki 知识编译层：把原始资料编译成结构化百科卡片/综合报告
         -- page_type: source(单来源知识卡片) | digest(跨素材综合报告)
+        -- source_hash: 原始资料文本 SHA256，用于增量编译（未变更跳过）
+        -- analysis:    两步思维链 Step1 产出的结构化分析 JSON（实体/论点/关联/矛盾）
         CREATE TABLE IF NOT EXISTS wiki_pages (
             id          TEXT PRIMARY KEY,
             page_type   TEXT NOT NULL DEFAULT 'source',
@@ -205,11 +207,48 @@ def init_db(conn: sqlite3.Connection):
             source_image TEXT NOT NULL DEFAULT '',
             source_refs TEXT NOT NULL DEFAULT '[]',
             doc_ids     TEXT NOT NULL DEFAULT '[]',
+            source_hash TEXT NOT NULL DEFAULT '',
+            analysis    TEXT NOT NULL DEFAULT '{}',
             created_at  TEXT NOT NULL,
             updated_at  TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_wiki_pages_kb ON wiki_pages(kb_id);
         CREATE INDEX IF NOT EXISTS idx_wiki_pages_source ON wiki_pages(source_image);
+
+        -- llm-wiki 持久化编译队列：串行处理防止并发 LLM 调用，重启后自动恢复未完成任务，
+        -- 失败任务自动重试（最多 WIKI_COMPILE_MAX_ATTEMPTS 次）。
+        -- status: pending(排队) | processing(处理中) | done(完成) | skipped(哈希未变跳过) | failed(重试耗尽)
+        CREATE TABLE IF NOT EXISTS wiki_compile_queue (
+            id           TEXT PRIMARY KEY,
+            source_image TEXT NOT NULL DEFAULT '',
+            source_hash  TEXT NOT NULL DEFAULT '',
+            payload      TEXT NOT NULL DEFAULT '{}',
+            status       TEXT NOT NULL DEFAULT 'pending',
+            attempts     INTEGER NOT NULL DEFAULT 0,
+            error        TEXT NOT NULL DEFAULT '',
+            created_at   TEXT NOT NULL,
+            updated_at   TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_wiki_queue_status ON wiki_compile_queue(status, created_at);
+        CREATE INDEX IF NOT EXISTS idx_wiki_queue_source ON wiki_compile_queue(source_image);
+
+        -- 知识助手 Agent 提议的百科页面编辑（human-in-the-loop）：Agent 不直接改库，
+        -- 而是生成待确认编辑，由用户在助手中确认后 apply_edit 才真正落库/重索引/镜像。
+        -- status: pending(待确认) | approved(已批准并应用) | rejected(已驳回)
+        CREATE TABLE IF NOT EXISTS wiki_pending_edits (
+            id          TEXT PRIMARY KEY,
+            page_id     TEXT NOT NULL,
+            page_title  TEXT NOT NULL DEFAULT '',
+            old_content TEXT NOT NULL DEFAULT '',
+            new_content TEXT NOT NULL DEFAULT '',
+            reason      TEXT NOT NULL DEFAULT '',
+            status      TEXT NOT NULL DEFAULT 'pending',
+            created_by  TEXT NOT NULL DEFAULT '',
+            created_at  TEXT NOT NULL,
+            updated_at  TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_wiki_pending_status ON wiki_pending_edits(status, created_at);
+        CREATE INDEX IF NOT EXISTS idx_wiki_pending_page ON wiki_pending_edits(page_id);
 
         -- 知识库上传流水线：文件上传后先后台解析，用户确认后再入库。
         -- status: pending(排队中) | parsing(解析中) | done(解析完成待入库) | error(解析失败)
@@ -277,6 +316,47 @@ def init_db(conn: sqlite3.Connection):
             error             TEXT NOT NULL DEFAULT ''
         );
         CREATE INDEX IF NOT EXISTS idx_eval_results_run ON eval_results(run_id);
+
+        -- Agent 可观测性（Tracing 主表）：一次用户请求 / 一次 Agent 运行 = 一条 trace。
+        -- status: running(进行中) | ok(成功) | error(失败)；结束时由 span 聚合回写调用数与 token 数。
+        CREATE TABLE IF NOT EXISTS agent_traces (
+            id                TEXT PRIMARY KEY,
+            agent             TEXT NOT NULL DEFAULT '',
+            user_id           TEXT NOT NULL DEFAULT '',
+            input             TEXT NOT NULL DEFAULT '',
+            status            TEXT NOT NULL DEFAULT 'running',
+            error             TEXT NOT NULL DEFAULT '',
+            llm_calls         INTEGER NOT NULL DEFAULT 0,
+            tool_calls        INTEGER NOT NULL DEFAULT 0,
+            prompt_tokens     INTEGER NOT NULL DEFAULT 0,
+            completion_tokens INTEGER NOT NULL DEFAULT 0,
+            latency_ms        INTEGER NOT NULL DEFAULT 0,
+            started_at        TEXT NOT NULL,
+            ended_at          TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_traces_started ON agent_traces(started_at);
+        CREATE INDEX IF NOT EXISTS idx_agent_traces_agent ON agent_traces(agent, started_at);
+
+        -- Agent 可观测性（Tracing 明细表）：trace 内每一步 = 一条 span。
+        -- kind: llm(LLM 调用，input/output 存完整 prompt 与 response) | tool(工具调用) | step(流程步骤)
+        CREATE TABLE IF NOT EXISTS agent_spans (
+            id                TEXT PRIMARY KEY,
+            trace_id          TEXT NOT NULL,
+            seq               INTEGER NOT NULL DEFAULT 0,
+            kind              TEXT NOT NULL DEFAULT '',
+            name              TEXT NOT NULL DEFAULT '',
+            input             TEXT NOT NULL DEFAULT '',
+            output            TEXT NOT NULL DEFAULT '',
+            status            TEXT NOT NULL DEFAULT 'ok',
+            error             TEXT NOT NULL DEFAULT '',
+            prompt_tokens     INTEGER NOT NULL DEFAULT 0,
+            completion_tokens INTEGER NOT NULL DEFAULT 0,
+            latency_ms        INTEGER NOT NULL DEFAULT 0,
+            started_at        TEXT NOT NULL,
+            ended_at          TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_spans_trace ON agent_spans(trace_id, seq);
+        CREATE INDEX IF NOT EXISTS idx_agent_spans_started ON agent_spans(started_at);
         """
     )
     _migrate(conn)
@@ -308,6 +388,32 @@ def _migrate(conn: sqlite3.Connection):
             "ALTER TABLE upload_records ADD COLUMN title TEXT NOT NULL DEFAULT ''"
         )
         logger.info("upload_records 补加列: title")
+
+    # llm-wiki：wiki_pages 补加 source_hash（增量编译）与 analysis（两步思维链分析结果）
+    wiki_cols = {r[1] for r in conn.execute("PRAGMA table_info(wiki_pages)")}
+    if "source_hash" not in wiki_cols:
+        conn.execute(
+            "ALTER TABLE wiki_pages ADD COLUMN source_hash TEXT NOT NULL DEFAULT ''"
+        )
+        logger.info("wiki_pages 补加列: source_hash")
+    if "analysis" not in wiki_cols:
+        conn.execute(
+            "ALTER TABLE wiki_pages ADD COLUMN analysis TEXT NOT NULL DEFAULT '{}'"
+        )
+        logger.info("wiki_pages 补加列: analysis")
+
+    # llm-wiki：服务重启时把上次进程遗留的 processing 编译任务退回 pending，
+    # 交由启动恢复流程重新入队处理（后台 worker 随进程重启已丢失）
+    try:
+        cur = conn.execute(
+            "UPDATE wiki_compile_queue SET status = 'pending', updated_at = ?"
+            " WHERE status = 'processing'",
+            (datetime.now().isoformat(),),
+        )
+        if cur.rowcount:
+            logger.info("wiki_compile_queue 遗留 processing 任务退回 pending: %d 条", cur.rowcount)
+    except sqlite3.OperationalError:
+        pass
 
     # 回归评测：服务启动时把上次进程遗留的 running 运行标记为 interrupted，
     # 避免历史列表出现永远"执行中"的僵尸运行（后台任务随进程重启已丢失）

@@ -753,6 +753,105 @@ export function recompileWikiAll() {
   return api.post('/wiki/recompile-all')
 }
 
+// ============================================
+// 知识助手 Agent API（侧栏问答 + 人工确认编辑）
+// ============================================
+
+/**
+ * 知识助手问答（SSE 流式）。
+ * payload: { message, page_id, page_title, route_name, route_label, history }
+ * onEvent(ev) 事件：status / thought / tool / token / confirm / done / error
+ */
+export async function assistantChat(payload, onEvent) {
+  const token = localStorage.getItem('auth_token')
+  const resp = await fetch('/api/wiki/assistant/chat', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify(payload),
+  })
+  if (!resp.ok) {
+    let detail = ''
+    try {
+      detail = (await resp.json()).detail || ''
+    } catch (e) {
+      /* 忽略解析失败 */
+    }
+    throw new Error(detail || `HTTP ${resp.status}`)
+  }
+  const reader = resp.body.getReader()
+  const decoder = new TextDecoder()
+  let buf = ''
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buf += decoder.decode(value, { stream: true })
+    let idx
+    while ((idx = buf.indexOf('\n\n')) >= 0) {
+      const chunk = buf.slice(0, idx)
+      buf = buf.slice(idx + 2)
+      const line = chunk.split('\n').find((l) => l.startsWith('data: '))
+      if (!line) continue
+      try {
+        onEvent && onEvent(JSON.parse(line.slice(6)))
+      } catch (e) {
+        /* 忽略单条事件解析失败 */
+      }
+    }
+  }
+}
+
+/**
+ * 待确认编辑列表（可按 page_id 过滤）
+ */
+export function listAssistantEdits(pageId = '') {
+  return api.get('/wiki/assistant/edits', { params: pageId ? { page_id: pageId } : {} })
+}
+
+/**
+ * 确认并应用 Agent 提议的编辑（含向量重索引，放宽超时）
+ */
+export function approveAssistantEdit(editId) {
+  return api.post(`/wiki/assistant/edits/${encodeURIComponent(editId)}/approve`, {}, { timeout: 120000 })
+}
+
+/**
+ * 驳回 Agent 提议的编辑
+ */
+export function rejectAssistantEdit(editId) {
+  return api.post(`/wiki/assistant/edits/${encodeURIComponent(editId)}/reject`)
+}
+
+// ============================================
+// Agent 可观测性 API（仅管理员）
+// ============================================
+
+/**
+ * Agent 聚合指标：Token 消耗 / 响应延迟 / 成功率 / 工具调用次数
+ * @param {number} days 统计窗口天数（默认 7）
+ */
+export function getObservabilityMetrics(days = 7) {
+  return api.get('/observability/metrics', { params: { days } })
+}
+
+/**
+ * Agent trace 列表（一次用户请求 = 一条 trace）
+ * @param {object} params { agent, status, limit, offset }
+ */
+export function getObservabilityTraces(params = {}) {
+  return api.get('/observability/traces', { params })
+}
+
+/**
+ * trace 全链路详情：所有步骤 span（llm span 含完整 prompt 与 response）
+ */
+export function getObservabilityTrace(traceId) {
+  return api.get(`/observability/traces/${encodeURIComponent(traceId)}`)
+}
+
+
 /**
  * 获取知识编译配置
  */

@@ -42,6 +42,16 @@ def _remove_record_files(record: dict) -> None:
         except OSError as e:
             logger.warning("删除存储文件失败 %s: %s", p, e)
 
+    # 联动删除 wiki/raw/ 下的原始素材归档镜像，避免残留隐私数据
+    try:
+        from app.services import wiki_store
+
+        for p in candidates:
+            if p:
+                wiki_store.remove_raw(p)
+    except Exception as e:
+        logger.warning("删除 raw 归档失败: %s", e)
+
 
 def _row_to_record(row: dict) -> dict:
     """数据库行 → 业务 dict（JSON 字段反序列化）"""
@@ -114,6 +124,15 @@ class UploadRecordService:
                 now, now,
             ),
         )
+        # 原始素材按类别归档到 wiki/raw/{category}/（幂等，失败不阻断上传）
+        try:
+            from app.services import wiki_store
+
+            wiki_store.archive_raw(image_path, source_type)
+            if pdf_preview_path:
+                wiki_store.archive_raw(pdf_preview_path, "pdf")
+        except Exception as e:
+            logger.warning("归档原始素材失败: %s", e)
         return record
 
     def list_records(self, limit: int = 50, offset: int = 0) -> tuple[list[dict], int]:

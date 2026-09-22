@@ -13,6 +13,7 @@ import httpx
 from openai import AsyncOpenAI
 
 from app.config import settings
+from app.core import observability as agent_obs
 from app.services.config_manager import effective_provider_config, runtime_config
 
 logger = logging.getLogger("jianziruyang.llm")
@@ -52,6 +53,15 @@ def _get_openai_client(base_url: str, api_key: str, model: str) -> AsyncOpenAI:
         )
         _OPENAI_CLIENT_CACHE[key] = client
     return client
+
+
+def _report_openai_usage(response) -> None:
+    """可观测性：非流式响应携带 usage 时上报真实 token 用量（流式接口无 usage 由业务层估算）。"""
+    usage = getattr(response, "usage", None)
+    if usage is not None:
+        agent_obs.note_usage(
+            getattr(usage, "prompt_tokens", 0), getattr(usage, "completion_tokens", 0)
+        )
 
 
 def _log_llm_failure(stage: str, e: Exception):
@@ -108,6 +118,10 @@ class OllamaLLM(BaseLLM):
                         if content := chunk.get("message", {}).get("content", ""):
                             yield content
                         if chunk.get("done"):
+                            # 可观测性：Ollama 结束块携带真实 token 用量
+                            agent_obs.note_usage(
+                                chunk.get("prompt_eval_count"), chunk.get("eval_count")
+                            )
                             break
                     except json.JSONDecodeError:
                         continue
@@ -115,6 +129,7 @@ class OllamaLLM(BaseLLM):
             resp = await client.post(url, json=payload)
             resp.raise_for_status()
             data = resp.json()
+            agent_obs.note_usage(data.get("prompt_eval_count"), data.get("eval_count"))
             yield data.get("message", {}).get("content", "")
 
 
@@ -166,6 +181,7 @@ class OpenAICompatibleLLM(BaseLLM):
                     # ModelScope 接口可能返回 choices 为 null
                     if response2.choices and len(response2.choices) > 0:
                         text = response2.choices[0].message.content or ""
+                        _report_openai_usage(response2)
                         if text:
                             yield text
                         else:
@@ -184,6 +200,7 @@ class OpenAICompatibleLLM(BaseLLM):
                     )
                     if response2.choices and len(response2.choices) > 0:
                         text = response2.choices[0].message.content or ""
+                        _report_openai_usage(response2)
                         if text:
                             yield text
                         else:
@@ -199,6 +216,7 @@ class OpenAICompatibleLLM(BaseLLM):
                 messages=messages,
                 stream=False,
             )
+            _report_openai_usage(response)
             yield response.choices[0].message.content or ""
 
 

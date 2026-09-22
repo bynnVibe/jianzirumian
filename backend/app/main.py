@@ -28,6 +28,7 @@ from app.api import auth_api
 from app.api import bookmark_api
 from app.api import wiki as wiki_api
 from app.api import eval as eval_api
+from app.api import observability as observability_api
 from app.services import auth as auth_service
 from app.config import settings
 from app.core.log_setup import setup_logging, current_username
@@ -94,6 +95,23 @@ async def lifespan(app: FastAPI):
         upload_pipeline.recover()
     except Exception as e:
         logger.warning("上传流水线恢复失败: %s", e)
+    # llm-wiki：初始化标准化知识库目录结构，并恢复重启前未完成的编译队列
+    try:
+        from app.services import wiki_store
+        from app.services.wiki import wiki_service
+        wiki_store.ensure_layout()
+        wiki_store.backfill_raw()  # 存量原始素材按类别归档到 wiki/raw/（幂等）
+        recovered = wiki_service.recover_queue()
+        if recovered:
+            logger.info("llm-wiki 编译队列恢复：%d 条待处理任务", recovered)
+    except Exception as e:
+        logger.warning("llm-wiki 初始化/队列恢复失败: %s", e)
+    # Agent 可观测性：清理过期 trace/span（保留 30 天，防止完整 prompt 撑大数据库）
+    try:
+        from app.core import observability as obs
+        obs.purge_old()
+    except Exception as e:
+        logger.warning("Agent 可观测性过期数据清理失败: %s", e)
     print(f"[见字如面] 服务启动完成")
     print(f"  - LLM: {runtime_config.llm_provider or settings.LLM_PROVIDER} (默认: {settings.LLM_PROVIDER})")
     print(f"  - OCR: {runtime_config.ocr_provider or settings.OCR_PROVIDER} (默认: {settings.OCR_PROVIDER})")
@@ -144,6 +162,7 @@ app.include_router(auth_api.router)
 app.include_router(bookmark_api.router)
 app.include_router(wiki_api.router)
 app.include_router(eval_api.router)
+app.include_router(observability_api.router)
 
 
 # ---- 鉴权中间件：除 /api/auth/* 和 /api/health 外都需要登录 ----

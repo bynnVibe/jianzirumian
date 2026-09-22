@@ -119,6 +119,14 @@ class Settings:
     WIKI_MIN_SOURCE_CHARS: int = int(os.getenv("WIKI_MIN_SOURCE_CHARS", "80"))
     # 相邻两次编译 LLM 请求的最小间隔秒数（存量补编译时缓解免费模型限流）
     WIKI_COMPILE_INTERVAL: float = float(os.getenv("WIKI_COMPILE_INTERVAL", "3"))
+    # 两步思维链编译开关：Step1 输出结构化分析 JSON（实体/论点/关联/矛盾）→ Step2 基于分析生成
+    WIKI_TWO_STEP_ENABLED: bool = os.getenv("WIKI_TWO_STEP_ENABLED", "true").lower() == "true"
+    # SHA256 增量缓存：同一来源文本未变更则跳过重复编译（force 重编译可绕过）
+    WIKI_INCREMENTAL_ENABLED: bool = os.getenv("WIKI_INCREMENTAL_ENABLED", "true").lower() == "true"
+    # 持久化编译队列单任务最大尝试次数（含首次），失败达到上限标记 failed
+    WIKI_COMPILE_MAX_ATTEMPTS: int = int(os.getenv("WIKI_COMPILE_MAX_ATTEMPTS", "3"))
+    # 编译产物语言（影响两步思维链提示词与派生视图措辞）
+    WIKI_LANG: str = os.getenv("WIKI_LANG", "zh")
 
 
 settings = Settings()

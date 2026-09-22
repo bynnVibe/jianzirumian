@@ -99,6 +99,12 @@ const routes = [
     component: () => import('@/views/EvalView.vue'),
     meta: { requiresAuth: true, requiresAdmin: true },
   },
+  {
+    path: '/observability',
+    name: 'Observability',
+    component: () => import('@/views/ObservabilityView.vue'),
+    meta: { requiresAuth: true, requiresAdmin: true },
+  },
 ]
 
 const router = createRouter({

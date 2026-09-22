@@ -13,12 +13,14 @@
 import asyncio
 import json
 import logging
+import time
 import uuid
 from datetime import datetime
 from typing import AsyncGenerator, List, Optional
 
 from app.config import settings
 from app.core import db
+from app.core import observability as obs
 from app.core.evidence_checker import check_evidence_sufficiency, verify_citations
 from app.core.llm import LLMFactory
 from app.core.intent_rewriter import rewrite_query
@@ -248,7 +250,7 @@ class ChatService:
         attachments: Optional[List[dict]] = None,
         kb_id: str = "",
     ) -> AsyncGenerator[str, None]:
-        """流式聊天
+        """流式聊天（外层负责可观测性追踪：一次提问 = 一条 trace）
 
         Args:
             session_id: 会话 ID
@@ -263,12 +265,38 @@ class ChatService:
         Yields:
             SSE 格式的事件流
         """
+        obs.start_trace("chat", user_id, query)
+        try:
+            async for event in self._chat_stream_inner(
+                session_id, query, use_knowledge, use_search,
+                llm_provider, user_id, attachments, kb_id,
+            ):
+                yield event
+        except Exception as e:
+            obs.mark_failed(str(e))
+            raise
+        finally:
+            obs.end_trace()
+
+    async def _chat_stream_inner(
+        self,
+        session_id: str,
+        query: str,
+        use_knowledge: bool,
+        use_search: bool,
+        llm_provider: str,
+        user_id: str,
+        attachments: Optional[List[dict]],
+        kb_id: str,
+    ) -> AsyncGenerator[str, None]:
+        """流式聊天内层主流程（检索/搜索/工具/生成各环节记录 trace span）"""
         logger.info("开始处理聊天: session=%s, query=%.50s, knowledge=%s, search=%s",
                      session_id, query, use_knowledge, use_search)
 
         # 1. 获取或创建会话（已存在时校验归属）
         session = self.get_session(session_id)
         if session and session.user_id and session.user_id != user_id:
+            obs.mark_failed("无权访问该会话")
             yield f"data: {self._json_event('error', {'message': '无权访问该会话'})}\n\n"
             return
         if not session:
@@ -296,6 +324,15 @@ class ChatService:
             except Exception as e:
                 logger.error("附件工具调用失败: %s", e)
                 tool_context_text = ""
+            for rec in tool_records:
+                obs.record_tool(
+                    rec.get("tool_name") or "attachment_tool",
+                    {"filename": rec.get("filename", "")},
+                    rec,
+                    status="ok" if rec.get("success") else "error",
+                    error="" if rec.get("success") else "工具执行失败",
+                    fail_trace=False,
+                )
             if tool_records:
                 yield f"data: {self._json_event('status', {'phase': 'tool_done', 'message': '附件处理完成', 'tool_calls': tool_records})}\n\n"
 
@@ -334,12 +371,16 @@ class ChatService:
 
             # 意图改写：用 LLM 将用户问题改写为更适合检索的查询（超时保护，避免卡死流水线）
             yield f"data: {self._json_event('status', {'phase': 'rewriting', 'message': '正在理解你的问题...'})}\n\n"
+            t_rewrite = time.monotonic()
             try:
                 search_query = await asyncio.wait_for(
                     rewrite_query(query, llm_provider), timeout=15
                 )
+                obs.record_llm("intent_rewrite", query, search_query, t0=t_rewrite, fail_trace=False)
             except asyncio.TimeoutError:
                 logger.warning("意图改写超时，使用原问题检索")
+                obs.record_llm("intent_rewrite", query, "", t0=t_rewrite,
+                               status="error", error="timeout", fail_trace=False)
                 search_query = query.strip()
             if search_query != query.strip():
                 logger.info("检索查询改写: %r → %r", query[:50], search_query[:50])
@@ -355,10 +396,14 @@ class ChatService:
         # 等待检索结果（与联网搜索并行进行中）
         if retrieve_task is not None:
             results = []
+            t_retrieve = time.monotonic()
             try:
                 results = await retrieve_task
+                obs.record_step("knowledge_retrieve", f"命中 {len(results)} 条相关片段", t0=t_retrieve)
             except Exception as e:
                 logger.error("知识检索失败: %s", e)
+                obs.record_step("knowledge_retrieve", "", t0=t_retrieve,
+                                status="error", error=str(e), fail_trace=False)
             if results:
                 # Rerank 重排序 + 相关度过滤（同步计算移入线程池，避免阻塞事件循环）
                 yield f"data: {self._json_event('status', {'phase': 'reranking', 'message': '正在对检索结果重排序...'})}\n\n"
@@ -369,8 +414,15 @@ class ChatService:
                 # 轻量 Self-RAG：信息缺口判断，证据不足时改写查询重检一次
                 if context_text.strip():
                     yield f"data: {self._json_event('status', {'phase': 'gap_checking', 'message': '正在评估证据是否充分...'})}\n\n"
+                    t_evidence = time.monotonic()
                     sufficient, missing = await check_evidence_sufficiency(
                         query, context_text, llm_provider
+                    )
+                    obs.record_llm(
+                        "evidence_check",
+                        f"问题：{query}\n\n证据摘录：\n{context_text[:2000]}",
+                        json.dumps({"sufficient": sufficient, "missing": missing or ""}, ensure_ascii=False),
+                        t0=t_evidence, fail_trace=False,
                     )
                     if not sufficient:
                         recheck_msg = f'证据不足（{missing or "信息缺口"}），正在改写重检...'
@@ -426,6 +478,7 @@ class ChatService:
                      len(llm_messages))
         full_response = ""
         llm_error = None
+        t_gen = time.monotonic()
         try:
             async for chunk in llm.chat(llm_messages, stream=True):
                 full_response += chunk
@@ -448,6 +501,13 @@ class ChatService:
                     llm_error = None
                 except Exception as e2:
                     llm_error = e2
+
+        # 追踪层：最终生成 LLM 调用（完整 prompt + 回答；失败即标记 trace 失败）
+        obs.record_llm(
+            "answer", llm_messages, full_response, t0=t_gen,
+            status="error" if llm_error is not None else "ok",
+            error=str(llm_error) if llm_error is not None else "",
+        )
 
         if llm_error is not None:
             error_msg = str(llm_error)
