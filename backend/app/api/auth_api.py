@@ -81,6 +81,25 @@ async def logout(authorization: str = Header("")):
     return {"success": True}
 
 
+@router.post("/forgot-password")
+async def forgot_password(body: dict):
+    """忘记密码：凭「用户名 + 注册联系方式」验证身份后重置密码（免登录）"""
+    username = (body.get("username") or "").strip()
+    contact = (body.get("contact") or "").strip()
+    new_password = body.get("new_password") or ""
+
+    if not username or not contact:
+        raise HTTPException(400, "请填写用户名和联系方式")
+    if not new_password or len(new_password) < 6:
+        raise HTTPException(400, "新密码至少 6 个字符")
+
+    try:
+        user = auth_service.reset_password(username, contact, new_password)
+        return {"success": True, "user": user}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
 @router.get("/me")
 async def get_me(authorization: str = Header("")):
     """获取当前登录用户信息"""

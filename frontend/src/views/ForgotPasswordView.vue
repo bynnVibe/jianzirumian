@@ -10,71 +10,72 @@
             <circle cx="11" cy="11" r="2"/>
           </svg>
         </div>
-        <h1 class="auth-title">见字如面</h1>
-        <p class="auth-subtitle">登录以继续使用</p>
+        <h1 class="auth-title">找回密码</h1>
+        <p class="auth-subtitle">验证用户名与注册时填写的联系方式后重设密码</p>
       </div>
 
-      <form class="auth-form" @submit.prevent="handleLogin">
+      <form class="auth-form" @submit.prevent="handleReset">
         <div class="form-group">
           <label class="form-label">用户名</label>
           <input
             v-model="form.username"
             type="text"
             class="form-input"
-            placeholder="请输入用户名"
+            placeholder="请输入注册时的用户名"
             autocomplete="username"
             required
           />
         </div>
 
         <div class="form-group">
-          <div class="form-label-row">
-            <label class="form-label">密码</label>
-            <router-link to="/forgot-password" class="forgot-link">忘记密码？</router-link>
-          </div>
+          <label class="form-label">联系方式</label>
+          <input
+            v-model="form.contact"
+            type="text"
+            class="form-input"
+            placeholder="注册时填写的手机号或邮箱"
+            autocomplete="off"
+            required
+          />
+          <span class="form-hint">需与注册时填写的联系方式完全一致</span>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">新密码</label>
           <input
             v-model="form.password"
             type="password"
             class="form-input"
-            placeholder="请输入密码"
-            autocomplete="current-password"
+            placeholder="至少 6 个字符"
+            autocomplete="new-password"
+            required
+          />
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">确认新密码</label>
+          <input
+            v-model="form.confirmPassword"
+            type="password"
+            class="form-input"
+            placeholder="再次输入新密码"
+            autocomplete="new-password"
             required
           />
         </div>
 
         <div v-if="errorMsg" class="form-error">{{ errorMsg }}</div>
 
-        <button type="submit" class="btn-submit" :disabled="auth.loading">
-          <span v-if="auth.loading" class="spinner-xs"></span>
-          {{ auth.loading ? '登录中...' : '登 录' }}
+        <button type="submit" class="btn-submit" :disabled="submitting">
+          <span v-if="submitting" class="spinner-xs"></span>
+          {{ submitting ? '提交中...' : '重置密码' }}
         </button>
       </form>
 
       <div class="auth-footer">
-        还没有账号？
-        <router-link to="/register" class="auth-link">立即注册</router-link>
+        想起来了？
+        <router-link to="/login" class="auth-link">返回登录</router-link>
       </div>
-
-      <div class="guest-divider">
-        <span>或</span>
-      </div>
-
-      <button class="btn-guest" @click="handleGuest">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" class="guest-icon">
-          <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
-          <circle cx="12" cy="7" r="4"/>
-        </svg>
-        以游客身份体验
-      </button>
-
-      <router-link to="/guide" class="btn-guide">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" class="guest-icon">
-          <circle cx="12" cy="12" r="10"/>
-          <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/>
-          <line x1="12" y1="17" x2="12.01" y2="17"/>
-        </svg>
-        系统使用指导
-      </router-link>
     </div>
   </div>
 </template>
@@ -82,41 +83,50 @@
 <script setup>
 import { reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { useAuthStore } from '@/stores/auth'
-import { useChatStore } from '@/stores/chat'
+import { forgotPassword } from '@/api'
 
 const router = useRouter()
-const auth = useAuthStore()
-const chatStore = useChatStore()
 
 const form = reactive({
   username: '',
+  contact: '',
   password: '',
+  confirmPassword: '',
 })
 const errorMsg = ref('')
+const submitting = ref(false)
 
-async function handleLogin() {
+async function handleReset() {
   errorMsg.value = ''
-  if (!form.username.trim() || !form.password) {
-    errorMsg.value = '请填写用户名和密码'
+
+  const username = form.username.trim()
+  const contact = form.contact.trim()
+  const password = form.password
+  const confirmPassword = form.confirmPassword
+
+  if (!username || !contact) {
+    errorMsg.value = '请填写用户名和联系方式'
+    return
+  }
+  if (password.length < 6) {
+    errorMsg.value = '新密码至少 6 个字符'
+    return
+  }
+  if (password !== confirmPassword) {
+    errorMsg.value = '两次输入的新密码不一致'
     return
   }
 
-  const result = await auth.login(form.username.trim(), form.password)
-  if (result.success) {
-    // 登录成功，清空旧的会话数据（如游客会话），加载新用户的会话
-    chatStore.clearAllSessionData()
-    router.push('/chat')
-  } else {
-    errorMsg.value = result.message
+  submitting.value = true
+  try {
+    await forgotPassword(username, contact, password)
+    alert('密码重置成功，请使用新密码登录')
+    router.push('/login')
+  } catch (err) {
+    errorMsg.value = err.response?.data?.detail || err.message || '重置失败，请稍后重试'
+  } finally {
+    submitting.value = false
   }
-}
-
-function handleGuest() {
-  // 清空之前用户的会话数据，再进入游客模式
-  chatStore.clearAllSessionData()
-  auth.enterAsGuest()
-  router.push('/chat')
 }
 </script>
 
@@ -135,7 +145,7 @@ function handleGuest() {
   border-radius: 20px;
   padding: 40px 36px;
   width: 100%;
-  max-width: 400px;
+  max-width: 420px;
   box-shadow: 0 8px 40px rgba(0, 0, 0, 0.08);
 }
 
@@ -191,23 +201,6 @@ function handleGuest() {
   color: #5a4a3a;
 }
 
-.form-label-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.forgot-link {
-  font-size: 12px;
-  color: #c98a4b;
-  text-decoration: none;
-  font-weight: 500;
-}
-
-.forgot-link:hover {
-  text-decoration: underline;
-}
-
 .form-input {
   padding: 11px 14px;
   border: 1px solid #ddd5cb;
@@ -226,6 +219,11 @@ function handleGuest() {
 }
 
 .form-input::placeholder {
+  color: #bbb0a2;
+}
+
+.form-hint {
+  font-size: 12px;
   color: #bbb0a2;
 }
 
@@ -295,76 +293,5 @@ function handleGuest() {
 
 .auth-link:hover {
   text-decoration: underline;
-}
-
-.guest-divider {
-  display: flex;
-  align-items: center;
-  margin: 20px 0;
-  color: #bbb0a2;
-  font-size: 13px;
-}
-
-.guest-divider::before,
-.guest-divider::after {
-  content: '';
-  flex: 1;
-  height: 1px;
-  background: #e8e0d6;
-}
-
-.guest-divider span {
-  padding: 0 12px;
-}
-
-.btn-guest {
-  width: 100%;
-  padding: 11px;
-  background: transparent;
-  border: 1.5px solid #ddd5cb;
-  border-radius: 12px;
-  font-size: 14px;
-  font-weight: 500;
-  color: #8c7e6e;
-  cursor: pointer;
-  transition: all 0.2s;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-}
-
-.btn-guest:hover {
-  border-color: #c98a4b;
-  color: #c98a4b;
-  background: #faf8f5;
-}
-
-.guest-icon {
-  width: 18px;
-  height: 18px;
-}
-
-.btn-guide {
-  margin-top: 10px;
-  width: 100%;
-  padding: 11px;
-  background: transparent;
-  border: none;
-  font-size: 13px;
-  font-weight: 500;
-  color: #8c7e6e;
-  cursor: pointer;
-  transition: color 0.2s;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  text-decoration: none;
-  box-sizing: border-box;
-}
-
-.btn-guide:hover {
-  color: #c98a4b;
 }
 </style>

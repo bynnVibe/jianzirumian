@@ -56,10 +56,10 @@ function handleResize() {
   }
 }
 
-// 登录/注册/使用指南页不显示侧边栏（指南页免登录，不能有触发 401 的请求）
+// 登录/注册/找回密码/使用指南页不显示侧边栏（指南页免登录，不能有触发 401 的请求）
 // 独立新页打开的预览页（文档/附件）同样不显示侧边栏，保证沉浸式阅读
 const showSidebar = computed(() => {
-  return !['Login', 'Register', 'Guide', 'DocPreview', 'AttachmentPreview'].includes(route.name)
+  return !['Login', 'Register', 'ForgotPassword', 'Guide', 'DocPreview', 'AttachmentPreview'].includes(route.name)
 })
 
 // ---- 5 分钟无操作自动登出 ----

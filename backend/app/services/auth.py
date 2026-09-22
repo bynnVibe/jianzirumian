@@ -388,3 +388,41 @@ def update_profile(
         (*updates.values(), now, current["id"]),
     )
     return _user_info(_get_user(current["id"]))
+
+
+def reset_password(username: str, contact: str, new_password: str) -> dict:
+    """忘记密码：通过「用户名 + 注册联系方式」验证身份后重置密码。
+
+    - 联系方式在注册时唯一，作为无邮件/短信服务下的身份凭证
+    - 用户名与联系方式必须同时匹配同一账号，否则统一报错（不泄露账号是否存在）
+    - 重置成功后失效该用户的全部登录会话，强制其他设备重新登录
+    返回更新后的 user_info。
+    """
+    username = (username or "").strip()
+    contact = (contact or "").strip()
+    if not username or not contact:
+        raise ValueError("请填写用户名和联系方式")
+    if not new_password or len(new_password) < 6:
+        raise ValueError("新密码至少 6 个字符")
+
+    u = db.query_one("SELECT * FROM users WHERE username = ?", (username,))
+    # 统一错误文案，避免暴露"用户名是否存在"
+    if not u or (u.get("contact") or "").strip() != contact:
+        raise ValueError("用户名或联系方式不匹配")
+    if not u["is_active"]:
+        raise ValueError("该账号已被禁用，请联系管理员")
+
+    pw_hash, salt = _hash_password(new_password)
+    now = time.time()
+    db.execute(
+        "UPDATE users SET password_hash = ?, salt = ?, hash_algo = 'pbkdf2', updated_at = ? WHERE id = ?",
+        (pw_hash, salt, now, u["id"]),
+    )
+
+    # 失效该用户全部会话（含短缓存与 SQLite），强制重新登录
+    db.execute("DELETE FROM auth_sessions WHERE user_id = ?", (u["id"],))
+    with _session_lock:
+        for t in [t for t, s in _active_sessions.items() if s["user_id"] == u["id"]]:
+            del _active_sessions[t]
+
+    return _user_info(_get_user(u["id"]))

@@ -899,6 +899,17 @@ export function logoutUser() {
 }
 
 /**
+ * 忘记密码：凭「用户名 + 注册联系方式」验证身份后重置密码（免登录）
+ */
+export function forgotPassword(username, contact, newPassword) {
+  return api.post('/auth/forgot-password', {
+    username,
+    contact,
+    new_password: newPassword,
+  })
+}
+
+/**
  * 获取当前登录用户信息
  */
 export function getCurrentUser() {
