@@ -6,7 +6,7 @@
         <div class="header-title">
           <span class="header-eyebrow">Regression Suite</span>
           <h1>回归评测</h1>
-          <p class="header-sub">对问答主链路跑离线回归，量化检索命中、引用忠实度与答案质量，防止优化引入回退</p>
+          <p class="header-sub">仿照 Ragas 评估框架对问答主链路跑离线回归，量化忠实度、回答相关性、上下文精确率与上下文召回率，防止优化引入回退</p>
         </div>
       </div>
     </header>
@@ -182,8 +182,9 @@
                     <span class="run-prog">
                       <template v-if="r.status === 'running'">进度 {{ r.completed }}/{{ r.total }}</template>
                       <template v-else-if="r.summary && r.summary.total != null">
-                        命中 {{ pct(r.summary.retrieval_hit_rate) }} · 忠实 {{ pct(r.summary.faithfulness_pass_rate) }} ·
-                        judge {{ r.summary.avg_judge_score ?? '—' }} · {{ Math.round(r.summary.avg_latency_ms || 0) }}ms
+                        忠实 {{ pct(r.summary.avg_faithfulness) }} · 相关 {{ pct(r.summary.avg_answer_relevance) }} ·
+                        精确 {{ pct(r.summary.avg_context_precision) }} · 召回 {{ pct(r.summary.avg_context_recall) }} ·
+                        {{ Math.round(r.summary.avg_latency_ms || 0) }}ms
                       </template>
                     </span>
                   </div>
@@ -225,7 +226,7 @@
                 <div class="card-head"><h3>用例结果明细</h3></div>
                 <table class="data-table result-table">
                   <thead>
-                    <tr><th style="width:34%">问题</th><th>命中</th><th>忠实</th><th>judge</th><th>延迟</th><th>状态</th></tr>
+                    <tr><th style="width:28%">问题</th><th>忠实</th><th>相关</th><th>精确</th><th>召回</th><th>延迟</th><th>状态</th></tr>
                   </thead>
                   <tbody>
                     <template v-for="row in detail.results" :key="row.id">
@@ -233,14 +234,15 @@
                         <td class="q-cell">
                           <span class="exp-caret" :class="{ open: expanded.has(row.id) }">▸</span>{{ row.question }}
                         </td>
-                        <td><span class="bool" :class="row.retrieval_hit ? 'yes' : 'no'">{{ row.retrieval_hit ? '命中' : '未中' }}</span></td>
-                        <td><span class="bool" :class="row.faithfulness_pass ? 'yes' : 'no'">{{ row.faithfulness_pass ? '通过' : '未过' }}</span></td>
-                        <td>{{ row.judge_score != null ? row.judge_score : '—' }}</td>
+                        <td><span class="score" :class="scoreCls(row.faithfulness)">{{ pct(row.faithfulness) }}</span></td>
+                        <td><span class="score" :class="scoreCls(row.answer_relevance)">{{ pct(row.answer_relevance) }}</span></td>
+                        <td><span class="score" :class="scoreCls(row.context_precision)">{{ pct(row.context_precision) }}</span></td>
+                        <td><span class="score" :class="scoreCls(row.context_recall)">{{ pct(row.context_recall) }}</span></td>
                         <td>{{ row.latency_ms }}ms</td>
                         <td><span class="status-pill sm" :class="row.status === 'ok' ? 'finished' : 'failed'">{{ row.status === 'ok' ? '成功' : '错误' }}</span></td>
                       </tr>
                       <tr v-if="expanded.has(row.id)" class="expand-row">
-                        <td colspan="6">
+                        <td colspan="7">
                           <div class="expand-inner">
                             <div v-if="row.error" class="err-line">错误：{{ row.error }}</div>
                             <div class="expand-block">
@@ -251,11 +253,49 @@
                               <span class="expand-title">评分理由</span>
                               <div class="reason-box">{{ row.judge_reason }}</div>
                             </div>
+                            <div class="expand-block" v-if="hasRagasDetail(row)">
+                              <span class="expand-title">Ragas 判定明细</span>
+                              <div class="ragas-detail">
+                                <div class="ragas-group" v-if="faithDetail(row).statements.length">
+                                  <span class="ragas-name">忠实度：答案陈述能否由检索上下文推导</span>
+                                  <ul class="verdict-list">
+                                    <li v-for="(st, i) in faithDetail(row).statements" :key="'f' + i">
+                                      <span class="bool" :class="faithDetail(row).verdicts[i] ? 'yes' : 'no'">{{ faithDetail(row).verdicts[i] ? '✓' : '✗' }}</span>
+                                      <span class="verdict-text">{{ st }}</span>
+                                    </li>
+                                  </ul>
+                                </div>
+                                <div class="ragas-group" v-if="recallDetail(row).statements.length">
+                                  <span class="ragas-name">召回率：参考答案陈述是否已被检索覆盖</span>
+                                  <ul class="verdict-list">
+                                    <li v-for="(st, i) in recallDetail(row).statements" :key="'r' + i">
+                                      <span class="bool" :class="recallDetail(row).verdicts[i] ? 'yes' : 'no'">{{ recallDetail(row).verdicts[i] ? '✓' : '✗' }}</span>
+                                      <span class="verdict-text">{{ st }}</span>
+                                    </li>
+                                  </ul>
+                                </div>
+                                <div class="ragas-group" v-if="relDetail(row).questions.length">
+                                  <span class="ragas-name">相关性：由答案反推的问题与原问题相似度</span>
+                                  <ul class="verdict-list">
+                                    <li v-for="(q, i) in relDetail(row).questions" :key="'q' + i">
+                                      <span class="bool" :class="(relDetail(row).sims[i] ?? 0) >= 0.5 ? 'yes' : 'no'">{{ pct(relDetail(row).sims[i]) }}</span>
+                                      <span class="verdict-text">{{ q }}</span>
+                                    </li>
+                                  </ul>
+                                </div>
+                              </div>
+                            </div>
                             <div class="expand-block">
                               <span class="expand-title">检索来源（{{ (row.retrieved_sources || []).length }}）</span>
                               <ul class="src-list" v-if="row.retrieved_sources && row.retrieved_sources.length">
                                 <li v-for="(s, i) in row.retrieved_sources" :key="i">
                                   <span class="src-idx">[{{ s.index }}]</span>
+                                  <span
+                                    v-if="precDetail(row).verdicts.length"
+                                    class="bool"
+                                    :class="precDetail(row).verdicts[i] ? 'yes' : 'no'"
+                                    title="上下文精确率判定"
+                                  >{{ precDetail(row).verdicts[i] ? '相关' : '无关' }}</span>
                                   <span class="src-meta">
                                     {{ s.wiki_title || s.source_image || s.kb_name || '片段' }}
                                     <em v-if="s.relevance != null">相关度 {{ s.relevance }}%</em>
@@ -628,18 +668,23 @@ function delta(cur, prev, { invert = false, suffix = '', scale = 1, digits = 0 }
 const metricCards = computed(() => {
   const s = detail.value?.run?.summary || {}
   const p = detail.value?.prev_summary || {}
+  // Ragas 四核心指标（0-1 均值，环比以百分点计）
+  const ragas = (key, label) => ({
+    key,
+    label,
+    value: pct(s[key]),
+    delta: delta(s[key], p[key], { scale: 100, suffix: 'pp' }),
+  })
   return [
+    ragas('avg_faithfulness', '忠实度 Faithfulness'),
+    ragas('avg_answer_relevance', '回答相关性 Relevance'),
+    ragas('avg_context_precision', '上下文精确率 Precision'),
+    ragas('avg_context_recall', '上下文召回率 Recall'),
     {
       key: 'hit',
       label: '检索命中率',
       value: pct(s.retrieval_hit_rate),
       delta: delta(s.retrieval_hit_rate, p.retrieval_hit_rate, { scale: 100, suffix: 'pp' }),
-    },
-    {
-      key: 'faith',
-      label: '忠实度通过率',
-      value: pct(s.faithfulness_pass_rate),
-      delta: delta(s.faithfulness_pass_rate, p.faithfulness_pass_rate, { scale: 100, suffix: 'pp' }),
     },
     {
       key: 'judge',
@@ -662,6 +707,24 @@ const metricCards = computed(() => {
 function pct(v) {
   if (v == null) return '—'
   return `${(v * 100).toFixed(1)}%`
+}
+
+// Ragas 分数着色：>=0.75 绿 / >=0.5 黄 / 其余红 / 空值灰
+function scoreCls(v) {
+  if (v == null) return 'na'
+  if (v >= 0.75) return 'yes'
+  if (v >= 0.5) return 'mid'
+  return 'no'
+}
+
+// Ragas 判定明细取值（后端 metric_details 解析后的对象）
+function faithDetail(row) { return row?.metric_details?.faithfulness || { statements: [], verdicts: [] } }
+function recallDetail(row) { return row?.metric_details?.context_recall || { statements: [], verdicts: [] } }
+function relDetail(row) { return row?.metric_details?.answer_relevance || { questions: [], sims: [] } }
+function precDetail(row) { return row?.metric_details?.context_precision || { verdicts: [] } }
+function hasRagasDetail(row) {
+  const md = row?.metric_details || {}
+  return !!(md.faithfulness || md.context_recall || md.answer_relevance || md.context_precision)
 }
 
 function statusLabel(st) {
@@ -874,6 +937,18 @@ function fmtTime(iso) {
 .bool { font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 6px; }
 .bool.yes { background: #e6f4ea; color: #2e7d46; }
 .bool.no { background: #f3ece2; color: #a99a86; }
+.score { font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.score.yes { color: #2e7d46; }
+.score.mid { color: #b5822a; }
+.score.no { color: #c0392b; }
+.score.na { color: var(--color-text-secondary); }
+.ragas-detail { display: flex; flex-direction: column; gap: 10px; background: #fff; border: 1px solid var(--color-border); border-radius: 9px; padding: 10px 12px; }
+.ragas-group { display: flex; flex-direction: column; gap: 5px; }
+.ragas-name { font-size: 11px; font-weight: 700; color: var(--color-text-secondary); }
+.verdict-list { list-style: none; display: flex; flex-direction: column; gap: 4px; }
+.verdict-list li { display: flex; gap: 8px; align-items: baseline; font-size: 12px; }
+.verdict-list .bool { flex-shrink: 0; }
+.verdict-text { color: var(--color-text); }
 .expand-row td { background: #fdfaf5; padding: 0; }
 .expand-inner { padding: 14px 16px; display: flex; flex-direction: column; gap: 12px; }
 .err-line { color: #c0392b; font-size: 12px; background: #fdecea; padding: 7px 10px; border-radius: 8px; }

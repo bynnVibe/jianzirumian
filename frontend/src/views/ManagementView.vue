@@ -117,6 +117,94 @@
           </div>
         </section>
 
+        <!-- 知识助手专用模型（与问答界面模型分离） -->
+        <section class="config-section">
+          <div class="section-header">
+            <h2 class="section-title">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="20" height="20">
+                <path d="M12 2a7 7 0 0 1 7 7c0 2.4-1.2 4.5-3 5.7V17a2 2 0 0 1-2 2h-4a2 2 0 0 1-2-2v-2.3C6.2 13.5 5 11.4 5 9a7 7 0 0 1 7-7z"/><line x1="9" y1="21" x2="15" y2="21"/>
+              </svg>
+              知识助手模型
+            </h2>
+            <span class="section-badge" :class="config.assistant_llm?.effective ? 'ok' : ''">
+              {{ config.assistant_llm?.effective ? '独立模型' : '跟随主模型' }}
+            </span>
+          </div>
+          <p class="section-desc">
+            为右侧「知识助手」单独指定模型，与问答界面（上方 LLM）互不影响。关闭时助手自动使用系统主模型。
+            建议为助手选择推理能力更强的模型以提升分析与工具调用效果。
+          </p>
+
+          <div class="toggle-row">
+            <div class="toggle-info">
+              <span class="toggle-label">{{ assistantForm.enabled ? '已启用独立模型' : '未启用（使用系统主模型）' }}</span>
+              <span class="toggle-hint">开启后知识助手的思考与回答都将走下方配置的模型</span>
+            </div>
+            <button class="toggle-switch" :class="{ active: assistantForm.enabled }" @click="assistantForm.enabled = !assistantForm.enabled">
+              <span class="toggle-knob"></span>
+            </button>
+          </div>
+
+          <template v-if="assistantForm.enabled">
+            <div class="provider-options">
+              <label
+                v-for="opt in config.available_llm_providers"
+                :key="opt"
+                class="provider-option"
+                :class="{ selected: assistantForm.provider === opt }"
+              >
+                <input type="radio" name="assistant_llm" :value="opt" v-model="assistantForm.provider" />
+                <div class="option-content">
+                  <span class="option-name">{{ llmLabels[opt] || opt }}</span>
+                  <span class="option-desc">{{ llmDescs[opt] }}</span>
+                </div>
+              </label>
+            </div>
+            <div class="param-panel">
+              <div class="param-row" v-if="assistantForm.provider !== 'ollama'">
+                <label class="param-label">API 地址</label>
+                <input class="param-input" type="text" v-model="assistantForm.base_url"
+                       placeholder="留空则复用所选提供商的默认地址" autocomplete="off" />
+              </div>
+              <div class="param-row" v-else>
+                <label class="param-label">Ollama 地址</label>
+                <input class="param-input" type="text" v-model="assistantForm.base_url"
+                       placeholder="留空则复用默认地址" autocomplete="off" />
+              </div>
+              <div class="param-row">
+                <label class="param-label">模型名称</label>
+                <input class="param-input" type="text" v-model="assistantForm.model"
+                       placeholder="如 deepseek-chat / qwen-plus / llama3" autocomplete="off" />
+              </div>
+              <div class="param-row" v-if="assistantForm.provider !== 'ollama'">
+                <label class="param-label">API Key</label>
+                <input class="param-input" type="password" v-model="assistantForm.api_key"
+                       :placeholder="config.assistant_llm?.has_key ? '已配置，留空保持不变' : '未配置，请输入 API Key'"
+                       autocomplete="off" />
+              </div>
+            </div>
+          </template>
+
+          <div class="section-actions">
+            <button class="btn btn-primary" @click="saveAssistant" :disabled="assistantSaving">
+              {{ assistantSaving ? '保存中...' : '保存配置' }}
+            </button>
+            <button
+              class="btn btn-outline"
+              @click="testAssistant"
+              :disabled="assistantTesting || !assistantForm.enabled"
+              :title="assistantForm.enabled ? '' : '请先启用并保存独立模型'"
+            >
+              <span v-if="assistantTesting" class="spinner-xs"></span>
+              {{ assistantTesting ? '测试中...' : '测试连接' }}
+            </button>
+            <span v-if="assistantResult" class="test-result" :class="assistantResult.success ? 'success' : 'error'">
+              {{ assistantResult.message }}
+              <span v-if="assistantResult.elapsed" class="test-elapsed">{{ assistantResult.elapsed }}s</span>
+            </span>
+          </div>
+        </section>
+
         <!-- OpenRouter 免费模型选择 -->
         <section class="config-section">
           <div class="section-header">
@@ -1337,6 +1425,7 @@ import { ref, reactive, computed, onMounted, nextTick, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import MarkdownIt from 'markdown-it'
 import { useAuthStore } from '@/stores/auth'
+import { useAssistantStore } from '@/stores/assistant'
 import UserStatsBoard from '@/views/UserManagementView.vue'
 import {
   getSystemConfig,
@@ -1360,6 +1449,8 @@ import {
   recompileWikiAll,
   getOpenRouterModels,
   applyOpenRouterModel,
+  saveAssistantLLM,
+  testAssistantLLMConnection,
   getKnowledgeEntries,
   deleteKnowledgeEntriesBySource,
   moveSourceToKb,
@@ -1377,6 +1468,7 @@ import {
 
 const route = useRoute()
 const authStore = useAuthStore()
+const assistant = useAssistantStore()
 const isAdmin = computed(() => authStore.isAdmin)
 const isGuest = computed(() => authStore.isGuest)
 const isManagementRoute = computed(() => route.name === 'Management')
@@ -1402,6 +1494,28 @@ onMounted(() => {
   loadKbList()
   loadFullTexts()
   if (isAdmin.value) loadUsers()
+})
+
+// ---- 路由切换同步 ----
+// /management 与 /knowledge 复用同一组件实例，切换路由时 onMounted 不会重新执行，
+// 需在此按目标路由重置标签页并实时刷新对应数据，避免页面内容停留在上一个路由
+watch(() => route.name, (name) => {
+  if (name !== 'Management' && name !== 'KnowledgeBase') return
+  if (name === 'KnowledgeBase' || !isAdmin.value) {
+    activeTab.value = 'knowledge'
+  } else {
+    activeTab.value = 'settings'
+  }
+  if (activeTab.value === 'knowledge') {
+    loadEntries()
+    loadKbList()
+    loadFullTexts()
+  } else {
+    loadConfig()
+    loadWikiSettings()
+    loadWikiPages()
+    loadUsers()
+  }
 })
 
 // ---- Config state ----
@@ -1580,6 +1694,12 @@ const redisSaving = ref(false)
 const redisTesting = ref(false)
 const redisTestResult = ref(null)
 
+// ---- 知识助手专用模型（与问答界面模型分离） ----
+const assistantForm = reactive({ enabled: false, provider: 'custom', base_url: '', model: '', api_key: '' })
+const assistantSaving = ref(false)
+const assistantTesting = ref(false)
+const assistantResult = ref(null)
+
 const redisBadgeClass = computed(() => {
   if (!redisForm.enabled) return ''
   return config.value.redis_config?.connected ? 'ok' : 'fail'
@@ -1609,6 +1729,15 @@ const wikiDeletingPage = ref(false)
 const renderedWikiPage = computed(() =>
   wikiDetailPage.value ? wikiMd.render(wikiDetailPage.value.content || '') : ''
 )
+
+// 打开/关闭百科词条详情时，同步到知识助手上下文（用户正在阅读的文档 + 行文动作）
+watch(wikiDetailPage, (page) => {
+  if (page) {
+    assistant.setOpenDoc({ title: page.title || '', content: page.content || '' })
+  } else {
+    assistant.clearOpenDoc()
+  }
+})
 
 // 删除权限与后端一致：私人页面仅属主/管理员；公共来源卡片仅管理员
 function canDeleteWikiPage(p) {
@@ -1713,12 +1842,68 @@ async function loadConfig() {
     // 回填 Redis 配置（页面保存过的覆盖值优先，否则显示 .env 默认）
     redisForm.url = res.data.redis_config?.url || ''
     redisForm.enabled = res.data.redis_config?.enabled !== false
+    // 回填知识助手专用模型（api_key 不回显明文，仅用 has_key 提示）
+    const a = res.data.assistant_llm || {}
+    assistantForm.enabled = !!a.enabled
+    assistantForm.provider = a.provider || 'custom'
+    assistantForm.base_url = a.base_url || ''
+    assistantForm.model = a.model || ''
+    assistantForm.api_key = ''
     fillAllParamForms()
     loadOpenRouterModels()
   } catch (err) {
     console.error('加载配置失败:', err)
   } finally {
     loading.value = false
+  }
+}
+
+async function saveAssistant() {
+  assistantSaving.value = true
+  assistantResult.value = null
+  try {
+    const res = await saveAssistantLLM({
+      enabled: assistantForm.enabled,
+      provider: assistantForm.enabled ? assistantForm.provider : '',
+      base_url: assistantForm.base_url.trim(),
+      model: assistantForm.model.trim(),
+      api_key: assistantForm.api_key.trim(),
+    })
+    assistantResult.value = res.data
+    if (res.data.success) {
+      // 静默刷新配置，同步 effective/has_key 状态；api_key 输入框清空
+      const cfgRes = await getSystemConfig()
+      config.value = cfgRes.data
+      const a = cfgRes.data.assistant_llm || {}
+      assistantForm.enabled = !!a.enabled
+      assistantForm.provider = a.provider || assistantForm.provider
+      assistantForm.base_url = a.base_url || ''
+      assistantForm.model = a.model || ''
+      assistantForm.api_key = ''
+    }
+  } catch (err) {
+    assistantResult.value = {
+      success: false,
+      message: '保存失败: ' + (err.response?.data?.detail || err.message),
+    }
+  } finally {
+    assistantSaving.value = false
+  }
+}
+
+async function testAssistant() {
+  assistantTesting.value = true
+  assistantResult.value = null
+  try {
+    const res = await testAssistantLLMConnection()
+    assistantResult.value = res.data
+  } catch (err) {
+    assistantResult.value = {
+      success: false,
+      message: '请求失败: ' + (err.response?.data?.detail || err.message),
+    }
+  } finally {
+    assistantTesting.value = false
   }
 }
 
@@ -2527,11 +2712,17 @@ function openPreview(entry) {
     previewImageUrl.value = isDocument ? '' : getImageUrl(entry.source_image)
   }
   showPreview.value = true
+  // 同步到知识助手：注入用户正在阅读的文档标题与正文，供其结合上下文分析
+  const docText = previewFullText.value
+    || previewDocPages.value.map((pg) => pg.text || '').join('\n\n')
+    || ''
+  assistant.setOpenDoc({ title: previewFilename.value, content: docText })
 }
 
 function closePreview() {
   showPreview.value = false
   previewItem.value = null
+  assistant.clearOpenDoc()
 }
 
 // ---- Image viewer (zoom) ----

@@ -633,6 +633,21 @@ export function applyOpenRouterModel(model, apiKey = '') {
   return api.post('/config/openrouter-apply', { model, api_key: apiKey })
 }
 
+/**
+ * 保存知识助手专用模型配置（与问答界面模型分离）
+ * @param {{enabled:boolean, provider:string, base_url:string, model:string, api_key:string}} cfg
+ */
+export function saveAssistantLLM(cfg) {
+  return api.post('/config/assistant-llm', cfg)
+}
+
+/**
+ * 测试知识助手专用模型连接（使用已保存配置）
+ */
+export function testAssistantLLMConnection() {
+  return api.post('/config/test-assistant-llm', {}, { timeout: 60000 })
+}
+
 // ============================================
 // 知识收藏 API
 // ============================================
@@ -762,7 +777,7 @@ export function recompileWikiAll() {
  * payload: { message, page_id, page_title, route_name, route_label, history }
  * onEvent(ev) 事件：status / thought / tool / token / confirm / done / error
  */
-export async function assistantChat(payload, onEvent) {
+export async function assistantChat(payload, onEvent, signal) {
   const token = localStorage.getItem('auth_token')
   const resp = await fetch('/api/wiki/assistant/chat', {
     method: 'POST',
@@ -771,6 +786,7 @@ export async function assistantChat(payload, onEvent) {
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
     body: JSON.stringify(payload),
+    signal,
   })
   if (!resp.ok) {
     let detail = ''

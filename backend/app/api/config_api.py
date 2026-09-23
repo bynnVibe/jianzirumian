@@ -54,6 +54,15 @@ class ProviderSettingsBody(BaseModel):
     values: dict
 
 
+class AssistantLLMBody(BaseModel):
+    """保存知识助手专用模型配置"""
+    enabled: bool = False
+    provider: str = ""      # ollama | openai | custom
+    base_url: str = ""
+    model: str = ""
+    api_key: str = ""       # 留空表示保持现有值不变
+
+
 # ============================================
 # 获取系统配置（完整版）
 # ============================================
@@ -103,6 +112,26 @@ def _public_config(category: str, provider: str) -> dict:
             out["has_key"] = bool(v)
         else:
             out[k] = v
+    return out
+
+
+def _public_assistant_llm() -> dict:
+    """知识助手专用模型配置的对外版本：api_key 转为 has_key 标记。
+
+    回传 enabled/provider/base_url/model 及 has_key，并附带一个 effective 标记
+    表示当前助手是否真的在使用独立模型（否则回退系统主 LLM）。
+    """
+    cfg = runtime_config.assistant_llm or {}
+    provider = (cfg.get("provider") or "").strip()
+    enabled = bool(cfg.get("enabled")) and provider in AVAILABLE_LLM_PROVIDERS
+    out = {
+        "enabled": bool(cfg.get("enabled")),
+        "provider": provider,
+        "base_url": (cfg.get("base_url") or "").strip(),
+        "model": (cfg.get("model") or "").strip(),
+        "has_key": bool((cfg.get("api_key") or "").strip()),
+        "effective": enabled and bool((cfg.get("model") or "").strip()),
+    }
     return out
 
 
@@ -163,6 +192,7 @@ async def get_full_config():
         },
         "embedding_config": {p: _public_config("embedding", p) for p in AVAILABLE_EMBEDDING_PROVIDERS},
         "rerank_config": {p: _public_config("rerank", p) for p in AVAILABLE_RERANK_PROVIDERS},
+        "assistant_llm": _public_assistant_llm(),
         "redis_config": {
             "url": effective_redis_url(),
             "enabled": effective_file_cache_enabled(),
@@ -253,6 +283,72 @@ async def save_provider_settings(body: ProviderSettingsBody, _admin: dict = Depe
             logger.warning("Embedding 配置保存后初始化失败: %s", e)
 
     return {"success": True, "message": "配置已保存，并已同步为系统默认配置"}
+
+
+# ============================================
+# 知识助手专用模型（与问答界面模型分离）
+# ============================================
+@router.post("/assistant-llm")
+async def save_assistant_llm(body: AssistantLLMBody, _admin: dict = Depends(require_admin)):
+    """保存知识助手专用模型配置（仅管理员）。
+
+    enabled=False 时助手回退使用系统主 LLM；api_key 留空表示保持已保存的值不变。
+    未填写的 base_url 会在构造时回退到所选 provider 的生效默认值。
+    """
+    provider = (body.provider or "").strip()
+    if body.enabled and provider not in AVAILABLE_LLM_PROVIDERS:
+        return {"success": False, "message": f"启用独立模型时需选择有效提供商，可选: {AVAILABLE_LLM_PROVIDERS}"}
+    if body.enabled and provider in ("openai", "custom") and not (body.model or "").strip():
+        return {"success": False, "message": "启用独立模型时需填写模型名称"}
+
+    current = runtime_config.assistant_llm or {}
+    api_key = (body.api_key or "").strip()
+    # api_key 留空 = 保持现有值；启用关闭时也保留旧值以便再次开启
+    if not api_key:
+        api_key = (current.get("api_key") or "").strip()
+
+    runtime_config.assistant_llm = {
+        "enabled": bool(body.enabled),
+        "provider": provider,
+        "base_url": (body.base_url or "").strip(),
+        "model": (body.model or "").strip(),
+        "api_key": api_key,
+    }
+    logger.info("保存知识助手模型配置: enabled=%s provider=%s model=%s",
+                body.enabled, provider or "-", (body.model or "-"))
+    return {
+        "success": True,
+        "message": "知识助手模型配置已保存并立即生效" if body.enabled else "已保存：知识助手将使用系统主模型",
+        "assistant_llm": _public_assistant_llm(),
+    }
+
+
+@router.post("/test-assistant-llm", response_model=TestConnectionResult)
+async def test_assistant_llm_connection(_admin: dict = Depends(require_admin)):
+    """测试知识助手专用模型连接（使用当前已保存的助手配置）。"""
+    if not (runtime_config.assistant_llm or {}).get("enabled"):
+        return TestConnectionResult(success=False, message="尚未启用知识助手独立模型，将使用系统主模型")
+    start = time.time()
+    try:
+        from app.core.llm import LLMFactory
+        llm = LLMFactory.create_assistant_llm()
+        collected = ""
+        async for chunk in llm.chat([{"role": "user", "content": "回复'连接成功'四个字"}], stream=True):
+            collected += chunk
+            if len(collected) > 50:
+                break
+        elapsed = time.time() - start
+        if collected.strip():
+            return TestConnectionResult(
+                success=True,
+                message=f"连接成功！模型回复: {collected.strip()[:50]}",
+                elapsed=round(elapsed, 2),
+            )
+        return TestConnectionResult(success=False, message="模型返回空响应", elapsed=round(elapsed, 2))
+    except Exception as e:
+        return TestConnectionResult(
+            success=False, message=str(e)[:120], elapsed=round(time.time() - start, 2)
+        )
 
 
 @router.post("/registration")

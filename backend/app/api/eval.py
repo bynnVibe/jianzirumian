@@ -333,6 +333,10 @@ async def get_run(run_id: str, _admin: dict = Depends(require_admin)):
             d["retrieved_sources"] = json.loads(d.get("retrieved_sources") or "[]")
         except (json.JSONDecodeError, TypeError):
             d["retrieved_sources"] = []
+        try:
+            d["metric_details"] = json.loads(d.get("metric_details") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            d["metric_details"] = {}
         results.append(d)
 
     # 环比基准：本 run 之前、同评测集最近一次 finished run

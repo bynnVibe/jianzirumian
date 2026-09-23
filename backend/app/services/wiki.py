@@ -126,9 +126,13 @@ def wiki_priority_enabled() -> bool:
     return runtime_config.wiki_priority_enabled
 
 
-async def _llm_complete(messages: List[dict]) -> str:
-    """调用 LLM 收集完整回复（内部走流式，失败自动降级非流式）。"""
-    llm = LLMFactory.create()
+async def _llm_complete(messages: List[dict], llm: "BaseLLM" = None) -> str:
+    """调用 LLM 收集完整回复（内部走流式，失败自动降级非流式）。
+
+    llm 为空时使用系统主 LLM；知识助手会传入自己的专用模型实例。
+    """
+    if llm is None:
+        llm = LLMFactory.create()
     collected = []
     async for chunk in llm.chat(messages, stream=True):
         collected.append(chunk)

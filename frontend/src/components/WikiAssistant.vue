@@ -22,7 +22,11 @@
         </header>
 
         <!-- 当前上下文提示 -->
-        <div class="panel-context" v-if="store.context.page_title">
+        <div class="panel-context" v-if="store.context.open_doc_title">
+          <span class="ctx-tag">正在阅读</span>
+          《{{ store.context.open_doc_title }}》
+        </div>
+        <div class="panel-context" v-else-if="store.context.page_title">
           <span class="ctx-tag">当前词条</span>
           《{{ store.context.page_title }}》
         </div>
@@ -49,8 +53,17 @@
           <div v-for="(m, i) in store.messages" :key="i" class="msg" :class="m.role">
             <div v-if="m.role === 'assistant'" class="msg-avatar">✦</div>
             <div class="msg-bubble">
-              <!-- 思考 -->
-              <div v-if="m.thought" class="msg-thought">💭 {{ m.thought }}</div>
+              <!-- 思考过程（累积展示 Agent 每一步推理） -->
+              <div v-if="m.thoughts && m.thoughts.length" class="msg-thoughts">
+                <div class="thoughts-head" @click="m._collapse = !m._collapse">
+                  <span class="thoughts-icon">💭</span>
+                  <span>思考过程（{{ m.thoughts.length }} 步）</span>
+                  <span class="thoughts-toggle">{{ m._collapse ? '展开' : '收起' }}</span>
+                </div>
+                <ol v-show="!m._collapse" class="thoughts-list">
+                  <li v-for="(t, ti) in m.thoughts" :key="ti" class="thought-item">{{ t }}</li>
+                </ol>
+              </div>
 
               <!-- 工具调用进度 -->
               <div v-if="m.tools && m.tools.length" class="msg-tools">
@@ -72,6 +85,7 @@
               <div v-else-if="m.streaming" class="typing">
                 <span></span><span></span><span></span>
               </div>
+              <div v-if="m.stopped && m.content" class="msg-stopped">⏹ 已停止生成</div>
 
               <!-- 编辑确认卡片 -->
               <div v-if="m.edit" class="edit-card" :class="m.edit.status">
@@ -126,10 +140,22 @@
               @keydown.enter.exact.prevent="onSend"
               @input="autoGrow"
             ></textarea>
-            <button class="send-btn" :disabled="store.isGenerating || !draft.trim()" @click="onSend" title="发送">
-              <span v-if="store.isGenerating" class="send-spinner"></span>
-              <span v-else>➤</span>
+            <!-- 生成中：停止按钮；否则：发送按钮 -->
+            <button
+              v-if="store.isGenerating"
+              class="send-btn stop"
+              @click="store.stop()"
+              title="停止生成"
+            >
+              <span class="stop-square"></span>
             </button>
+            <button
+              v-else
+              class="send-btn"
+              :disabled="!draft.trim()"
+              @click="onSend"
+              title="发送"
+            >➤</button>
           </div>
           <div class="status-line" v-if="store.statusText">{{ store.statusText }}</div>
         </div>
@@ -171,6 +197,9 @@ const ROUTE_LABELS = {
 const visible = computed(() => auth.isAuthenticated && !HIDDEN_ROUTES.includes(route.name))
 
 const quickChips = computed(() => {
+  if (store.context.open_doc_title) {
+    return ['分析这篇文档的主要内容', '总结这篇文档的关键要点', '这篇文档有哪些值得注意的地方？', '结合知识库解释这篇文档']
+  }
   if (store.context.page_id) {
     return ['分析当前页面的主题', '解释这个词条的关键要点', '这个主题还有哪些相关资料？', '帮我订正当前词条的表述']
   }
@@ -253,9 +282,14 @@ function scrollToBottom() {
 // 路由变化：同步路由上下文；离开词条页清除页面上下文
 watch(
   () => route.name,
-  (name) => {
+  (name, oldName) => {
     store.setContext({ route_name: name || '', route_label: ROUTE_LABELS[name] || '' })
     if (name !== 'Wiki') store.clearPageContext()
+    // 切换页面时清除文档预览上下文，并记录一条行文动作
+    if (name !== oldName) {
+      if (store.context.open_doc_title) store.clearOpenDoc()
+      if (name) store.pushAction(`进入${ROUTE_LABELS[name] || name}页面`)
+    }
   },
   { immediate: true },
 )
@@ -550,6 +584,64 @@ onMounted(() => {
   margin-bottom: 6px;
   padding-bottom: 6px;
   border-bottom: 1px dashed #ede6dc;
+}
+
+/* ---- 思考过程（可折叠，累积多步） ---- */
+.msg-thoughts {
+  margin-bottom: 8px;
+  border: 1px dashed #e6dccb;
+  border-radius: 8px;
+  background: #fcf9f3;
+  overflow: hidden;
+}
+
+.thoughts-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 9px;
+  font-size: 11.5px;
+  color: #a08a6d;
+  cursor: pointer;
+  user-select: none;
+}
+
+.thoughts-head:hover {
+  background: #f7f0e4;
+}
+
+.thoughts-icon {
+  font-size: 12px;
+}
+
+.thoughts-toggle {
+  margin-left: auto;
+  font-size: 10.5px;
+  color: #c0a882;
+}
+
+.thoughts-list {
+  margin: 0;
+  padding: 4px 12px 8px 26px;
+  border-top: 1px dashed #eee4d4;
+}
+
+.thought-item {
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: #8a7e72;
+  font-style: italic;
+  margin: 3px 0;
+}
+
+.msg-stopped {
+  margin-top: 6px;
+  font-size: 11px;
+  color: #b08a5a;
+  background: #faf3e6;
+  border-radius: 6px;
+  padding: 3px 8px;
+  display: inline-block;
 }
 
 .msg-tools {
@@ -933,6 +1025,21 @@ onMounted(() => {
   border-top-color: #fff;
   border-radius: 50%;
   animation: assistant-spin 0.7s linear infinite;
+}
+
+.send-btn.stop {
+  background: #b05555;
+}
+
+.send-btn.stop:hover {
+  background: #984747;
+}
+
+.stop-square {
+  width: 13px;
+  height: 13px;
+  border-radius: 3px;
+  background: #fff;
 }
 
 .status-line {

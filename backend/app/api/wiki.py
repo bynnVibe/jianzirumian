@@ -226,6 +226,11 @@ class AssistantChatRequest(BaseModel):
     page_title: str = ""
     route_name: str = ""
     route_label: str = ""
+    # 用户当前在页面中打开/预览的知识文档（模态预览，非词条详情页）
+    open_doc_title: str = ""
+    open_doc_content: str = ""
+    # 用户最近的行文/浏览动作轨迹（打开文档、检索、翻页等），提供前后文
+    user_actions: Optional[List[str]] = None
     # 助手面板内的历史对话 [{role, content}]，用于多轮上下文
     history: Optional[List[dict]] = None
 
@@ -246,6 +251,9 @@ async def assistant_chat(body: AssistantChatRequest, current_user: dict = Depend
         page_title=body.page_title,
         route_name=body.route_name,
         route_label=body.route_label,
+        open_doc_title=body.open_doc_title,
+        open_doc_content=body.open_doc_content,
+        user_actions=body.user_actions if isinstance(body.user_actions, list) else None,
     )
     history = body.history if isinstance(body.history, list) else []
 

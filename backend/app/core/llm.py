@@ -224,14 +224,11 @@ class LLMFactory:
     """LLM 工厂 - 根据配置创建对应的 LLM 实例"""
 
     @staticmethod
-    def create(provider: str = None) -> BaseLLM:
-        provider = provider or runtime_config.llm_provider or settings.LLM_PROVIDER
-
+    def _build(provider: str, cfg: dict) -> "BaseLLM":
+        """按提供商类型与生效参数构造 LLM 实例。"""
         if provider == "ollama":
-            cfg = effective_provider_config("llm", "ollama")
             return OllamaLLM(base_url=cfg.get("base_url"), model=cfg.get("model"))
         elif provider in ("openai", "custom"):
-            cfg = effective_provider_config("llm", provider)
             return OpenAICompatibleLLM(
                 base_url=cfg.get("base_url"),
                 api_key=cfg.get("api_key"),
@@ -239,3 +236,34 @@ class LLMFactory:
             )
         else:
             raise ValueError(f"不支持的 LLM 提供商: {provider}")
+
+    @staticmethod
+    def create(provider: str = None) -> BaseLLM:
+        provider = provider or runtime_config.llm_provider or settings.LLM_PROVIDER
+        cfg = effective_provider_config("llm", provider)
+        return LLMFactory._build(provider, cfg)
+
+    @staticmethod
+    def create_assistant_llm() -> BaseLLM:
+        """创建知识助手专用 LLM。
+
+        若运行时配置了 assistant_llm（enabled=True 且指定 provider/model），
+        以该 provider 的生效配置为底、用非空覆盖字段替换后构造；
+        否则回退系统主 LLM（LLMFactory.create()）。
+        """
+        override = runtime_config.assistant_llm or {}
+        if not override.get("enabled"):
+            return LLMFactory.create()
+        provider = (override.get("provider") or "").strip()
+        if provider not in ("ollama", "openai", "custom"):
+            return LLMFactory.create()
+        cfg = effective_provider_config("llm", provider)
+        for k in ("base_url", "api_key", "model"):
+            v = (override.get(k) or "").strip() if isinstance(override.get(k), str) else override.get(k)
+            if v:
+                cfg[k] = v
+        # 关键参数缺失则回退主 LLM，避免构造出不可用实例
+        if not cfg.get("model"):
+            return LLMFactory.create()
+        return LLMFactory._build(provider, cfg)
+

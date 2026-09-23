@@ -309,6 +309,11 @@ def init_db(conn: sqlite3.Connection):
             retrieved_sources TEXT NOT NULL DEFAULT '[]',
             retrieval_hit     INTEGER NOT NULL DEFAULT 0,
             faithfulness_pass INTEGER NOT NULL DEFAULT 0,
+            faithfulness      REAL,
+            answer_relevance  REAL,
+            context_precision REAL,
+            context_recall    REAL,
+            metric_details    TEXT NOT NULL DEFAULT '{}',
             judge_score       REAL,
             judge_reason      TEXT NOT NULL DEFAULT '',
             latency_ms        INTEGER NOT NULL DEFAULT 0,
@@ -414,6 +419,19 @@ def _migrate(conn: sqlite3.Connection):
             logger.info("wiki_compile_queue 遗留 processing 任务退回 pending: %d 条", cur.rowcount)
     except sqlite3.OperationalError:
         pass
+
+    # 回归评测 Ragas 化：eval_results 补加四项指标列与判定明细列（幂等）
+    eval_cols = {r[1] for r in conn.execute("PRAGMA table_info(eval_results)")}
+    for col, ddl in (
+        ("faithfulness", "REAL"),
+        ("answer_relevance", "REAL"),
+        ("context_precision", "REAL"),
+        ("context_recall", "REAL"),
+        ("metric_details", "TEXT NOT NULL DEFAULT '{}'"),
+    ):
+        if col not in eval_cols:
+            conn.execute(f"ALTER TABLE eval_results ADD COLUMN {col} {ddl}")
+            logger.info("eval_results 补加列: %s", col)
 
     # 回归评测：服务启动时把上次进程遗留的 running 运行标记为 interrupted，
     # 避免历史列表出现永远"执行中"的僵尸运行（后台任务随进程重启已丢失）

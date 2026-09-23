@@ -179,14 +179,18 @@ onMounted(async () => {
 onUnmounted(() => {
   window.removeEventListener('wiki:page-updated', onWikiPageUpdated)
   assistant.clearPageContext()
+  assistant.clearOpenDoc()
 })
 
 // 打开/关闭词条详情时同步知识助手的「当前页面」上下文
 watch(detailPage, (p) => {
   if (p) {
     assistant.setContext({ page_id: p.id, page_title: p.title })
+    // 直接注入正在阅读的词条正文，助手无需再调用工具即可结合内容作答
+    assistant.setOpenDoc({ title: p.title || '', content: p.content || '' })
   } else {
     assistant.clearPageContext()
+    assistant.clearOpenDoc()
   }
 })
 

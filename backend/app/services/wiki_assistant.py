@@ -40,6 +40,12 @@ _MAX_OBSERVATION_CHARS = 6000
 _MAX_CONTENT_CHARS = 8000
 # 回答阶段资料上下文总上限
 _MAX_CONTEXT_CHARS = 12000
+# 用户当前打开文档注入上下文的最大字符数
+_MAX_OPEN_DOC_CHARS = 6000
+# 行文动作轨迹最多注入条数
+_MAX_ACTIONS = 8
+# 单次助手请求的整体熔断时限（秒）：超时仍未产出结果则中止，避免用户长时间等待
+ASSISTANT_TIMEOUT_SECONDS = 90
 
 # 前端路由名 → 中文界面标签（前端未显式传 route_label 时兜底）
 ROUTE_LABELS = {
@@ -84,7 +90,7 @@ _ANSWER_SYSTEM = (
 
 
 class AssistantContext:
-    """一次助手会话的上下文（用户身份 + 当前界面）。"""
+    """一次助手会话的上下文（用户身份 + 当前界面 + 正在查看的文档）。"""
 
     def __init__(
         self,
@@ -94,6 +100,9 @@ class AssistantContext:
         page_title: str = "",
         route_name: str = "",
         route_label: str = "",
+        open_doc_title: str = "",
+        open_doc_content: str = "",
+        user_actions: Optional[List[str]] = None,
     ):
         self.user_id = user_id or ""
         self.is_admin = bool(is_admin)
@@ -101,6 +110,16 @@ class AssistantContext:
         self.page_title = page_title or ""
         self.route_name = route_name or ""
         self.route_label = route_label or ROUTE_LABELS.get(self.route_name, self.route_name or "未知页面")
+        # 用户在页面中打开/预览的知识文档（模态预览，可能不同于百科词条详情页）
+        self.open_doc_title = (open_doc_title or "").strip()
+        self.open_doc_content = (open_doc_content or "").strip()
+        # 最近的行文/浏览动作轨迹（打开文档、检索、翻页等），仅保留最近若干条
+        self.user_actions = [str(a).strip() for a in (user_actions or []) if str(a).strip()][-_MAX_ACTIONS:]
+
+    @property
+    def has_open_doc(self) -> bool:
+        """用户是否正在查看一篇打开的知识文档。"""
+        return bool(self.open_doc_title or self.open_doc_content)
 
 
 # ---------------------------------------------------------------------------
@@ -407,11 +426,28 @@ def _build_decision_messages(ctx: AssistantContext, message: str, history: List[
     page_title = (
         f"《{ctx.page_title}》(id={ctx.page_id})" if ctx.page_id else "（无，用户未打开具体词条）"
     )
-    context_system = (
-        "# 当前界面上下文\n"
-        f"- 用户所在页面：{ctx.route_label}（路由 {ctx.route_name or '-'}）\n"
-        f"- 当前查看的百科词条：{page_title}"
-    )
+    context_lines = [
+        "# 当前界面上下文",
+        f"- 用户所在页面：{ctx.route_label}（路由 {ctx.route_name or '-'}）",
+        f"- 当前查看的百科词条：{page_title}",
+    ]
+    # 用户正在打开/预览的知识文档（可能非词条详情页），直接把正文注入上下文
+    if ctx.has_open_doc:
+        doc_title = ctx.open_doc_title or "未命名文档"
+        context_lines.append(f"- 用户当前正在阅读的知识文档：《{doc_title}》")
+        if ctx.user_actions:
+            context_lines.append("- 用户最近的行文/浏览动作（由近及远）：")
+            context_lines.extend(f"    · {a}" for a in reversed(ctx.user_actions))
+        if ctx.open_doc_content:
+            context_lines.append(
+                f"- 该文档正文（已截断至 {_MAX_OPEN_DOC_CHARS} 字）：\n"
+                f"\"\"\"\n{_clip(ctx.open_doc_content, _MAX_OPEN_DOC_CHARS)}\n\"\"\""
+            )
+        context_lines.append(
+            "- 说明：用户很可能就想让你分析/解释这篇正在阅读的文档，"
+            "无需再调用 read_current_page；如需补充背景可用 search_knowledge。"
+        )
+    context_system = "\n".join(context_lines)
     messages = [
         {"role": "system", "content": _DECISION_SYSTEM},
         {"role": "system", "content": context_system},
@@ -431,13 +467,22 @@ def _build_answer_messages(
     messages = [{"role": "system", "content": _ANSWER_SYSTEM}]
     context_block = ""
     if ctx.page_id and ctx.page_title:
-        context_block += f"【用户当前正在查看】《{ctx.page_title}》\n\n"
+        context_block += f"【用户当前正在查看的百科词条】《{ctx.page_title}》\n\n"
+    # 用户正在阅读的知识文档正文（最高优先级资料）
+    if ctx.has_open_doc:
+        doc_title = ctx.open_doc_title or "未命名文档"
+        context_block += f"【用户当前正在阅读的知识文档】《{doc_title}》\n"
+        if ctx.open_doc_content:
+            context_block += _clip(ctx.open_doc_content, _MAX_OPEN_DOC_CHARS) + "\n\n"
+        if ctx.user_actions:
+            trail = "；".join(reversed(ctx.user_actions))
+            context_block += f"【用户最近的行文/浏览动作】{trail}\n\n"
     if observations:
         context_block += "\n\n".join(observations)
     if context_block:
         messages.append({
             "role": "system",
-            "content": "以下是可用资料（工具检索结果）：\n" + context_block[:_MAX_CONTEXT_CHARS],
+            "content": "以下是可用资料（用户当前查看内容与工具检索结果）：\n" + context_block[:_MAX_CONTEXT_CHARS],
         })
     for h in (history or [])[-4:]:
         role = h.get("role") if h.get("role") in ("user", "assistant") else "user"
@@ -475,16 +520,46 @@ async def run_assistant(
 async def _run_assistant_inner(
     message: str, ctx: AssistantContext, history: List[dict], state: dict
 ) -> AsyncGenerator[str, None]:
-    """Agent 内层循环：决策/工具循环 + 流式回答（state 用于回传最终 trace 状态）。"""
+    """Agent 内层循环：决策/工具循环 + 流式回答（state 用于回传最终 trace 状态）。
+
+    熔断：整体限时 ASSISTANT_TIMEOUT_SECONDS，超时仍未产出结果则中止并回传
+    timeout 错误事件，避免用户无限等待；决策与回答的 LLM 调用均受剩余时限约束。
+    """
     messages = _build_decision_messages(ctx, message, history)
     observations: List[str] = []
+    # 知识助手专用模型（未单独配置时回退系统主 LLM）
+    assistant_llm = LLMFactory.create_assistant_llm()
+    deadline = time.monotonic() + ASSISTANT_TIMEOUT_SECONDS
+
+    def _remaining() -> float:
+        return deadline - time.monotonic()
+
+    timeout_msg = (
+        f"助手响应超时（超过 {ASSISTANT_TIMEOUT_SECONDS} 秒仍未得到结果），已自动熔断中止。"
+        "请稍后重试，或简化问题、检查模型服务是否正常。"
+    )
+
+    def _emit_timeout(stage: str):
+        state["status"], state["error"] = "timeout", stage
+        return _sse({"event": "error", "message": timeout_msg, "code": "timeout"})
 
     # ---- 决策 / 工具循环 ----
     for _step in range(MAX_TOOL_STEPS):
+        if _remaining() <= 0:
+            yield _emit_timeout("decision deadline exceeded")
+            return
         t0 = time.monotonic()
         try:
-            raw = await _llm_complete(messages)
+            raw = await asyncio.wait_for(
+                _llm_complete(messages, assistant_llm), timeout=_remaining()
+            )
             obs.record_llm(f"decision#{_step + 1}", messages, raw, t0=t0)
+        except asyncio.TimeoutError:
+            logger.warning("[ASSISTANT] 决策超时熔断（step=%d）", _step + 1)
+            obs.record_llm(f"decision#{_step + 1}", messages, "", t0=t0,
+                           status="timeout", error="deadline exceeded")
+            yield _emit_timeout(f"decision#{_step + 1} timeout")
+            return
         except Exception as e:
             logger.warning("[ASSISTANT] 决策调用失败: %s", e)
             obs.record_llm(f"decision#{_step + 1}", messages, "", t0=t0,
@@ -530,6 +605,9 @@ async def _run_assistant_inner(
             return
 
         # 信息检索类工具
+        if _remaining() <= 0:
+            yield _emit_timeout("tool loop deadline exceeded")
+            return
         yield _sse({"event": "tool", "tool": tool, "args": _safe_args(args), "state": "start"})
         t0 = time.monotonic()
         observation = await _exec_info_tool(tool, args, ctx)
@@ -542,24 +620,54 @@ async def _run_assistant_inner(
         messages.append({"role": "user", "content": f"[工具 {tool} 返回]\n{_clip(observation)}"})
 
     # ---- 回答阶段（流式） ----
+    if _remaining() <= 0:
+        yield _emit_timeout("answer deadline exceeded")
+        return
     yield _sse({"event": "status", "text": "正在组织回答…"})
     answer_messages = _build_answer_messages(ctx, message, history, observations)
     parts: List[str] = []
     t0 = time.monotonic()
     try:
-        llm = LLMFactory.create()
-        async for chunk in llm.chat(answer_messages, stream=True):
+        ait = assistant_llm.chat(answer_messages, stream=True).__aiter__()
+        while True:
+            remaining = _remaining()
+            if remaining <= 0:
+                raise asyncio.TimeoutError()
+            try:
+                chunk = await asyncio.wait_for(ait.__anext__(), timeout=remaining)
+            except StopAsyncIteration:
+                break
             if chunk:
                 parts.append(chunk)
                 yield _sse({"event": "token", "content": chunk})
         obs.record_llm("answer", answer_messages, "".join(parts), t0=t0)
+    except asyncio.TimeoutError:
+        # 熔断：已有部分内容则追加提示后正常收尾，完全没有内容则回传超时错误
+        if parts:
+            logger.warning("[ASSISTANT] 回答流式超时熔断，已输出部分内容")
+            obs.record_llm("answer", answer_messages, "".join(parts), t0=t0,
+                           status="timeout", error="streaming deadline exceeded", fail_trace=False)
+            state["status"], state["error"] = "timeout", "answer streaming timeout"
+            yield _sse({"event": "token", "content": "\n\n（响应超时，已中止后续生成，以上为已获取的部分内容）"})
+            yield _sse({"event": "done"})
+            return
+        logger.warning("[ASSISTANT] 回答超时熔断，无任何输出")
+        obs.record_llm("answer", answer_messages, "", t0=t0,
+                       status="timeout", error="no token before deadline")
+        yield _emit_timeout("answer timeout")
+        return
     except Exception as e:
         logger.warning("[ASSISTANT] 流式回答失败，降级非流式: %s", e)
         obs.record_llm("answer", answer_messages, "".join(parts), t0=t0,
                        status="error", error=str(e), fail_trace=False)
+        if _remaining() <= 0:
+            yield _emit_timeout("answer fallback deadline exceeded")
+            return
         try:
             t1 = time.monotonic()
-            text = await _llm_complete(answer_messages)
+            text = await asyncio.wait_for(
+                _llm_complete(answer_messages, assistant_llm), timeout=_remaining()
+            )
             obs.record_llm("answer_fallback", answer_messages, text or "", t0=t1)
             if text:
                 yield _sse({"event": "token", "content": text})
@@ -567,6 +675,11 @@ async def _run_assistant_inner(
                 state["status"], state["error"] = "error", "模型返回为空"
                 yield _sse({"event": "error", "message": "生成回答失败：模型返回为空"})
                 return
+        except asyncio.TimeoutError:
+            obs.record_llm("answer_fallback", answer_messages, "", t0=t1,
+                           status="timeout", error="deadline exceeded")
+            yield _emit_timeout("answer_fallback timeout")
+            return
         except Exception as e2:
             obs.record_llm("answer_fallback", answer_messages, "", t0=t1,
                            status="error", error=str(e2))
@@ -574,3 +687,4 @@ async def _run_assistant_inner(
             yield _sse({"event": "error", "message": f"生成回答失败：{e2}"})
             return
     yield _sse({"event": "done"})
+

@@ -84,6 +84,23 @@ class RuntimeConfig:
     def rerank_provider(self, value: str):
         self.set("rerank_provider", value)
 
+    # ---- 知识助手独立模型（未启用时回退系统主 LLM） ----
+    @property
+    def assistant_llm(self) -> dict:
+        """知识助手专用模型覆盖配置。
+
+        结构：{"enabled": bool, "provider": str, "base_url": str, "api_key": str, "model": str}
+        enabled=False 或字段缺失时，助手回退使用系统主 LLM（llm_provider）。
+        """
+        cfg = self._data.get("assistant_llm") or {}
+        if not isinstance(cfg, dict):
+            return {}
+        return cfg
+
+    @assistant_llm.setter
+    def assistant_llm(self, value: dict):
+        self.set("assistant_llm", value if isinstance(value, dict) else {})
+
     # ---- Redis 文件缓存 ----
     @property
     def redis_url(self) -> str:

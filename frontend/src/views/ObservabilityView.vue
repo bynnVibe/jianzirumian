@@ -356,7 +356,9 @@ function barHeight(count) {
 
 <style scoped>
 .obs-view {
-  min-height: 100vh;
+  /* 父容器 .main-content 为 100vh + overflow:hidden，页面需自身承担滚动 */
+  height: 100%;
+  overflow-y: auto;
   background: var(--color-bg);
 }
 

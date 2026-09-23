@@ -2,7 +2,11 @@
 from app.services.evaluation import (
     _compute_retrieval_hit,
     _compute_summary,
+    _coerce_verdicts,
+    _cosine,
     _parse_judge,
+    _split_sentences,
+    _weighted_precision,
 )
 
 
@@ -60,11 +64,16 @@ def test_parse_judge_invalid():
 # ============================================
 # 聚合 summary
 # ============================================
-def _row(status="ok", hit=1, faith=1, score=4.0, latency=1000):
+def _row(status="ok", hit=1, faith=1, score=4.0, latency=1000,
+         f=None, rel=None, prec=None, rec=None):
     return {
         "status": status,
         "retrieval_hit": hit,
         "faithfulness_pass": faith,
+        "faithfulness": f,
+        "answer_relevance": rel,
+        "context_precision": prec,
+        "context_recall": rec,
         "judge_score": score,
         "latency_ms": latency,
     }
@@ -72,8 +81,8 @@ def _row(status="ok", hit=1, faith=1, score=4.0, latency=1000):
 
 def test_summary_basic():
     results = [
-        _row(hit=1, faith=1, score=5.0, latency=1000),
-        _row(hit=1, faith=0, score=3.0, latency=2000),
+        _row(hit=1, faith=1, score=5.0, latency=1000, f=1.0),
+        _row(hit=1, faith=0, score=3.0, latency=2000, f=0.5),
         _row(hit=0, faith=0, score=None, latency=3000),
     ]
     s = _compute_summary(results)
@@ -84,6 +93,8 @@ def test_summary_basic():
     assert s["faithfulness_pass_rate"] == round(1 / 3, 4)
     assert s["avg_judge_score"] == 4.0  # (5+3)/2，None 不计入
     assert s["avg_latency_ms"] == 2000.0
+    assert s["avg_faithfulness"] == 0.75  # (1.0+0.5)/2，None 不计入
+    assert s["avg_answer_relevance"] is None
 
 
 def test_summary_with_error_rows_excluded_from_rates():
@@ -107,3 +118,55 @@ def test_summary_all_error():
     assert s["retrieval_hit_rate"] == 0.0
     assert s["avg_judge_score"] is None
     assert s["avg_latency_ms"] == 0.0
+    assert s["avg_faithfulness"] is None
+    assert s["avg_context_recall"] is None
+
+
+def test_summary_ragas_averages_ignore_none():
+    results = [
+        _row(f=1.0, rel=0.8, prec=0.5, rec=1.0),
+        _row(f=0.5, rel=None, prec=0.0, rec=0.0),
+        _row(status="error"),
+    ]
+    s = _compute_summary(results)
+    assert s["avg_faithfulness"] == 0.75
+    assert s["avg_answer_relevance"] == 0.8  # 仅一条非空
+    assert s["avg_context_precision"] == 0.25
+    assert s["avg_context_recall"] == 0.5
+
+
+# ============================================
+# Ragas 上下文精确率（加权 precision@k）
+# ============================================
+def test_weighted_precision_all_relevant():
+    assert _weighted_precision([1, 1, 1]) == 1.0
+
+
+def test_weighted_precision_rank_aware():
+    # 相关在第 1、3 位：precision@1=1/1，precision@3=2/3 → (1 + 2/3)/2
+    assert _weighted_precision([1, 0, 1]) == round((1 + 2 / 3) / 2, 4)
+
+
+def test_weighted_precision_no_relevant():
+    assert _weighted_precision([0, 0]) == 0.0
+    assert _weighted_precision([]) == 0.0
+
+
+# ============================================
+# Ragas 辅助纯函数
+# ============================================
+def test_coerce_verdicts_pad_truncate_and_bad_values():
+    assert _coerce_verdicts([1, "0"], 3) == [1, 0, 0]   # 不足补 0
+    assert _coerce_verdicts([1, 1, 1], 2) == [1, 1]     # 超出截断
+    assert _coerce_verdicts([None, 2], 2) == [0, 0]     # 非法值记 0
+
+
+def test_cosine():
+    assert _cosine([1.0, 0.0], [1.0, 0.0]) == 1.0
+    assert _cosine([1.0, 0.0], [0.0, 1.0]) == 0.0
+    assert _cosine([], []) == 0.0
+
+
+def test_split_sentences():
+    assert _split_sentences("黄芪补气。固表！\n止汗") == ["黄芪补气", "固表", "止汗"]
+    assert _split_sentences("") == []
