@@ -6,15 +6,15 @@ import { assistantChat, approveAssistantEdit, rejectAssistantEdit } from '@/api'
  * 知识助手 Agent 状态（右侧栏问答）。
  *
  * 维护面板折叠态、当前界面上下文（页面/路由）、对话消息流与待确认编辑。
- * 消息通过 SSE 增量构建：status/thought/tool/token/confirm/done/error 事件
- * 分别驱动状态行、思考、工具进度、答案正文与编辑确认卡片。
+ * 消息通过 SSE 增量构建：status/plan/plan_step/thought/tool/clarify/token/confirm/done/error
+ * 事件分别驱动状态行、执行计划 stepper、思考、工具进度、追问卡片、答案正文与编辑确认卡片。
  */
 export const useAssistantStore = defineStore('assistant', () => {
   // ---- 状态 ----
   const isOpen = ref(false) // 面板折叠态（默认收起，仅显示悬浮入口）
   const isGenerating = ref(false)
   const statusText = ref('')
-  const messages = ref([]) // [{role, content, thoughts[], tools[], edit, error, stopped, streaming}]
+  const messages = ref([]) // [{role, content, thoughts[], tools[], plan[], clarify, edit, error, stopped, streaming}]
 
   // 当前界面上下文：由视图（WikiView 等）与组件（路由变化）写入
   // open_doc_* 为用户在页面中打开/预览的知识文档（模态预览），随请求注入助手上下文
@@ -110,6 +110,8 @@ export const useAssistantStore = defineStore('assistant', () => {
       content: '',
       thoughts: [],
       tools: [],
+      plan: [],
+      clarify: null,
       edit: null,
       error: false,
       stopped: false,
@@ -165,6 +167,19 @@ export const useAssistantStore = defineStore('assistant', () => {
       case 'status':
         statusText.value = ev.text || ''
         break
+      case 'plan':
+        // 复杂任务的执行计划：初始化 stepper（pending → running → done）
+        m.plan = (ev.steps || []).map((text) => ({ text, state: 'pending', note: '' }))
+        break
+      case 'plan_step': {
+        // 单步状态推进（显性化执行进度）
+        const s = m.plan[ev.index]
+        if (s) {
+          s.state = ev.state || s.state
+          if (ev.note) s.note = ev.note
+        }
+        break
+      }
       case 'thought': {
         // 累积每一步思考，完整呈现 Agent 的推理过程
         const t = (ev.text || '').trim()
@@ -181,6 +196,10 @@ export const useAssistantStore = defineStore('assistant', () => {
             t.summary = ev.summary || ''
           }
         }
+        break
+      case 'clarify':
+        // 知识缺口/意图不明：助手追问用户，前端渲染可点选的下一步动作
+        m.clarify = { question: ev.question || '', options: ev.options || [] }
         break
       case 'token':
         m.content += ev.content || ''

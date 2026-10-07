@@ -306,6 +306,29 @@
 
 **配置项**（backend/.env，系统设置页优先）：`REDIS_URL`、`FILE_CACHE_ENABLED`、`FILE_CACHE_TTL`（默认 86400 秒）、`FILE_CACHE_MAX_MB`（单文件上限，默认 20MB）。
 
+### 17. 模型网关（LLM Local Gateway，管理员/运维）
+
+参考 WaLiAPI「本地网关」思路构建的独立子系统：对下游工具/应用统一暴露 **OpenAI 兼容协议**（`POST /v1/chat/completions`、`GET /v1/models`），凭本地网关密钥（`sk-jzrm-...`）鉴权，屏蔽并托管真实上游 Key；内置负载均衡、故障切换、全量日志审计与风险检测引擎。入口：侧边栏「模型网关」（管理员/运维可见，路由 `/gateway`），含仪表盘 / 渠道 / 密钥 / 日志 / 安全审计五个页签。
+
+| 模块 | 说明 |
+|------|------|
+| **密钥与配额** | 为每个下游用户/应用生成独立本地密钥，可设 Token 与请求次数双配额、限定可访问模型、设置过期时间；数据库仅存 sha256 哈希，**明文密钥仅创建时返回一次**，真实上游 Key 不分发给调用方 |
+| **负载均衡与故障切换** | 渠道按**优先级**分层（高优先级先选）+ 同层**权重**加权随机（A-Res 算法）选路；某渠道失败自动切换下一候选，连续失败 ≥3 次熔断为 `down`（仍作兜底），成功一次即恢复；支持 openai / anthropic / ollama 三协议，统一归一化为 OpenAI 形态（含流式 SSE 适配），渠道 ApiKey 前端脱敏展示 |
+| **请求日志与审计** | 每次调用的状态码、Token 消耗、上游路由、工具调用、请求参数、风险明细与**可视化调用链路**全部入库；支持按密钥/模型/渠道/状态/风险等级/关键词搜索筛选分页，可展开查看完整明细 |
+| **安全审计中心** | 内置约 25 条规则、6 大类别（凭证泄露 / 敏感路径 / 工具命令 / 外联追踪 / Unicode 隐写 / 公网 IP），自动扫描请求中的 API Key、Cookie、私钥、`~/.ssh`、`.env`、`curl\|bash`、零宽隐写字符、追踪像素、公网 IP 探测等风险；支持**审计 / 警告 / 脱敏 / 阻断**四种模式，内置规则可启停，可自定义黑白名单，并提供即时扫描试跑 |
+| **可视化调用链路** | 每次调用记录 `鉴权 → 配额 → 安全审计 → 选路 → 上游调用 → 响应处理 → 日志入库` 七阶段（含状态/耗时/明细），日志详情以流程图节点渲染，点击展开每阶段明细，便于问题排查与运维定位 |
+
+**下游调用示例**（凭本地密钥，无需知道真实上游）：
+
+```bash
+curl http://<网关地址>/v1/chat/completions \
+  -H "Authorization: Bearer sk-jzrm-xxxxxxxx" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"你好"}]}'
+```
+
+> `/v1/*` 在鉴权中间件白名单中放行，改用网关密钥自鉴权（不校验站点登录态）；`/api/gateway/*` 管理端点全部经 `require_ops` 校验（管理员与运维角色均可访问）。响应头 `X-Gateway-Risk` 标注本次风险等级，命中脱敏/警告/阻断时附带 `X-Gateway-Audit`。
+
 ---
 
 ## 技术栈
@@ -324,6 +347,7 @@
 | **LLM** | Ollama 本地 / OpenAI 兼容 API / OpenRouter 免费模型 | 问答生成 |
 | **OCR** | PaddleOCR / 阿里云百炼 / 自定义 | 手写体文字识别 |
 | **流式通信** | Server-Sent Events (SSE) | 实时流式输出 |
+| **模型网关** | httpx 异步代理 + OpenAI 兼容协议 | 统一接入上游 LLM，负载均衡/故障切换/密钥配额/安全审计 |
 | **联网搜索** | DuckDuckGo / AnySearch / Bing / SerpAPI | 实时信息获取 |
 | **容器化** | Docker + Docker Compose | 生产级部署 |
 | **反向代理** | Nginx | 静态文件 + API 代理 + SSE |
@@ -983,6 +1007,22 @@ crontab -e
 
 侧边栏「回归评测」：建评测集 → 加用例（手工新增 / JSON 批量导入 / 从聊天点踩反馈一键导入）→ 一键回归 → 查看 run 级 Ragas 四指标（忠实度 / 回答相关性 / 上下文精确率 / 上下文召回率）与检索命中率、平均耗时及用例明细，跨 run 对比判断优化是否引入回退。同一评测集同时只允许一个 run 运行。
 
+### 模型网关（管理员/运维）
+
+侧边栏「模型网关」进入独立管理界面，五个页签覆盖网关全生命周期：
+
+```
+【渠道】新增上游渠道（协议 openai/anthropic/ollama + BaseUrl + 上游 ApiKey + 模型清单/映射 + 优先级 + 权重）
+→ 连通测试验证配置 → 启用后参与负载均衡（优先级分层 + 同层权重加权随机，失败自动故障切换）
+【密钥】为下游生成独立本地密钥 sk-jzrm-...（设 Token/请求配额、可访问模型、过期时间）→ 明文仅展示一次，及时复制
+【下游调用】用本地密钥请求 /v1/chat/completions → 网关鉴权 → 配额校验 → 安全审计 → 选路转发上游 → 归一化响应
+【日志】每次调用全量入库，按密钥/模型/渠道/状态/风险/关键词搜索筛选 → 展开查看可视化调用链路与风险明细
+【安全审计】选择审计/警告/脱敏/阻断模式 → 启停内置规则、配置黑白名单 → 扫描试跑即时验证命中效果
+```
+
+- **仪表盘**：渠道/密钥计数与健康分布、近 N 天调用量/成功率/Token/平均延迟、每日趋势、风险等级分布、渠道与 Top 密钥排行、最近风险调用
+- **可视化链路**：日志详情按 `鉴权 → 配额 → 安全审计 → 选路 → 上游调用 → 响应处理 → 日志入库` 七阶段渲染流程图，点击节点展开该阶段状态/耗时/明细，快速定位失败环节
+
 ### 问答交互流程
 
 ```
@@ -1159,6 +1199,37 @@ data: {"event":"done","session_id":"xxx","message":{...}}
 
 #### `GET /api/eval/runs`、`GET /api/eval/runs/{run_id}` — 运行历史 / 运行详情与用例明细
 
+### 模型网关相关（管理员/运维，`require_ops`）
+
+**下游代理端点**（`/v1`，凭本地网关密钥 `Authorization: Bearer sk-jzrm-...` 自鉴权，免站点登录态）：
+
+#### `POST /v1/chat/completions` — OpenAI 兼容聊天补全（支持 `stream` 流式）
+
+```json
+// 请求（与 OpenAI 一致）
+{ "model": "gpt-4o-mini", "messages": [{ "role": "user", "content": "你好" }], "stream": false }
+// 响应头：X-Gateway-Risk（风险等级）、X-Gateway-Audit（warn/mask/block，命中时）
+// 错误：{"error":{"message":"...","type":"missing_key|invalid_key|no_channel|blocked_by_audit|...","code":401}}
+```
+
+#### `GET /v1/models` — 网关聚合的可用模型清单（按密钥 `allowed_models` 过滤）
+
+**管理端点**（`/api/gateway`，全部 `require_ops`）：
+
+| 接口 | 说明 |
+|------|------|
+| `GET /api/gateway/overview` | 网关总览：渠道/密钥计数 + 健康分布 + 近 7 天统计 + 最近风险日志 |
+| `GET /api/gateway/stats?days=7` | 调用统计（总览/每日趋势/按渠道/按模型/风险分布/Top 密钥） |
+| `GET・POST /api/gateway/channels`、`PUT・DELETE /api/gateway/channels/{id}` | 渠道增删改查（ApiKey 脱敏返回，更新时留空表示不修改） |
+| `POST /api/gateway/channels/{id}/test` | 连通性测试（最小补全 ping，不计入日志/配额） |
+| `POST /api/gateway/channels/{id}/reset-health` | 重置渠道健康度（解除熔断） |
+| `GET・POST /api/gateway/keys`、`PUT・DELETE /api/gateway/keys/{id}` | 密钥增删改查（创建时返回一次明文 key） |
+| `POST /api/gateway/keys/{id}/reset` | 重置密钥 Token/请求用量 |
+| `GET /api/gateway/logs`、`GET /api/gateway/logs/{id}`、`DELETE /api/gateway/logs` | 日志搜索筛选分页 / 展开明细（含链路与风险）/ 按保留天数清理 |
+| `GET /api/gateway/rules` | 内置规则清单（含启用/生效状态 + 分类标签 + 审计模式） |
+| `GET・PUT /api/gateway/settings` | 读取/保存网关配置（审计模式、检测开关、重试次数、停用规则、黑白名单、保留天数） |
+| `POST /api/gateway/scan-preview` | 安全审计试跑（对给定文本即时扫描，不入库、不转发） |
+
 ### 知识收藏相关
 
 #### `POST /api/bookmarks` — 创建收藏
@@ -1228,6 +1299,11 @@ jianziruyang/
 │       │   ├── knowledge.py          #   知识库 API（上传 + OCR + CRUD + 入库历史）
 │       │   ├── wiki.py               #   知识百科 API（llm-wiki 编译层）
 │       │   ├── eval.py               #   回归评测 API（仅管理员）
+│       │   ├── observability.py      #   Agent 可观测性 API（日志/指标/追踪，仅管理员）
+│       │   ├── pipeline.py           #   CI/CD 流水线 API（评估驱动部署 EDD，管理员/运维）
+│       │   ├── gateway.py            #   模型网关管理 API（渠道/密钥/日志/安全审计，管理员/运维）
+│       │   ├── gateway_proxy.py      #   模型网关 OpenAI 兼容代理端点（/v1，凭本地密钥自鉴权）
+│       │   ├── deps.py               #   鉴权依赖（get_current_user/require_admin/require_ops）
 │       │   └── bookmark_api.py       #   知识收藏 API
 │       │
 │       ├── core/                     # 核心抽象层（工厂模式）
@@ -1250,8 +1326,17 @@ jianziruyang/
 │       │   ├── guest_limiter.py      #   游客免费次数限制
 │       │   ├── records.py            #   上传记录管理（含入库历史查询）
 │       │   ├── evaluation.py         #   回归评测引擎（Ragas 四指标/检索命中/judge 打分）
+│       │   ├── pipeline.py           #   CI/CD 流水线编排（评估驱动部署 EDD 六阶段）
 │       │   ├── usage.py              #   用量统计（按用户按天聚合）
-│       │   └── web_search.py         #   联网搜索
+│       │   ├── web_search.py         #   联网搜索
+│       │   └── gateway/              #   模型网关服务层（LLM Local Gateway）
+│       │       ├── channels.py       #     上游渠道管理 + 负载均衡（优先级分层/权重加权）+ 故障切换
+│       │       ├── keys.py           #     本地密钥与配额（sha256 存储 + Token/请求双配额 + 鉴权）
+│       │       ├── security.py       #     安全审计引擎（~25 条规则/6 类别/4 模式 + 隐写/公网 IP 检测）
+│       │       ├── upstream.py       #     上游协议适配（openai/anthropic/ollama 归一化为 OpenAI 形态）
+│       │       ├── proxy.py          #     代理主流程编排（prepare + 故障切换 + Tracer 可视化链路）
+│       │       ├── logs.py           #     请求日志入库/检索/统计/清理
+│       │       └── settings.py       #     网关全局配置（审计模式/检测开关/黑白名单/保留天数）
 │       │
 │       └── models/
 │           └── schemas.py            # Pydantic 数据模型
@@ -1278,6 +1363,9 @@ jianziruyang/
 │       │   ├── ManagementView.vue    # 知识库管理 + 系统设置
 │       │   ├── WikiView.vue          # 知识百科页（llm-wiki 词条浏览）
 │       │   ├── EvalView.vue          # 回归评测页（仅管理员）
+│       │   ├── ObservabilityView.vue # Agent 可观测性页（日志/指标/追踪，仅管理员）
+│       │   ├── PipelineView.vue      # CI/CD 流水线页（评估驱动部署 EDD，管理员/运维）
+│       │   ├── GatewayView.vue       # 模型网关页（仪表盘/渠道/密钥/日志/安全审计，管理员/运维）
 │       │   ├── BookmarksView.vue     # 知识收藏页
 │       │   ├── UserManagementView.vue # 用户管理页
 │       │   └── ConfigView.vue        # 提供商配置页
@@ -1287,7 +1375,14 @@ jianziruyang/
 │       └── components/
 │           ├── AppSidebar.vue        # 侧边栏（含用户菜单/信息修改/使用看板弹窗）
 │           ├── ChatMessage.vue       # 消息组件（含收藏/点赞点踩）
-│           └── ChatInput.vue         # 输入组件
+│           ├── ChatInput.vue         # 输入组件
+│           ├── WikiAssistant.vue     # 右侧知识助手（全局挂载，按登录态/路由显隐）
+│           └── gateway/              # 模型网关面板组件
+│               ├── ChannelsPanel.vue #   渠道管理（负载均衡/故障切换/连通测试）
+│               ├── KeysPanel.vue     #   密钥与配额管理（明文仅展示一次）
+│               ├── LogsPanel.vue     #   日志检索/筛选/展开明细（含链路可视化）
+│               ├── SecurityPanel.vue #   安全审计中心（四模式/规则启停/黑白名单/扫描试跑）
+│               └── TraceFlow.vue     #   可视化调用链路流程图（七阶段，可复用）
 │
 ├── backend/data/                     # SQLite 数据库 app.db（自动生成）
 ├── data/                             # 运行时数据（自动生成）

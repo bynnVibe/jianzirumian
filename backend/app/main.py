@@ -29,6 +29,9 @@ from app.api import bookmark_api
 from app.api import wiki as wiki_api
 from app.api import eval as eval_api
 from app.api import observability as observability_api
+from app.api import pipeline as pipeline_api
+from app.api import gateway as gateway_api
+from app.api import gateway_proxy as gateway_proxy_api
 from app.services import auth as auth_service
 from app.config import settings
 from app.core.log_setup import setup_logging, current_username
@@ -112,6 +115,13 @@ async def lifespan(app: FastAPI):
         obs.purge_old()
     except Exception as e:
         logger.warning("Agent 可观测性过期数据清理失败: %s", e)
+    # 模型网关：清理过期请求日志（按配置的保留天数）
+    try:
+        from app.services.gateway import logs as gw_logs
+        from app.services.gateway import settings as gw_settings
+        gw_logs.purge_old(int(gw_settings.get_settings().get("log_retention_days") or 30))
+    except Exception as e:
+        logger.warning("模型网关过期日志清理失败: %s", e)
     print(f"[见字如面] 服务启动完成")
     print(f"  - LLM: {runtime_config.llm_provider or settings.LLM_PROVIDER} (默认: {settings.LLM_PROVIDER})")
     print(f"  - OCR: {runtime_config.ocr_provider or settings.OCR_PROVIDER} (默认: {settings.OCR_PROVIDER})")
@@ -163,6 +173,9 @@ app.include_router(bookmark_api.router)
 app.include_router(wiki_api.router)
 app.include_router(eval_api.router)
 app.include_router(observability_api.router)
+app.include_router(pipeline_api.router)
+app.include_router(gateway_api.router)
+app.include_router(gateway_proxy_api.router)
 
 
 # ---- 鉴权中间件：除 /api/auth/* 和 /api/health 外都需要登录 ----
@@ -170,7 +183,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
     """验证所有 API 请求的登录态（白名单除外），支持游客访问"""
 
     # 不需要登录的路径前缀
-    WHITELIST = ("/api/auth/", "/api/health")
+    # /v1/ 为模型网关 OpenAI 兼容代理入口，凭网关本地密钥（sk-jzrm-...）自行鉴权，
+    # 不使用站点登录态，故在白名单放行。
+    WHITELIST = ("/api/auth/", "/api/health", "/v1/")
     # 图片类资源：<img> 标签无法携带 Authorization 头，允许通过 ?token= 鉴权
     IMAGE_PREFIXES = ("/api/knowledge/image", "/uploads")
     # 游客可访问的 API 路径前缀（无 token 时标记为游客，有 token 时正常验证）

@@ -24,7 +24,7 @@
     </div>
 
     <!-- 操作按钮 -->
-    <div class="actions">
+    <div class="actions" v-if="!auth.isOps">
       <button class="btn-new-chat" @click="handleNewChat">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="btn-icon">
           <line x1="12" y1="5" x2="12" y2="19"/>
@@ -33,7 +33,7 @@
         新对话
       </button>
 
-      <router-link v-if="!auth.isGuest" to="/upload" class="btn-upload" :class="{ active: isUploadPage }" @click="handleNavClick">
+      <router-link v-if="!auth.isGuest && !auth.isOps" to="/upload" class="btn-upload" :class="{ active: isUploadPage }" @click="handleNavClick">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="btn-icon">
           <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
           <polyline points="17 8 12 3 7 8"/>
@@ -45,24 +45,24 @@
 
     <!-- 配置与管理的入口 -->
     <div class="actions config-actions">
-      <!-- 知识库管理（所有用户可见） -->
-      <router-link to="/knowledge" class="btn-upload" :class="{ active: isKnowledgePage }" @click="handleNavClick">
+      <!-- 知识库管理（普通用户/管理员可见，运维角色不可见） -->
+      <router-link v-if="!auth.isOps" to="/knowledge" class="btn-upload" :class="{ active: isKnowledgePage }" @click="handleNavClick">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="btn-icon">
           <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
         </svg>
         知识库管理
       </router-link>
 
-      <!-- 知识收藏（所有用户可见） -->
-      <router-link to="/bookmarks" class="btn-upload" :class="{ active: isBookmarksPage }" @click="handleNavClick">
+      <!-- 知识收藏（普通用户/管理员可见，运维角色不可见） -->
+      <router-link v-if="!auth.isOps" to="/bookmarks" class="btn-upload" :class="{ active: isBookmarksPage }" @click="handleNavClick">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="btn-icon">
           <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/>
         </svg>
         知识收藏
       </router-link>
 
-      <!-- 知识百科（登录用户可见：llm-wiki 编译词条，含个人知识库词条） -->
-      <router-link v-if="!auth.isGuest" to="/wiki" class="btn-upload" :class="{ active: isWikiPage }" @click="handleNavClick">
+      <!-- 知识百科（登录用户可见，运维角色不可见：llm-wiki 编译词条，含个人知识库词条） -->
+      <router-link v-if="!auth.isGuest && !auth.isOps" to="/wiki" class="btn-upload" :class="{ active: isWikiPage }" @click="handleNavClick">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="btn-icon">
           <path d="M12 2l3 6 7 1-5 5 1 7-6-3-6 3 1-7-5-5 7-1z"/>
         </svg>
@@ -83,9 +83,9 @@
         系统管理
       </router-link>
 
-      <!-- 回归评测（仅管理员可见：评测集 / 一键回归 / 运行对比） -->
+      <!-- 回归评测（管理员/运维可见：评测集 / 一键回归 / 运行对比） -->
       <router-link
-        v-if="auth.isAdmin"
+        v-if="auth.canOps"
         to="/eval"
         class="btn-upload"
         :class="{ active: isEvalPage }"
@@ -97,9 +97,9 @@
         回归评测
       </router-link>
 
-      <!-- Agent 可观测性（仅管理员可见：日志/指标/全链路追踪） -->
+      <!-- Agent 可观测性（管理员/运维可见：日志/指标/全链路追踪） -->
       <router-link
-        v-if="auth.isAdmin"
+        v-if="auth.canOps"
         to="/observability"
         class="btn-upload"
         :class="{ active: isObservabilityPage }"
@@ -110,10 +110,40 @@
         </svg>
         Agent 可观测性
       </router-link>
+
+      <!-- CI/CD 流水线（管理员/运维可见：评估驱动部署 EDD） -->
+      <router-link
+        v-if="auth.canOps"
+        to="/pipeline"
+        class="btn-upload"
+        :class="{ active: isPipelinePage }"
+        @click="handleNavClick"
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="btn-icon">
+          <circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="6" r="2.5"/><circle cx="12" cy="18" r="2.5"/>
+          <path d="M6 8.5v2a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2v-2"/><path d="M12 12.5v3"/>
+        </svg>
+        CI/CD 流水线
+      </router-link>
+
+      <!-- 模型网关（管理员/运维可见：密钥配额 / 负载均衡 / 日志审计 / 安全审计中心） -->
+      <router-link
+        v-if="auth.canOps"
+        to="/gateway"
+        class="btn-upload"
+        :class="{ active: isGatewayPage }"
+        @click="handleNavClick"
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="btn-icon">
+          <rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>
+          <path d="M10 6.5h4a2 2 0 0 1 2 2V14"/><path d="M14 17.5h-4a2 2 0 0 1-2-2V10"/>
+        </svg>
+        模型网关
+      </router-link>
     </div>
 
-    <!-- 聊天历史 -->
-    <div class="history-section">
+    <!-- 聊天历史（运维角色不展示对话历史） -->
+    <div class="history-section" v-if="!auth.isOps">
       <div class="section-header">
         <span class="section-title">对话历史</span>
         <span class="session-count" v-if="sessions.length">{{ sessions.length }}</span>
@@ -176,7 +206,7 @@
         <div class="user-avatar">{{ auth.username.charAt(0).toUpperCase() }}</div>
         <div class="user-meta user-meta-clickable" @click="toggleUserMenu" title="个人中心">
           <span class="user-name">{{ auth.username }}</span>
-          <span class="user-role">{{ auth.isAdmin ? '管理员' : '普通用户' }}</span>
+          <span class="user-role">{{ auth.isAdmin ? '管理员' : (auth.isOps ? '运维' : '普通用户') }}</span>
         </div>
         <button class="btn-logout" @click="handleLogout" title="退出登录">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
@@ -484,6 +514,8 @@ const isWikiPage = computed(() => route.path === '/wiki')
 const isAdminUsersPage = computed(() => route.path === '/admin/users')
 const isEvalPage = computed(() => route.path === '/eval')
 const isObservabilityPage = computed(() => route.path === '/observability')
+const isPipelinePage = computed(() => route.path === '/pipeline')
+const isGatewayPage = computed(() => route.path === '/gateway')
 
 onMounted(async () => {
   // 仅已登录用户加载会话列表（游客/未登录不发起请求，避免 401 触发跳转）

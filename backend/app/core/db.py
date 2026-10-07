@@ -362,6 +362,152 @@ def init_db(conn: sqlite3.Connection):
         );
         CREATE INDEX IF NOT EXISTS idx_agent_spans_trace ON agent_spans(trace_id, seq);
         CREATE INDEX IF NOT EXISTS idx_agent_spans_started ON agent_spans(started_at);
+
+        -- CI/CD 流水线（运维角色）：一次流水线运行 = 一条 pipeline_run，每个阶段 = 一条 pipeline_stage。
+        -- 阶段固定六段：commit(代码提交) → unit_test(单元测试) → eval_regression(评估回归/EDD)
+        --   → build_image(构建镜像) → canary(灰度发布) → full(全量上线)。
+        -- run.status: running | finished(全部通过) | failed(某阶段失败并阻断) | aborted(人工中止)
+        CREATE TABLE IF NOT EXISTS pipeline_runs (
+            id            TEXT PRIMARY KEY,
+            trigger       TEXT NOT NULL DEFAULT 'manual',
+            git_ref       TEXT NOT NULL DEFAULT '',
+            status        TEXT NOT NULL DEFAULT 'running',
+            current_stage TEXT NOT NULL DEFAULT '',
+            edd_score     REAL,
+            edd_threshold REAL NOT NULL DEFAULT 0.85,
+            summary       TEXT NOT NULL DEFAULT '{}',
+            created_by    TEXT NOT NULL DEFAULT '',
+            started_at    TEXT NOT NULL,
+            finished_at   TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_pipeline_runs_started ON pipeline_runs(started_at);
+
+        -- stage.status: pending | running | passed | failed | skipped | aborted
+        CREATE TABLE IF NOT EXISTS pipeline_stages (
+            id          TEXT PRIMARY KEY,
+            run_id      TEXT NOT NULL,
+            seq         INTEGER NOT NULL,
+            name        TEXT NOT NULL,
+            status      TEXT NOT NULL DEFAULT 'pending',
+            log         TEXT NOT NULL DEFAULT '',
+            detail      TEXT NOT NULL DEFAULT '{}',
+            started_at  TEXT,
+            finished_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_pipeline_stages_run ON pipeline_stages(run_id, seq);
+
+        -- 流水线全局配置（单行 id='default'）：EDD 阈值/评测集、各阶段开关与自定义命令
+        CREATE TABLE IF NOT EXISTS pipeline_settings (
+            id              TEXT PRIMARY KEY,
+            edd_threshold   REAL NOT NULL DEFAULT 0.85,
+            edd_dataset_id  TEXT NOT NULL DEFAULT '',
+            run_unit_test   INTEGER NOT NULL DEFAULT 1,
+            run_build_image INTEGER NOT NULL DEFAULT 0,
+            build_cmd       TEXT NOT NULL DEFAULT '',
+            canary_cmd      TEXT NOT NULL DEFAULT '',
+            full_cmd        TEXT NOT NULL DEFAULT '',
+            updated_at      TEXT NOT NULL
+        );
+
+        -- =====================================================================
+        -- 模型网关（LLM Local Gateway）：统一上游模型配置与负载、本地密钥分发、
+        -- 请求日志与安全审计。参考 WaLiAPI 设计。
+        -- =====================================================================
+
+        -- 上游渠道：protocol(openai|anthropic|ollama) + base_url + api_key + 模型清单/映射；
+        -- 按 priority(越大越优先) + weight(同级内按权重随机) 选路，失败自动切换其他渠道。
+        -- health: healthy(健康) | degraded(连续失败降级) | down(熔断)
+        CREATE TABLE IF NOT EXISTS gateway_channels (
+            id            TEXT PRIMARY KEY,
+            name          TEXT NOT NULL,
+            protocol      TEXT NOT NULL DEFAULT 'openai',
+            base_url      TEXT NOT NULL DEFAULT '',
+            api_key       TEXT NOT NULL DEFAULT '',
+            models        TEXT NOT NULL DEFAULT '[]',
+            model_mapping TEXT NOT NULL DEFAULT '{}',
+            priority      INTEGER NOT NULL DEFAULT 0,
+            weight        INTEGER NOT NULL DEFAULT 1,
+            enabled       INTEGER NOT NULL DEFAULT 1,
+            health        TEXT NOT NULL DEFAULT 'healthy',
+            fail_count    INTEGER NOT NULL DEFAULT 0,
+            success_count INTEGER NOT NULL DEFAULT 0,
+            last_error    TEXT NOT NULL DEFAULT '',
+            created_at    TEXT NOT NULL,
+            updated_at    TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_gateway_channels_enabled ON gateway_channels(enabled, priority);
+
+        -- 本地访问密钥：为每个下游用户/应用生成独立密钥并设配额，真实上游 Key 不外发。
+        -- 仅存 key_hash(sha256) 与 key_prefix(便于识别)，明文只在创建时返回一次。
+        CREATE TABLE IF NOT EXISTS gateway_keys (
+            id             TEXT PRIMARY KEY,
+            name           TEXT NOT NULL,
+            key_prefix     TEXT NOT NULL DEFAULT '',
+            key_hash       TEXT NOT NULL,
+            token_quota    INTEGER NOT NULL DEFAULT 0,
+            token_used     INTEGER NOT NULL DEFAULT 0,
+            request_quota  INTEGER NOT NULL DEFAULT 0,
+            request_count  INTEGER NOT NULL DEFAULT 0,
+            allowed_models TEXT NOT NULL DEFAULT '[]',
+            enabled        INTEGER NOT NULL DEFAULT 1,
+            expires_at     TEXT,
+            created_by     TEXT NOT NULL DEFAULT '',
+            created_at     TEXT NOT NULL,
+            last_used_at   TEXT
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_gateway_keys_hash ON gateway_keys(key_hash);
+
+        -- 请求日志与审计：状态码/Token/上游路由/工具调用/请求参数全部入库，
+        -- 附带风险明细(risks JSON)、审计动作(audit_action) 与可视化调用链路(trace_steps JSON)。
+        -- status: ok | error | blocked；risk_level: none|low|medium|high|critical
+        CREATE TABLE IF NOT EXISTS gateway_logs (
+            id                TEXT PRIMARY KEY,
+            key_id            TEXT NOT NULL DEFAULT '',
+            key_name          TEXT NOT NULL DEFAULT '',
+            model_requested   TEXT NOT NULL DEFAULT '',
+            model_mapped      TEXT NOT NULL DEFAULT '',
+            channel_id        TEXT NOT NULL DEFAULT '',
+            channel_name      TEXT NOT NULL DEFAULT '',
+            upstream_url      TEXT NOT NULL DEFAULT '',
+            stream            INTEGER NOT NULL DEFAULT 0,
+            status_code       INTEGER NOT NULL DEFAULT 0,
+            status            TEXT NOT NULL DEFAULT 'ok',
+            prompt_tokens     INTEGER NOT NULL DEFAULT 0,
+            completion_tokens INTEGER NOT NULL DEFAULT 0,
+            total_tokens      INTEGER NOT NULL DEFAULT 0,
+            latency_ms        INTEGER NOT NULL DEFAULT 0,
+            retries           INTEGER NOT NULL DEFAULT 0,
+            tool_calls        TEXT NOT NULL DEFAULT '[]',
+            request_body      TEXT NOT NULL DEFAULT '',
+            response_preview  TEXT NOT NULL DEFAULT '',
+            risk_level        TEXT NOT NULL DEFAULT 'none',
+            risk_score        INTEGER NOT NULL DEFAULT 0,
+            risks             TEXT NOT NULL DEFAULT '[]',
+            audit_action      TEXT NOT NULL DEFAULT '',
+            trace_steps       TEXT NOT NULL DEFAULT '[]',
+            client_ip         TEXT NOT NULL DEFAULT '',
+            error             TEXT NOT NULL DEFAULT '',
+            created_at        TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_gateway_logs_created ON gateway_logs(created_at);
+        CREATE INDEX IF NOT EXISTS idx_gateway_logs_key ON gateway_logs(key_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_gateway_logs_risk ON gateway_logs(risk_level, created_at);
+
+        -- 网关全局配置（单行 id='default'）：审计模式/检测开关/内置规则停用/自定义黑白名单/重试
+        -- audit_mode: audit(只审计) | warn(警告) | mask(脱敏) | block(阻断)
+        CREATE TABLE IF NOT EXISTS gateway_settings (
+            id                 TEXT PRIMARY KEY,
+            audit_mode         TEXT NOT NULL DEFAULT 'audit',
+            unicode_detection  INTEGER NOT NULL DEFAULT 1,
+            tool_cmd_detection INTEGER NOT NULL DEFAULT 1,
+            outbound_detection INTEGER NOT NULL DEFAULT 1,
+            retry_count        INTEGER NOT NULL DEFAULT 2,
+            disabled_rules     TEXT NOT NULL DEFAULT '[]',
+            blacklist          TEXT NOT NULL DEFAULT '[]',
+            whitelist          TEXT NOT NULL DEFAULT '[]',
+            log_retention_days INTEGER NOT NULL DEFAULT 30,
+            updated_at         TEXT NOT NULL
+        );
         """
     )
     _migrate(conn)
@@ -445,6 +591,42 @@ def _migrate(conn: sqlite3.Connection):
             logger.info("eval_runs 遗留 running 运行标记为 interrupted: %d 条", cur.rowcount)
     except sqlite3.OperationalError:
         # 表尚未创建（首次建表在 executescript 中已完成，此处仅防御）
+        pass
+
+    # CI/CD 流水线：确保默认配置行存在（EDD 阈值 0.85），并把遗留 running 运行标记为 aborted
+    try:
+        row = conn.execute("SELECT id FROM pipeline_settings WHERE id = 'default'").fetchone()
+        if not row:
+            conn.execute(
+                "INSERT INTO pipeline_settings (id, edd_threshold, edd_dataset_id, run_unit_test,"
+                " run_build_image, build_cmd, canary_cmd, full_cmd, updated_at)"
+                " VALUES ('default', 0.85, '', 1, 0, '', '', '', ?)",
+                (datetime.now().isoformat(),),
+            )
+            logger.info("pipeline_settings 初始化默认配置行")
+        cur = conn.execute(
+            "UPDATE pipeline_runs SET status = 'aborted', finished_at = COALESCE(finished_at, ?)"
+            " WHERE status = 'running'",
+            (datetime.now().isoformat(),),
+        )
+        if cur.rowcount:
+            logger.info("pipeline_runs 遗留 running 运行标记为 aborted: %d 条", cur.rowcount)
+    except sqlite3.OperationalError:
+        pass
+
+    # 模型网关：确保默认配置行存在（审计模式 audit、重试 2 次、日志保留 30 天）
+    try:
+        row = conn.execute("SELECT id FROM gateway_settings WHERE id = 'default'").fetchone()
+        if not row:
+            conn.execute(
+                "INSERT INTO gateway_settings (id, audit_mode, unicode_detection, tool_cmd_detection,"
+                " outbound_detection, retry_count, disabled_rules, blacklist, whitelist,"
+                " log_retention_days, updated_at)"
+                " VALUES ('default', 'audit', 1, 1, 1, 2, '[]', '[]', '[]', 30, ?)",
+                (datetime.now().isoformat(),),
+            )
+            logger.info("gateway_settings 初始化默认配置行")
+    except sqlite3.OperationalError:
         pass
 
 

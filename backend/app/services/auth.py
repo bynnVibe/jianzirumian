@@ -284,6 +284,33 @@ def set_user_active(token: str, target_user_id: str, is_active: bool):
     return _user_info(_get_user(target_user_id))
 
 
+# 合法角色：普通用户 / 管理员 / 运维（运维仅可访问 CI-CD、可观测性、回归评测）
+VALID_ROLES = ("user", "admin", "ops")
+
+
+def set_user_role(token: str, target_user_id: str, role: str):
+    """修改用户角色（仅管理员）。role 取值：user / admin / ops。"""
+    admin = get_session_user(token)
+    if not admin:
+        raise PermissionError("未登录")
+    if admin["role"] != "admin":
+        raise PermissionError("仅管理员可执行此操作")
+    role = (role or "").strip().lower()
+    if role not in VALID_ROLES:
+        raise ValueError(f"非法角色：{role}（可选 user/admin/ops）")
+    if admin["id"] == target_user_id:
+        raise ValueError("不能修改自己的角色")
+
+    now = time.time()
+    affected = db.execute(
+        "UPDATE users SET role = ?, updated_at = ? WHERE id = ?",
+        (role, now, target_user_id),
+    )
+    if not affected:
+        raise ValueError("用户不存在")
+    return _user_info(_get_user(target_user_id))
+
+
 def delete_user(token: str, target_user_id: str):
     """删除用户（仅管理员）"""
     admin = get_session_user(token)

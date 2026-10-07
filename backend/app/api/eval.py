@@ -2,7 +2,7 @@
 见字如面 - Agent 回归评测 API（全部管理员受限）
 
 评测集/用例的增删查、批量导入、从点踩反馈导入、发起评测运行、
-运行历史与明细查询。所有端点均通过 require_admin 校验。
+运行历史与明细查询。所有端点均通过 require_ops 校验。
 """
 import json
 import logging
@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from app.api.deps import require_admin
+from app.api.deps import require_ops
 from app.core import db
 from app.services import evaluation
 
@@ -61,7 +61,7 @@ class CaseImport(BaseModel):
 # 评测集
 # ---------------------------------------------------------------------------
 @router.get("/datasets")
-async def list_datasets(_admin: dict = Depends(require_admin)):
+async def list_datasets(_admin: dict = Depends(require_ops)):
     """评测集列表（含用例数与最近一次运行状态）"""
     rows = db.query("SELECT * FROM eval_datasets ORDER BY created_at DESC")
     result = []
@@ -83,7 +83,7 @@ async def list_datasets(_admin: dict = Depends(require_admin)):
 
 
 @router.post("/datasets")
-async def create_dataset(body: DatasetCreate, _admin: dict = Depends(require_admin)):
+async def create_dataset(body: DatasetCreate, _admin: dict = Depends(require_ops)):
     """新建评测集"""
     name = body.name.strip()
     if not name:
@@ -98,7 +98,7 @@ async def create_dataset(body: DatasetCreate, _admin: dict = Depends(require_adm
 
 
 @router.delete("/datasets/{dataset_id}")
-async def delete_dataset(dataset_id: str, _admin: dict = Depends(require_admin)):
+async def delete_dataset(dataset_id: str, _admin: dict = Depends(require_ops)):
     """删除评测集（级联删除用例、运行与结果）"""
     row = db.query_one("SELECT id FROM eval_datasets WHERE id = ?", (dataset_id,))
     if not row:
@@ -127,7 +127,7 @@ def _case_to_dict(row: dict) -> dict:
 
 
 @router.get("/datasets/{dataset_id}/cases")
-async def list_cases(dataset_id: str, _admin: dict = Depends(require_admin)):
+async def list_cases(dataset_id: str, _admin: dict = Depends(require_ops)):
     """评测集内用例列表"""
     rows = db.query(
         "SELECT * FROM eval_cases WHERE dataset_id = ? ORDER BY created_at, rowid",
@@ -138,7 +138,7 @@ async def list_cases(dataset_id: str, _admin: dict = Depends(require_admin)):
 
 
 @router.post("/datasets/{dataset_id}/cases")
-async def create_case(dataset_id: str, body: CaseCreate, _admin: dict = Depends(require_admin)):
+async def create_case(dataset_id: str, body: CaseCreate, _admin: dict = Depends(require_ops)):
     """新增单条用例"""
     if not db.query_one("SELECT id FROM eval_datasets WHERE id = ?", (dataset_id,)):
         raise HTTPException(status_code=404, detail="评测集不存在")
@@ -160,7 +160,7 @@ async def create_case(dataset_id: str, body: CaseCreate, _admin: dict = Depends(
 
 
 @router.delete("/cases/{case_id}")
-async def delete_case(case_id: str, _admin: dict = Depends(require_admin)):
+async def delete_case(case_id: str, _admin: dict = Depends(require_ops)):
     """删除单条用例"""
     if not db.query_one("SELECT id FROM eval_cases WHERE id = ?", (case_id,)):
         raise HTTPException(status_code=404, detail="用例不存在")
@@ -169,7 +169,7 @@ async def delete_case(case_id: str, _admin: dict = Depends(require_admin)):
 
 
 @router.post("/datasets/{dataset_id}/cases/import")
-async def import_cases(dataset_id: str, body: CaseImport, _admin: dict = Depends(require_admin)):
+async def import_cases(dataset_id: str, body: CaseImport, _admin: dict = Depends(require_ops)):
     """JSON 批量导入用例"""
     if not db.query_one("SELECT id FROM eval_datasets WHERE id = ?", (dataset_id,)):
         raise HTTPException(status_code=404, detail="评测集不存在")
@@ -199,7 +199,7 @@ async def import_cases(dataset_id: str, body: CaseImport, _admin: dict = Depends
 
 
 @router.post("/datasets/{dataset_id}/cases/from-feedback")
-async def import_cases_from_feedback(dataset_id: str, _admin: dict = Depends(require_admin)):
+async def import_cases_from_feedback(dataset_id: str, _admin: dict = Depends(require_ops)):
     """从点踩反馈（message_feedbacks rating=dislike）导入对应用户问题，去重。
 
     点踩记录挂在助手消息上，取其同会话中紧邻的上一条用户消息作为评测问题；
@@ -261,7 +261,7 @@ async def import_cases_from_feedback(dataset_id: str, _admin: dict = Depends(req
 # 运行
 # ---------------------------------------------------------------------------
 @router.post("/datasets/{dataset_id}/runs")
-async def start_run(dataset_id: str, admin: dict = Depends(require_admin)):
+async def start_run(dataset_id: str, admin: dict = Depends(require_ops)):
     """发起评测运行（后台逐用例执行，立即返回 run_id）"""
     try:
         run_id = evaluation.start_run(dataset_id, admin)
@@ -279,7 +279,7 @@ async def start_run(dataset_id: str, admin: dict = Depends(require_admin)):
 @router.get("/runs")
 async def list_runs(
     dataset_id: str = Query(...),
-    _admin: dict = Depends(require_admin),
+    _admin: dict = Depends(require_ops),
 ):
     """运行历史（含 summary 与已完成用例进度计数）"""
     rows = db.query(
@@ -313,7 +313,7 @@ async def list_runs(
 
 
 @router.get("/runs/{run_id}")
-async def get_run(run_id: str, _admin: dict = Depends(require_admin)):
+async def get_run(run_id: str, _admin: dict = Depends(require_ops)):
     """运行详情（run + 聚合 summary + 逐用例结果明细 + 上一次 finished run 环比）"""
     run = db.query_one("SELECT * FROM eval_runs WHERE id = ?", (run_id,))
     if not run:

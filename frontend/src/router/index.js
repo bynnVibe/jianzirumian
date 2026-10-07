@@ -103,13 +103,25 @@ const routes = [
     path: '/eval',
     name: 'Eval',
     component: () => import('@/views/EvalView.vue'),
-    meta: { requiresAuth: true, requiresAdmin: true },
+    meta: { requiresAuth: true, requiresOps: true },
   },
   {
     path: '/observability',
     name: 'Observability',
     component: () => import('@/views/ObservabilityView.vue'),
-    meta: { requiresAuth: true, requiresAdmin: true },
+    meta: { requiresAuth: true, requiresOps: true },
+  },
+  {
+    path: '/pipeline',
+    name: 'Pipeline',
+    component: () => import('@/views/PipelineView.vue'),
+    meta: { requiresAuth: true, requiresOps: true },
+  },
+  {
+    path: '/gateway',
+    name: 'Gateway',
+    component: () => import('@/views/GatewayView.vue'),
+    meta: { requiresAuth: true, requiresOps: true },
   },
 ]
 
@@ -117,6 +129,13 @@ const router = createRouter({
   history: createWebHistory(),
   routes,
 })
+
+// 运维角色（role==='ops'）可访问的路由白名单：
+// CI/CD 流水线 + 模型网关 + 回归评测 + 可观测性 + 认证相关页（登录/注册/忘记密码/指南）
+const OPS_ALLOWED_ROUTES = [
+  'Pipeline', 'Gateway', 'Eval', 'Observability',
+  'Login', 'Register', 'ForgotPassword', 'Guide',
+]
 
 // ---- 路由守卫 ----
 router.beforeEach(async (to, from, next) => {
@@ -147,6 +166,19 @@ router.beforeEach(async (to, from, next) => {
   // 需要管理员角色
   if (to.meta.requiresAdmin && !auth.isAdmin) {
     next({ name: 'Chat' })
+    return
+  }
+
+  // 需要运维权限（管理员或运维角色）
+  if (to.meta.requiresOps && !auth.canOps) {
+    next({ name: 'Chat' })
+    return
+  }
+
+  // 运维角色白名单：ops 仅可访问 CI/CD、回归评测、可观测性与认证页，
+  // 其余（知识库/上传/百科/对话等）一律重定向到流水线首页
+  if (auth.isOps && !OPS_ALLOWED_ROUTES.includes(to.name)) {
+    next({ name: 'Pipeline' })
     return
   }
 

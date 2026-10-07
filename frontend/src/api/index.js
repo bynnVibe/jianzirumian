@@ -775,7 +775,7 @@ export function recompileWikiAll() {
 /**
  * 知识助手问答（SSE 流式）。
  * payload: { message, page_id, page_title, route_name, route_label, history }
- * onEvent(ev) 事件：status / thought / tool / token / confirm / done / error
+ * onEvent(ev) 事件：status / plan / plan_step / thought / tool / clarify / token / confirm / done / error
  */
 export async function assistantChat(payload, onEvent, signal) {
   const token = localStorage.getItem('auth_token')
@@ -961,6 +961,13 @@ export function setUserActive(userId, isActive) {
 }
 
 /**
+ * 修改用户角色（管理员）：role 取值 user / admin / ops
+ */
+export function setUserRole(userId, role) {
+  return api.put(`/auth/users/${userId}/role`, { role })
+}
+
+/**
  * 删除用户（管理员）
  */
 export function deleteUser(userId) {
@@ -1040,4 +1047,120 @@ export function getEvalRun(runId) {
   return api.get(`/eval/runs/${runId}`)
 }
 
+// ============================================
+// CI/CD 流水线 API（管理员 / 运维角色）
+// ============================================
+
+/** 流水线阶段元信息（流程图渲染用） */
+export function getPipelineStages() {
+  return api.get('/pipeline/stages')
+}
+
+/** 读取流水线配置（EDD 阈值/评测集/各阶段命令） */
+export function getPipelineSettings() {
+  return api.get('/pipeline/settings')
+}
+
+/** 保存流水线配置 */
+export function savePipelineSettings(payload) {
+  return api.put('/pipeline/settings', payload)
+}
+
+/** 发起一次流水线运行，返回 { run_id, status } */
+export function startPipelineRun(gitRef = '', trigger = 'manual') {
+  return api.post('/pipeline/runs', { git_ref: gitRef, trigger })
+}
+
+/** 流水线运行历史 */
+export function listPipelineRuns(limit = 20) {
+  return api.get('/pipeline/runs', { params: { limit } })
+}
+
+/** 流水线运行详情（六阶段状态 + 日志 + EDD 门控结果） */
+export function getPipelineRun(runId) {
+  return api.get(`/pipeline/runs/${encodeURIComponent(runId)}`)
+}
+
+/** 人工中止流水线运行 */
+export function abortPipelineRun(runId) {
+  return api.post(`/pipeline/runs/${encodeURIComponent(runId)}/abort`)
+}
+
+// ============================================
+// 模型网关 API（LLM Local Gateway，管理员 / 运维角色）
+// ============================================
+
+/** 网关总览：渠道/密钥计数 + 近 7 天统计 + 最近风险日志 */
+export function getGatewayOverview() {
+  return api.get('/gateway/overview')
+}
+
+/** 网关调用统计（仪表盘） */
+export function getGatewayStats(days = 7) {
+  return api.get('/gateway/stats', { params: { days } })
+}
+
+// ---- 渠道（负载均衡 + 故障切换）----
+export function listGatewayChannels() {
+  return api.get('/gateway/channels')
+}
+export function createGatewayChannel(payload) {
+  return api.post('/gateway/channels', payload)
+}
+export function updateGatewayChannel(channelId, payload) {
+  return api.put(`/gateway/channels/${encodeURIComponent(channelId)}`, payload)
+}
+export function deleteGatewayChannel(channelId) {
+  return api.delete(`/gateway/channels/${encodeURIComponent(channelId)}`)
+}
+export function testGatewayChannel(channelId) {
+  return api.post(`/gateway/channels/${encodeURIComponent(channelId)}/test`)
+}
+export function resetGatewayChannelHealth(channelId) {
+  return api.post(`/gateway/channels/${encodeURIComponent(channelId)}/reset-health`)
+}
+
+// ---- 密钥与配额 ----
+export function listGatewayKeys() {
+  return api.get('/gateway/keys')
+}
+export function createGatewayKey(payload) {
+  return api.post('/gateway/keys', payload)
+}
+export function updateGatewayKey(keyId, payload) {
+  return api.put(`/gateway/keys/${encodeURIComponent(keyId)}`, payload)
+}
+export function deleteGatewayKey(keyId) {
+  return api.delete(`/gateway/keys/${encodeURIComponent(keyId)}`)
+}
+export function resetGatewayKey(keyId) {
+  return api.post(`/gateway/keys/${encodeURIComponent(keyId)}/reset`)
+}
+
+// ---- 请求日志与审计 ----
+export function queryGatewayLogs(params = {}) {
+  return api.get('/gateway/logs', { params })
+}
+export function getGatewayLog(logId) {
+  return api.get(`/gateway/logs/${encodeURIComponent(logId)}`)
+}
+export function purgeGatewayLogs() {
+  return api.delete('/gateway/logs')
+}
+
+// ---- 安全审计中心 ----
+export function getGatewayRules() {
+  return api.get('/gateway/rules')
+}
+export function getGatewaySettings() {
+  return api.get('/gateway/settings')
+}
+export function saveGatewaySettings(payload) {
+  return api.put('/gateway/settings', payload)
+}
+export function gatewayScanPreview(text) {
+  return api.post('/gateway/scan-preview', { text })
+}
+
 export default api
+

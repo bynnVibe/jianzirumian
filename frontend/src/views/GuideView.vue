@@ -382,10 +382,68 @@
         </div>
       </section>
 
-      <!-- 常见问题 -->
+      <!-- 模型网关 -->
       <section class="guide-section">
         <h2 class="section-title">
           <span class="section-num">11</span>
+          模型网关：统一接入与安全审计（管理员/运维）
+        </h2>
+        <div class="card">
+          <h3 class="card-title">它是什么</h3>
+          <p class="card-text">
+            模型网关是一个<b>独立的本地 LLM 入口</b>：对下游工具/应用统一暴露 OpenAI 兼容协议（<code>/v1/chat/completions</code>），
+            下游只需持有一个<b>本地密钥</b>（<code>sk-jzrm-...</code>）即可调用，无需知道、也不会拿到真实上游 Key。
+            网关在中间完成鉴权、配额、安全审计、负载均衡与故障切换，并把每次调用<b>全量记录</b>下来便于排查与运维。
+            入口在侧边栏「模型网关」（仅管理员/运维可见）。
+          </p>
+        </div>
+        <div class="card">
+          <h3 class="card-title">四个核心能力</h3>
+          <div class="feature-grid">
+            <div class="feature-item">
+              <div class="feature-icon">🔑</div>
+              <h4>密钥与配额</h4>
+              <p>为每个下游用户/应用生成独立本地密钥，可设 Token 与请求次数配额、限定可访问模型、设置过期时间。明文密钥<b>仅创建时展示一次</b>，请及时复制保存。</p>
+            </div>
+            <div class="feature-item">
+              <div class="feature-icon">⚖️</div>
+              <h4>负载均衡与故障切换</h4>
+              <p>配置多个上游渠道，按<b>优先级 + 权重</b>选择；某渠道失败时自动重试其他渠道，连续失败会临时熔断，对调用方透明无感。</p>
+            </div>
+            <div class="feature-item">
+              <div class="feature-icon">📋</div>
+              <h4>请求日志与审计</h4>
+              <p>每次调用的状态码、Token 消耗、上游路由、工具调用、请求参数全部入库，可搜索、筛选、分页，展开查看完整明细。</p>
+            </div>
+            <div class="feature-item">
+              <div class="feature-icon">🛡️</div>
+              <h4>安全审计中心</h4>
+              <p>自动扫描请求中的凭证泄露、敏感路径、危险命令外联、Unicode 隐写、追踪像素、公网 IP 探测等风险，支持审计/警告/脱敏/阻断四种模式。</p>
+            </div>
+          </div>
+        </div>
+        <div class="card">
+          <h3 class="card-title">怎么用起来</h3>
+          <ol class="step-list">
+            <li><b>加渠道</b>：在「渠道」页签新增上游（协议 openai/anthropic/ollama + Base URL + 上游 ApiKey + 模型清单），设好优先级与权重，点「连通测试」验证配置。</li>
+            <li><b>发密钥</b>：在「密钥」页签为下游生成本地密钥，按需设置配额与可访问模型；复制明文密钥交给调用方。</li>
+            <li><b>下游调用</b>：调用方用本地密钥请求 <code>/v1/chat/completions</code>（与 OpenAI 用法一致），网关自动选路转发并归一化响应。</li>
+            <li><b>看日志与链路</b>：在「日志」页签搜索筛选调用记录，展开可看<b>可视化调用链路</b>（鉴权 → 配额 → 安全审计 → 选路 → 上游调用 → 响应处理 → 日志入库）与风险明细，快速定位失败环节。</li>
+            <li><b>调安全策略</b>：在「安全审计中心」选择审计模式、启停内置规则、配置黑白名单，并用「扫描试跑」即时验证一段文本会命中哪些风险。</li>
+          </ol>
+          <div class="callout callout-tip">
+            四种审计模式：<b>审计</b>只记录不拦截（默认）、<b>警告</b>记录并标注仍放行、<b>脱敏</b>把命中内容替换为 [REDACTED] 后再转发、<b>阻断</b>命中即拒绝（返回 403）。生产环境建议先用「审计」观察一段时间再逐步收紧。
+          </div>
+          <div class="callout callout-info">
+            仪表盘汇总了渠道/密钥计数与健康分布、近 N 天调用量/成功率/Token/平均延迟、每日趋势、风险等级分布与最近风险调用，是日常运维的第一屏。
+          </div>
+        </div>
+      </section>
+
+      <!-- 常见问题 -->
+      <section class="guide-section">
+        <h2 class="section-title">
+          <span class="section-num">12</span>
           常见问题
         </h2>
         <div class="faq-list">
@@ -630,6 +688,16 @@
   font-size: 13px;
   line-height: 1.9;
   color: #5a4a3a;
+}
+
+.card-text code,
+.step-list code {
+  background: #f4ece0;
+  color: #a5703a;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-family: 'SFMono-Regular', Consolas, monospace;
+  font-size: 12px;
 }
 
 .step-list {

@@ -18,6 +18,9 @@ export const useAuthStore = defineStore('auth', () => {
   // ---- 计算属性 ----
   const isAuthenticated = computed(() => !!token.value && !!user.value)
   const isAdmin = computed(() => user.value?.role === 'admin')
+  const isOps = computed(() => user.value?.role === 'ops')
+  // 运维权限：管理员或运维角色（可访问 CI/CD、可观测性、回归评测）
+  const canOps = computed(() => user.value?.role === 'admin' || user.value?.role === 'ops')
   const username = computed(() => user.value?.username || '')
   const isGuest = computed(() => isGuestMode.value && !token.value && !user.value)
 
@@ -132,6 +135,8 @@ export const useAuthStore = defineStore('auth', () => {
     isGuestMode,
     isAuthenticated,
     isAdmin,
+    isOps,
+    canOps,
     isGuest,
     username,
     init,

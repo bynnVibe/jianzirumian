@@ -83,3 +83,35 @@ def test_require_admin_allows_admin(monkeypatch):
     )
     user = deps.require_admin("Bearer some-token")
     assert user["role"] == "admin"
+
+
+# ============================================
+# 运维鉴权（require_ops：admin 与 ops 均可，普通 user 拒绝）
+# ============================================
+
+def test_require_ops_rejects_normal_user(monkeypatch):
+    monkeypatch.setattr(
+        deps.auth_service, "get_session_user",
+        lambda t: {"id": "u1", "role": "user"},
+    )
+    with pytest.raises(HTTPException) as exc:
+        deps.require_ops("Bearer some-token")
+    assert exc.value.status_code == 403
+
+
+def test_require_ops_allows_ops(monkeypatch):
+    monkeypatch.setattr(
+        deps.auth_service, "get_session_user",
+        lambda t: {"id": "u1", "role": "ops"},
+    )
+    user = deps.require_ops("Bearer some-token")
+    assert user["role"] == "ops"
+
+
+def test_require_ops_allows_admin(monkeypatch):
+    monkeypatch.setattr(
+        deps.auth_service, "get_session_user",
+        lambda t: {"id": "u1", "role": "admin"},
+    )
+    user = deps.require_ops("Bearer some-token")
+    assert user["role"] == "admin"

@@ -36,3 +36,15 @@ def require_admin(authorization: str = Header("")) -> dict:
     if user.get("role") != "admin":
         raise HTTPException(status_code=403, detail="仅管理员可执行此操作")
     return user
+
+
+def require_ops(authorization: str = Header("")) -> dict:
+    """要求当前用户具备运维权限（管理员或运维角色），否则抛 403。
+
+    用于 CI/CD 流水线、可观测性、回归评测等运维类接口：
+    admin 与 ops 均可访问，普通用户/游客拒绝。
+    """
+    user = get_current_user(authorization)
+    if user.get("role") not in ("admin", "ops"):
+        raise HTTPException(status_code=403, detail="仅管理员或运维角色可执行此操作")
+    return user

@@ -53,6 +53,23 @@
           <div v-for="(m, i) in store.messages" :key="i" class="msg" :class="m.role">
             <div v-if="m.role === 'assistant'" class="msg-avatar">✦</div>
             <div class="msg-bubble">
+              <!-- 执行计划（复杂任务的规划与逐步状态，显性化展示） -->
+              <div v-if="m.plan && m.plan.length" class="msg-plan">
+                <div class="plan-head">
+                  <span class="plan-icon">🗂</span>
+                  <span>执行计划（{{ planDoneCount(m) }}/{{ m.plan.length }}）</span>
+                </div>
+                <ol class="plan-list">
+                  <li v-for="(s, si) in m.plan" :key="si" class="plan-step" :class="s.state">
+                    <span v-if="s.state === 'running'" class="tool-spinner"></span>
+                    <span v-else-if="s.state === 'done'" class="plan-check">✓</span>
+                    <span v-else class="plan-dot"></span>
+                    <span class="plan-text">{{ s.text }}</span>
+                    <span v-if="s.note" class="plan-note">{{ s.note }}</span>
+                  </li>
+                </ol>
+              </div>
+
               <!-- 思考过程（累积展示 Agent 每一步推理） -->
               <div v-if="m.thoughts && m.thoughts.length" class="msg-thoughts">
                 <div class="thoughts-head" @click="m._collapse = !m._collapse">
@@ -86,6 +103,23 @@
                 <span></span><span></span><span></span>
               </div>
               <div v-if="m.stopped && m.content" class="msg-stopped">⏹ 已停止生成</div>
+
+              <!-- 追问卡片：知识缺口/意图不明时助手请求用户选择下一步动作 -->
+              <div v-if="m.clarify" class="clarify-card">
+                <div class="clarify-head">
+                  <span class="clarify-badge">需要你的确认</span>
+                </div>
+                <p class="clarify-question">{{ m.clarify.question }}</p>
+                <div class="clarify-options" v-if="m.clarify.options.length">
+                  <button
+                    v-for="(opt, oi) in m.clarify.options"
+                    :key="oi"
+                    class="chip chip-sm"
+                    :disabled="store.isGenerating"
+                    @click="sendQuick(opt)"
+                  >{{ opt }}</button>
+                </div>
+              </div>
 
               <!-- 编辑确认卡片 -->
               <div v-if="m.edit" class="edit-card" :class="m.edit.status">
@@ -212,11 +246,16 @@ const TOOL_LABELS = {
   list_wiki_pages: '浏览百科目录',
   read_wiki_page: '读取百科词条',
   get_source_text: '读取原始资料',
+  web_search: '联网搜索',
   propose_page_edit: '生成修改建议',
 }
 
 function toolLabel(name) {
   return TOOL_LABELS[name] || name || '工具'
+}
+
+function planDoneCount(m) {
+  return (m.plan || []).filter((s) => s.state === 'done').length
 }
 
 function render(text) {
@@ -691,6 +730,115 @@ onMounted(() => {
 
 @keyframes assistant-spin {
   to { transform: rotate(360deg); }
+}
+
+/* ---- 执行计划 stepper ---- */
+.msg-plan {
+  margin-bottom: 8px;
+  border: 1px solid #e6dccb;
+  border-radius: 8px;
+  background: #fdfaf4;
+  overflow: hidden;
+}
+
+.plan-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 9px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: #a08a6d;
+  background: #f7f0e4;
+}
+
+.plan-icon {
+  font-size: 12px;
+}
+
+.plan-list {
+  margin: 0;
+  padding: 6px 10px;
+  list-style: none;
+}
+
+.plan-step {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: #a89a89;
+  padding: 3px 0;
+}
+
+.plan-step.running {
+  color: #8d6a3f;
+  font-weight: 600;
+}
+
+.plan-step.done {
+  color: #6b7f6b;
+}
+
+.plan-check {
+  color: #6f9a6f;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.plan-dot {
+  width: 7px;
+  height: 7px;
+  margin: 0 2px;
+  border-radius: 50%;
+  border: 1.5px solid #d8cbb4;
+  flex-shrink: 0;
+}
+
+.plan-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.plan-note {
+  font-size: 10px;
+  color: #c0a882;
+  white-space: nowrap;
+}
+
+/* ---- 追问卡片 ---- */
+.clarify-card {
+  margin-top: 8px;
+  border: 1px solid #eed9bb;
+  border-radius: 10px;
+  background: #fffdf9;
+  padding: 8px 10px;
+}
+
+.clarify-head {
+  margin-bottom: 5px;
+}
+
+.clarify-badge {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: #fff;
+  background: #c98a4b;
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+
+.clarify-question {
+  font-size: 12.5px;
+  color: #4a3f35;
+  margin: 0 0 8px;
+  line-height: 1.6;
+}
+
+.clarify-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
 .msg-content {

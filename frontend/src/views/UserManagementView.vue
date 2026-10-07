@@ -43,10 +43,22 @@
                 <span v-if="u.role === 'admin'" class="badge-admin">管理员</span>
               </td>
               <td>{{ u.contact }}</td>
-              <td>
-                <span class="role-badge" :class="u.role === 'admin' ? 'role-admin' : 'role-user'">
-                  {{ u.role === 'admin' ? '管理员' : '普通用户' }}
+              <td @click.stop>
+                <!-- 自己的角色不可改；其余用户可由管理员调整角色 -->
+                <span v-if="u.id === selfId" class="role-badge" :class="roleClass(u.role)">
+                  {{ roleLabel(u.role) }}
                 </span>
+                <select
+                  v-else
+                  class="role-select"
+                  :value="u.role"
+                  :disabled="roleSaving === u.id"
+                  @change="handleRoleChange(u, $event.target.value)"
+                >
+                  <option value="user">普通用户</option>
+                  <option value="ops">运维</option>
+                  <option value="admin">管理员</option>
+                </select>
               </td>
               <td>
                 <span class="status-badge" :class="u.is_active ? 'status-active' : 'status-disabled'">
@@ -176,7 +188,12 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import { getUsersStats, getUserStatsDetail, setUserActive, deleteUser } from '@/api'
+import { getUsersStats, getUserStatsDetail, setUserActive, setUserRole, deleteUser } from '@/api'
+import { useAuthStore } from '@/stores/auth'
+
+const auth = useAuthStore()
+const selfId = computed(() => auth.user?.id || '')
+const roleSaving = ref('')
 
 const users = ref([])
 const loading = ref(true)
@@ -253,6 +270,29 @@ function formatTokens(n) {
   if (n === undefined || n === null) return '—'
   if (n >= 10000) return (n / 1000).toFixed(1) + 'k'
   return String(n)
+}
+
+function roleLabel(role) {
+  return role === 'admin' ? '管理员' : (role === 'ops' ? '运维' : '普通用户')
+}
+
+function roleClass(role) {
+  return role === 'admin' ? 'role-admin' : (role === 'ops' ? 'role-ops' : 'role-user')
+}
+
+async function handleRoleChange(u, newRole) {
+  if (newRole === u.role) return
+  const old = u.role
+  roleSaving.value = u.id
+  try {
+    const res = await setUserRole(u.id, newRole)
+    u.role = res.data.user?.role || newRole
+  } catch (err) {
+    alert('修改角色失败: ' + (err.response?.data?.detail || err.message))
+    u.role = old
+  } finally {
+    roleSaving.value = ''
+  }
 }
 
 async function handleToggleActive(u) {
@@ -483,6 +523,26 @@ onMounted(() => {
 .role-user {
   background: #e8f5e9;
   color: #2e7d32;
+}
+
+.role-ops {
+  background: #e3f2fd;
+  color: #1565c0;
+}
+
+.role-select {
+  font-size: 12px;
+  padding: 3px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--color-border);
+  background: white;
+  color: var(--color-text);
+  cursor: pointer;
+}
+
+.role-select:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 .status-badge {

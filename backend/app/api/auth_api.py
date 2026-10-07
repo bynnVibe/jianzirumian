@@ -218,6 +218,20 @@ async def toggle_user_active(user_id: str, body: dict, authorization: str = Head
         raise HTTPException(400, str(e))
 
 
+@router.put("/users/{user_id}/role")
+async def change_user_role(user_id: str, body: dict, authorization: str = Header("")):
+    """修改用户角色（仅管理员）：role 取值 user / admin / ops"""
+    token = _get_token(authorization)
+    role = (body.get("role") or "").strip()
+    try:
+        user = auth_service.set_user_role(token, user_id, role)
+        return {"success": True, "user": user}
+    except PermissionError as e:
+        raise HTTPException(403, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
 @router.delete("/users/{user_id}")
 async def remove_user(user_id: str, authorization: str = Header("")):
     """删除用户（仅管理员）"""
