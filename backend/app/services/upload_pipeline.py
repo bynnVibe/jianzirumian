@@ -111,9 +111,9 @@ class UploadPipelineService:
     def recover(self) -> int:
         """服务启动时恢复未完成解析：parsing 回退为 pending，
         所有 pending 重新调度（重启不丢任务）。返回恢复条数"""
-        affected = db.execute(
-            "UPDATE pending_uploads SET status = 'pending' WHERE status = 'parsing'"
-        )
+        from app.core.agent_runtime import runtime
+        runtime.require_owner()
+        affected = 0
         rows = db.query(
             "SELECT id FROM pending_uploads WHERE status = 'pending' ORDER BY created_at"
         )

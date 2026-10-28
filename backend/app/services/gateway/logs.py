@@ -46,7 +46,7 @@ def write_log(entry: dict) -> str:
             " prompt_tokens, completion_tokens, total_tokens, latency_ms, retries,"
             " tool_calls, request_body, response_preview, risk_level, risk_score, risks,"
             " audit_action, trace_steps, client_ip, error, created_at)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING",
             (
                 log_id,
                 entry.get("key_id", ""), entry.get("key_name", ""),
@@ -160,16 +160,23 @@ def stats(days: int = 7) -> dict:
         " COALESCE(SUM(status='ok'),0) AS ok,"
         " COALESCE(SUM(status='error'),0) AS errors,"
         " COALESCE(SUM(status='blocked'),0) AS blocked,"
+        " COALESCE(SUM(status='cancelled'),0) AS cancelled,"
+        " COALESCE(SUM(status='timeout'),0) AS timeout,"
         " COALESCE(SUM(total_tokens),0) AS tokens,"
         " COALESCE(AVG(latency_ms),0) AS avg_latency,"
         " COALESCE(SUM(risk_level!='none'),0) AS risky"
         " FROM gateway_logs WHERE created_at >= ?", (since,),
     ) or {}
     total = int(overview.get("total", 0))
+    latencies = sorted(r["latency_ms"] for r in db.query(
+        "SELECT latency_ms FROM gateway_logs WHERE created_at >= ? ORDER BY created_at DESC LIMIT 5000", (since,)))
+    p95 = latencies[min(len(latencies) - 1, int(len(latencies) * 0.95))] if latencies else 0
     daily = [dict(r) for r in db.query(
         "SELECT date(created_at) AS day, COUNT(*) AS total,"
         " COALESCE(SUM(status='ok'),0) AS ok, COALESCE(SUM(status='error'),0) AS errors,"
         " COALESCE(SUM(status='blocked'),0) AS blocked,"
+        " COALESCE(SUM(status='cancelled'),0) AS cancelled,"
+        " COALESCE(SUM(status='timeout'),0) AS timeout,"
         " COALESCE(SUM(total_tokens),0) AS tokens"
         " FROM gateway_logs WHERE created_at >= ? GROUP BY day ORDER BY day", (since,))]
     by_channel = [dict(r) for r in db.query(
@@ -198,6 +205,9 @@ def stats(days: int = 7) -> dict:
             "ok": int(overview.get("ok", 0)),
             "errors": int(overview.get("errors", 0)),
             "blocked": int(overview.get("blocked", 0)),
+            "cancelled": int(overview.get("cancelled", 0)),
+            "timeout": int(overview.get("timeout", 0)),
+            "p95_latency_ms": int(p95),
             "risky": int(overview.get("risky", 0)),
             "tokens": int(overview.get("tokens", 0)),
             "avg_latency_ms": int(overview.get("avg_latency", 0)),

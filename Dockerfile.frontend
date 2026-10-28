@@ -29,10 +29,10 @@ RUN apk add --no-cache gettext
 # 复制构建产物
 COPY --from=builder /build/dist /usr/share/nginx/html
 
-# 复制 Nginx 配置模板（启动时通过 envsubst 替换 ${BACKEND_HOST}）
+# 复制 Nginx 配置模板（启动时通过 envsubst 替换 ${BACKEND_HOST} / ${LLM_PROXY_HOST}）
 COPY nginx.conf /etc/nginx/conf.d/default.conf.template
 
 EXPOSE 80
 
-# 启动时先替换 BACKEND_HOST 变量（默认 backend），再启动 nginx
-CMD ["/bin/sh", "-c", "BACKEND_HOST=${BACKEND_HOST:-backend} envsubst '${BACKEND_HOST}' < /etc/nginx/conf.d/default.conf.template > /etc/nginx/conf.d/default.conf && nginx -g 'daemon off;'"]
+# 启动时仅替换路由与可信代理变量（BACKEND_HOST 默认 agent），保留 Nginx 运行时变量
+CMD ["/bin/sh", "-c", "BACKEND_HOST=${BACKEND_HOST:-agent} LLM_PROXY_HOST=${LLM_PROXY_HOST:-llm-proxy} EDGE_PROXY_CIDR=${EDGE_PROXY_CIDR:-127.0.0.1/32} envsubst '${BACKEND_HOST} ${LLM_PROXY_HOST} ${EDGE_PROXY_CIDR}' < /etc/nginx/conf.d/default.conf.template > /etc/nginx/conf.d/default.conf && nginx -g 'daemon off;'"]

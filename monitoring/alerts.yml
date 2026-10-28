@@ -1,0 +1,23 @@
+groups:
+  - name: jzrm-local-readiness
+    rules:
+      - alert: AgentScrapeFailed
+        expr: up{job="agent"} == 0 or absent(up{job="agent"})
+        for: 1m
+        labels: { severity: critical, service: agent }
+        annotations: { summary: "Agent 指标抓取失败或目标缺失" }
+      - alert: ProxyScrapeFailed
+        expr: up{job="llm-proxy"} == 0 or absent(up{job="llm-proxy"})
+        for: 1m
+        labels: { severity: critical, service: llm-proxy }
+        annotations: { summary: "Proxy 指标抓取失败或目标缺失" }
+      - alert: AgentNotReady
+        expr: jzrm_ready{job="agent"} == 0 or absent(jzrm_ready{job="agent"})
+        for: 1m
+        labels: { severity: warning, service: agent }
+        annotations: { summary: "Agent 本地资源或运行所有权未就绪" }
+      - alert: ProxyNotReady
+        expr: jzrm_ready{job="llm-proxy"} == 0 or absent(jzrm_ready{job="llm-proxy"})
+        for: 1m
+        labels: { severity: warning, service: llm-proxy }
+        annotations: { summary: "Proxy 本地数据库未就绪" }

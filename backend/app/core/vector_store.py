@@ -127,8 +127,16 @@ class VectorStore:
         return not self._EMBEDDING_UNAVAILABLE
 
     def initialize(self) -> bool:
-        """尝试加载向量库，返回是否成功（供启动预热调用）"""
-        return self._load_store() is not None
+        """启动时只加载既有本地索引；空库延迟至业务请求创建，不探测模型。"""
+        if self._store is not None:
+            return True
+        if not Path(self.index_path).exists():
+            return False
+        # 本地索引损坏必须阻断就绪，不能静默创建空库覆盖已有内容。
+        self._store = FAISS.load_local(
+            self.index_path, self.embeddings, allow_dangerous_deserialization=True,
+        )
+        return True
 
     def retry_init(self, force: bool = False) -> bool:
         """重置不可用标记并重新尝试初始化，返回是否成功

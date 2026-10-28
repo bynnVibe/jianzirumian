@@ -15,6 +15,8 @@ class ImageUploadTool(BaseTool):
     description = "识别图片中的文字并存入知识库"
 
     async def run(self, ctx: ToolContext, **kwargs) -> ToolResult:
+        from app.services.chat_actions import validate_execution
+        validate_execution(ctx)
         try:
             result = await knowledge_service.process_image(
                 image_path=ctx.file_path,
@@ -22,6 +24,7 @@ class ImageUploadTool(BaseTool):
                 visibility=ctx.visibility,
                 owner_id=ctx.user_id,
                 kb_id=ctx.kb_id,
+                write_guard=lambda: validate_execution(ctx),
             )
         except Exception as e:
             return ToolResult(

@@ -1,43 +1,7 @@
 <template>
   <div class="management-view">
-    <!-- 标签页导航 -->
-    <div class="tabs-header">
-      <div class="tabs-nav">
-        <button
-          v-if="isAdmin && isManagementRoute"
-          class="tab-btn"
-          :class="{ active: activeTab === 'settings' }"
-          @click="activeTab = 'settings'"
-        >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="18" height="18">
-            <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
-          </svg>
-          系统设置
-        </button>
-        <button
-          v-if="isAdmin && isManagementRoute"
-          class="tab-btn"
-          :class="{ active: activeTab === 'users' }"
-          @click="activeTab = 'users'"
-        >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="18" height="18">
-            <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>
-          </svg>
-          用户管理
-        </button>
-        <button
-          v-if="!isManagementRoute"
-          class="tab-btn"
-          :class="{ active: activeTab === 'knowledge' }"
-          @click="activeTab = 'knowledge'"
-        >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="18" height="18">
-            <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
-          </svg>
-          知识库管理
-        </button>
-      </div>
-    </div>
+    <!-- 标签页导航已移除：系统设置页由「系统管理控制台」专属左侧导航承载，
+         知识库管理页由正常使用侧边栏承载，本组件按路由单上下文渲染（activeTab 由路由驱动） -->
 
     <!-- ============ 系统设置标签页（管理员） ============ -->
     <div v-show="activeTab === 'settings'" class="tab-content tab-settings">
@@ -703,18 +667,7 @@
           </ul>
         </section>
 
-      </div>
-    </div>
-
-    <!-- ============ 用户管理标签页（管理员） ============ -->
-    <div v-show="activeTab === 'users'" class="tab-content tab-users">
-      <div class="tab-users-inner">
-        <div class="users-header">
-          <h2 class="users-title">用户管理</h2>
-          <p class="users-desc">管理系统中的所有用户账号</p>
-        </div>
-
-        <!-- 注册功能开关 -->
+        <!-- 用户注册开关（自原「用户管理」标签页迁入：属系统级配置，随系统设置统一管理） -->
         <section class="config-section registration-section">
           <div class="section-header">
             <h2 class="section-title">
@@ -741,7 +694,7 @@
           </div>
         </section>
 
-        <!-- 游客免费访问次数 -->
+        <!-- 游客免费访问次数（自原「用户管理」标签页迁入系统设置） -->
         <section class="config-section registration-section">
           <div class="section-header">
             <h2 class="section-title">
@@ -773,91 +726,6 @@
           </div>
         </section>
 
-        <!-- 子标签：账号管理 / 统计看板 -->
-        <div class="users-subtabs">
-          <button
-            class="subtab-btn"
-            :class="{ active: usersSubTab === 'accounts' }"
-            @click="usersSubTab = 'accounts'"
-          >账号管理</button>
-          <button
-            class="subtab-btn"
-            :class="{ active: usersSubTab === 'stats' }"
-            @click="usersSubTab = 'stats'"
-          >用户统计看板</button>
-        </div>
-
-        <template v-if="usersSubTab === 'accounts'">
-        <div v-if="usersLoading" class="loading-container">
-          <div class="spinner"></div>
-          <p>加载用户列表...</p>
-        </div>
-
-        <div v-else-if="users.length === 0" class="empty-state">
-          <p>暂无用户数据</p>
-        </div>
-
-        <div v-else class="user-table-wrap">
-          <table class="user-table">
-            <thead>
-              <tr>
-                <th>用户名</th>
-                <th>联系方式</th>
-                <th>角色</th>
-                <th>状态</th>
-                <th>注册时间</th>
-                <th>操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="u in users" :key="u.id" :class="{ 'row-disabled': !u.is_active }">
-                <td class="cell-username">
-                  <span class="username-text">{{ u.username }}</span>
-                  <span v-if="u.role === 'admin'" class="badge-admin">管理员</span>
-                </td>
-                <td>{{ u.contact }}</td>
-                <td>
-                  <span class="role-badge" :class="u.role === 'admin' ? 'role-admin' : 'role-user'">
-                    {{ u.role === 'admin' ? '管理员' : '普通用户' }}
-                  </span>
-                </td>
-                <td>
-                  <span class="status-badge" :class="u.is_active ? 'status-active' : 'status-disabled'">
-                    {{ u.is_active ? '正常' : '已禁用' }}
-                  </span>
-                </td>
-                <td class="cell-date">{{ formatUserDate(u.created_at) }}</td>
-                <td class="cell-actions">
-                  <template v-if="u.role !== 'admin'">
-                    <button class="btn-action btn-toggle" @click="handleToggleActive(u)" :title="u.is_active ? '禁用用户' : '启用用户'">
-                      {{ u.is_active ? '禁用' : '启用' }}
-                    </button>
-                    <button class="btn-action btn-delete" @click="confirmDeleteUser(u)" title="删除用户">删除</button>
-                  </template>
-                  <span v-else class="text-muted">—</span>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-
-        <!-- 用户删除确认弹窗 -->
-        <div v-if="showUserDeleteConfirm" class="modal-overlay" @click.self="showUserDeleteConfirm = false">
-          <div class="modal-box">
-            <h3 class="modal-title">确认删除</h3>
-            <p class="modal-desc">确定要删除用户「{{ userDeleteTarget?.username }}」吗？此操作不可撤销，该用户的所有数据也将被移除。</p>
-            <div class="modal-actions">
-              <button class="btn btn-outline" @click="showUserDeleteConfirm = false">取消</button>
-              <button class="btn btn-danger" @click="doDeleteUser" :disabled="userDeleting">
-                {{ userDeleting ? '删除中...' : '确认删除' }}
-              </button>
-            </div>
-          </div>
-        </div>
-        </template>
-
-        <!-- 用户统计看板（嵌入管理员看板页面组件） -->
-        <UserStatsBoard v-else />
       </div>
     </div>
 
@@ -1426,7 +1294,6 @@ import { useRoute } from 'vue-router'
 import MarkdownIt from 'markdown-it'
 import { useAuthStore } from '@/stores/auth'
 import { useAssistantStore } from '@/stores/assistant'
-import UserStatsBoard from '@/views/UserManagementView.vue'
 import {
   getSystemConfig,
   switchProvider,
@@ -1461,6 +1328,7 @@ import {
   deleteKnowledgeBase,
   listUsers,
   setUserActive,
+  setUserRole,
   deleteUser,
   getImageUrl as buildImageUrl,
   convertWordPdf,
@@ -1471,7 +1339,6 @@ const authStore = useAuthStore()
 const assistant = useAssistantStore()
 const isAdmin = computed(() => authStore.isAdmin)
 const isGuest = computed(() => authStore.isGuest)
-const isManagementRoute = computed(() => route.name === 'Management')
 
 // ---- Tab state ----
 const activeTab = ref('settings')
@@ -1493,14 +1360,13 @@ onMounted(() => {
   loadEntries()
   loadKbList()
   loadFullTexts()
-  if (isAdmin.value) loadUsers()
 })
 
 // ---- 路由切换同步 ----
-// /management 与 /knowledge 复用同一组件实例，切换路由时 onMounted 不会重新执行，
+// /admin/settings（AdminSettings）与 /knowledge（KnowledgeBase）复用同一组件实例，切换路由时 onMounted 不会重新执行，
 // 需在此按目标路由重置标签页并实时刷新对应数据，避免页面内容停留在上一个路由
 watch(() => route.name, (name) => {
-  if (name !== 'Management' && name !== 'KnowledgeBase') return
+  if (name !== 'AdminSettings' && name !== 'KnowledgeBase') return
   if (name === 'KnowledgeBase' || !isAdmin.value) {
     activeTab.value = 'knowledge'
   } else {
@@ -1514,7 +1380,6 @@ watch(() => route.name, (name) => {
     loadConfig()
     loadWikiSettings()
     loadWikiPages()
-    loadUsers()
   }
 })
 
@@ -1564,12 +1429,14 @@ const llmLabels = {
   ollama: 'Ollama 本地',
   openai: 'OpenAI 兼容 API',
   custom: '自定义 API',
+  gateway: 'LLM Proxy 网关',
 }
 
 const llmDescs = {
   ollama: '本地运行，无需网络',
   openai: '通义千问 / DeepSeek / OpenAI',
   custom: '兼容 OpenAI 接口的任意服务',
+  gateway: '经层3自建网关出网（多模型路由/Key轮换/降级/成本统计）',
 }
 
 const ocrLabels = {
@@ -1637,6 +1504,11 @@ const paramFieldDefs = {
       { key: 'base_url', label: 'API 地址' },
       { key: 'model', label: '模型名称' },
       { key: 'api_key', label: 'API Key', secret: true },
+    ],
+    gateway: [
+      { key: 'base_url', label: '网关地址(/v1)' },
+      { key: 'model', label: '模型名称' },
+      { key: 'api_key', label: '网关密钥', secret: true },
     ],
   },
   ocr: {
@@ -2813,6 +2685,33 @@ async function handleToggleActive(u) {
   }
 }
 
+// 角色下拉修改（仅管理员；自己的角色不可改）
+const roleSaving = ref('')
+const selfId = computed(() => authStore.user?.id)
+
+function roleLabel(role) {
+  return role === 'admin' ? '管理员' : (role === 'ops' ? '运维' : '普通用户')
+}
+
+function roleClass(role) {
+  return role === 'admin' ? 'role-admin' : (role === 'ops' ? 'role-ops' : 'role-user')
+}
+
+async function handleRoleChange(u, newRole) {
+  if (newRole === u.role) return
+  const old = u.role
+  roleSaving.value = u.id
+  try {
+    const res = await setUserRole(u.id, newRole)
+    u.role = res.data.user?.role || newRole
+  } catch (err) {
+    alert('修改角色失败: ' + (err.response?.data?.detail || err.message))
+    u.role = old
+  } finally {
+    roleSaving.value = ''
+  }
+}
+
 function confirmDeleteUser(u) {
   userDeleteTarget.value = u
   showUserDeleteConfirm.value = true
@@ -3959,6 +3858,26 @@ function formatUserDate(ts) {
 .role-user {
   background: #e8f5e9;
   color: #2e7d32;
+}
+
+.role-ops {
+  background: #e3f2fd;
+  color: #1565c0;
+}
+
+.role-select {
+  font-size: 12px;
+  padding: 3px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--color-border);
+  background: white;
+  color: var(--color-text);
+  cursor: pointer;
+}
+
+.role-select:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 .status-badge {

@@ -73,6 +73,7 @@ class KeyRejected(Exception):
         super().__init__(message)
         self.message = message
         self.code = code
+        self.status_code = 429 if code == "quota_exceeded" else (403 if code == "model_not_allowed" else 401)
 
 
 # ---------------------------------------------------------------------------
@@ -158,6 +159,10 @@ def authenticate(raw_key: str) -> dict:
     if not raw_key:
         raise KeyRejected("缺少访问密钥", "missing_key")
     row = db.query_one("SELECT * FROM gateway_keys WHERE key_hash=?", (_hash(raw_key),))
+    return _validate(row)
+
+
+def _validate(row):
     if not row:
         raise KeyRejected("无效的访问密钥", "invalid_key")
     if not row.get("enabled"):
@@ -186,12 +191,22 @@ def check_model_allowed(row: dict, model: str) -> bool:
     return model in allowed
 
 
-def consume_request(key_id: str) -> None:
-    """请求计数 +1 并刷新最近使用时间（进入上游调用前扣减）。"""
-    db.execute(
-        "UPDATE gateway_keys SET request_count = request_count + 1, last_used_at=? WHERE id=?",
-        (_now(), key_id),
-    )
+def consume_request(key_id: str, model: Optional[str] = None) -> dict:
+    """跨进程原子认领；重读权限，进入上游阶段只调用一次，不退款。"""
+    with db.transaction() as conn:
+        found = conn.execute("SELECT * FROM gateway_keys WHERE id=?", (key_id,)).fetchone()
+        row = _validate(dict(found) if found else None)
+        if model is not None and not check_model_allowed(row, model):
+            raise KeyRejected("该密钥无权访问请求模型", "model_not_allowed")
+        result = conn.execute(
+            "UPDATE gateway_keys SET request_count=request_count+1,last_used_at=? "
+            "WHERE id=? AND enabled=1 AND (request_quota=0 OR request_count<request_quota)",
+            (_now(), key_id),
+        )
+        if result.rowcount != 1:
+            raise KeyRejected("请求次数配额已用尽", "quota_exceeded")
+        row["request_count"] += 1
+        return row
 
 
 def consume_tokens(key_id: str, total_tokens: int) -> None:

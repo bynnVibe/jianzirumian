@@ -66,7 +66,7 @@ class AssistantLLMBody(BaseModel):
 # ============================================
 # 获取系统配置（完整版）
 # ============================================
-AVAILABLE_LLM_PROVIDERS = ["ollama", "openai", "custom"]
+AVAILABLE_LLM_PROVIDERS = ["ollama", "openai", "custom", "gateway"]
 AVAILABLE_OCR_PROVIDERS = ["local", "aliyun", "custom_api"]
 AVAILABLE_SEARCH_PROVIDERS = ["duckduckgo", "bing", "serpapi", "anysearch"]
 AVAILABLE_EMBEDDING_PROVIDERS = ["ollama", "openai", "custom"]
@@ -78,6 +78,7 @@ EDITABLE_FIELDS = {
         "ollama": {"base_url", "model"},
         "openai": {"base_url", "api_key", "model"},
         "custom": {"base_url", "api_key", "model"},
+        "gateway": {"base_url", "api_key", "model"},
     },
     "ocr": {
         "aliyun": {"base_url", "api_key", "model"},

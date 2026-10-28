@@ -65,13 +65,14 @@ export function getAttachmentFileUrl(fileId) {
  * 发送消息 (SSE 流式)
  * @returns {EventSource} 或使用 fetch 手动处理流
  */
-export function sendChatMessage(params) {
+export function sendChatMessage(params, signal) {
   const headers = { 'Content-Type': 'application/json' }
   const token = localStorage.getItem('auth_token')
   if (token) {
     headers['Authorization'] = `Bearer ${token}`
   }
   return fetch('/api/chat/send', {
+    signal,
     method: 'POST',
     headers,
     body: JSON.stringify(params),
@@ -83,7 +84,7 @@ export function sendChatMessage(params) {
  * @param {object} params { session_id, query, use_knowledge, use_search, llm_provider, kb_id }
  * @param {File[]} files 拖入/选择的附件文件（图片/Word/PDF）
  */
-export function sendChatMessageWithFiles(params, files) {
+export function sendChatMessageWithFiles(params, files, signal) {
   const headers = {}
   const token = localStorage.getItem('auth_token')
   if (token) {
@@ -100,6 +101,7 @@ export function sendChatMessageWithFiles(params, files) {
     form.append('files', file)
   }
   return fetch('/api/chat/send-with-files', {
+    signal,
     method: 'POST',
     headers,
     body: form,
@@ -109,6 +111,10 @@ export function sendChatMessageWithFiles(params, files) {
 /**
  * 获取聊天历史
  */
+export const getChatAction = (id, signal) => api.get(`/chat/actions/${id}`, { signal })
+export const confirmChatAction = (id, kbId) => api.post(`/chat/actions/${id}/confirm`, { kb_id: kbId })
+export const cancelChatAction = (id) => api.post(`/chat/actions/${id}/cancel`)
+
 export function getChatHistory(sessionId) {
   return api.get(`/chat/history/${sessionId}`)
 }

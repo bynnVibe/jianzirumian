@@ -114,6 +114,8 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   async function logout() {
+    const { useChatStore } = await import('./chat')
+    useChatStore().clearAllSessionData()
     try {
       await logoutUser()
     } catch {

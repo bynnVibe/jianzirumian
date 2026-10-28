@@ -170,6 +170,8 @@ async def iter_openai_sse(channel: dict, aiter_lines) -> AsyncGenerator[str, Non
             continue
         if line.startswith("data:"):
             yield line if line.endswith("\n\n") else line + "\n\n"
+            if line[5:].strip() == "[DONE]":
+                return
 
 
 async def iter_ollama_sse(channel: dict, aiter_lines) -> AsyncGenerator[str, None]:
@@ -183,6 +185,8 @@ async def iter_ollama_sse(channel: dict, aiter_lines) -> AsyncGenerator[str, Non
             chunk = json.loads(line)
         except json.JSONDecodeError:
             continue
+        if chunk.get("error"):
+            raise RuntimeError(str(chunk["error"]))
         msg = chunk.get("message") or {}
         delta = {"role": "assistant"}
         if msg.get("content"):
@@ -203,6 +207,9 @@ async def iter_ollama_sse(channel: dict, aiter_lines) -> AsyncGenerator[str, Non
             ct = int(chunk.get("eval_count") or 0)
             obj["usage"] = {"prompt_tokens": pt, "completion_tokens": ct, "total_tokens": pt + ct}
         yield "data: " + json.dumps(obj, ensure_ascii=False) + "\n\n"
+        if chunk.get("done"):
+            yield "data: [DONE]\n\n"
+            return
 
 
 async def iter_anthropic_sse(channel: dict, aiter_lines) -> AsyncGenerator[str, None]:
@@ -229,6 +236,9 @@ async def iter_anthropic_sse(channel: dict, aiter_lines) -> AsyncGenerator[str, 
                 obj = _chunk(cid, channel, delta)
         elif etype == "message_start":
             obj = _chunk(cid, channel, {"role": "assistant"})
+            usage = (ev.get("message") or {}).get("usage") or {}
+            obj["usage"] = {"prompt_tokens": int(usage.get("input_tokens") or 0),
+                            "completion_tokens": int(usage.get("output_tokens") or 0)}
         elif etype == "message_delta":
             usage = (ev.get("usage") or {})
             obj = _chunk(cid, channel, {}, finish_reason="stop")
@@ -237,7 +247,9 @@ async def iter_anthropic_sse(channel: dict, aiter_lines) -> AsyncGenerator[str, 
                                 "total_tokens": int(usage["output_tokens"])}
         elif etype == "message_stop":
             yield "data: [DONE]\n\n"
-            continue
+            return
+        elif etype == "error":
+            raise RuntimeError(str(ev.get("error") or "上游流错误"))
         if obj is not None:
             yield "data: " + json.dumps(obj, ensure_ascii=False) + "\n\n"
 

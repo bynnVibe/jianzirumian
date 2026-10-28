@@ -237,7 +237,7 @@
             <div class="feature-item">
               <div class="feature-icon">📥</div>
               <h4>存入知识库</h4>
-              <p>说「把这张图片上传到知识库」「保存这份文档」：识别/解析后自动存入你当前选择的知识库，之后可直接提问。</p>
+              <p>随附件说「保存到知识库」：系统只生成<b>入库确认卡片</b>。核对文件、目标库和可见性，点击「确认入库」后才执行；未确认不会写库。</p>
             </div>
             <div class="feature-item">
               <div class="feature-icon">✨</div>
@@ -246,10 +246,10 @@
             </div>
           </div>
           <div class="callout callout-info">
-            不说明意图时默认「只处理不入库」，不会意外写入你的知识库；想入库请在话语中带上「上传 / 保存 / 入库」。
+            默认只识别或总结；否定、引用或含糊的保存指令保守处理为只读。入库卡片默认私人库，没有私人库时会在确认后创建，提案有效期为24小时。
           </div>
           <div class="callout callout-tip">
-            游客拖入附件时仅支持识别与总结，不会写入知识库；登录用户附件处理完成后，还可以追问「把它保存到知识库」完成入库。
+            游客不能创建可执行入库提案。卡片刷新后仍可查看；仅待确认状态可取消。失败或中断可能已部分落库，请先核对知识库，不会自动重试。停止生成只取消回答，不撤销已经确认的入库。
           </div>
         </div>
       </section>
@@ -371,7 +371,7 @@
         <div class="card">
           <h3 class="card-title">对问答主链路跑离线回归</h3>
           <ol class="step-list">
-            <li><b>建评测集</b>：侧边栏「回归评测」（仅管理员可见）新建评测集，用例可手工新增、JSON 批量导入，或从聊天「点踩」反馈一键去重导入。</li>
+            <li><b>建评测集</b>：「系统管理」控制台 →「回归评测」（仅管理员可见）新建评测集，用例可手工新增、JSON 批量导入，或从聊天「点踩」反馈一键去重导入。</li>
             <li><b>一键回归</b>：选择评测集发起运行，系统对每条用例重放「检索 → 生成」全链路；同一评测集同时只跑一个任务。</li>
             <li><b>看指标</b>：运行结束查看 Ragas 四指标（忠实度、回答相关性、上下文精确率、上下文召回率）与检索命中率、平均耗时，展开用例明细可看单条得分与逐条判定依据。</li>
             <li><b>跨 run 对比</b>：调整 prompt / 检索 / 重排后再跑一次，对比两次指标变化，判断优化是否引入回退。</li>
@@ -394,7 +394,8 @@
             模型网关是一个<b>独立的本地 LLM 入口</b>：对下游工具/应用统一暴露 OpenAI 兼容协议（<code>/v1/chat/completions</code>），
             下游只需持有一个<b>本地密钥</b>（<code>sk-jzrm-...</code>）即可调用，无需知道、也不会拿到真实上游 Key。
             网关在中间完成鉴权、配额、安全审计、负载均衡与故障切换，并把每次调用<b>全量记录</b>下来便于排查与运维。
-            入口在侧边栏「模型网关」（仅管理员/运维可见）。
+            入口在「系统管理」控制台 →「模型网关」（仅管理员/运维可见）。五层架构下，<code>/v1</code> 代理运行时独立部署为<b>层3 LLM Proxy</b> 服务（端口 8001）；
+            Agent 自身也可选经网关出网（<code>LLM_PROVIDER=gateway</code>），问答/工具的全部 LLM 调用统一走代理选路、配额与审计。
           </p>
         </div>
         <div class="card">
@@ -408,7 +409,7 @@
             <div class="feature-item">
               <div class="feature-icon">⚖️</div>
               <h4>负载均衡与故障切换</h4>
-              <p>配置多个上游渠道，按<b>优先级 + 权重</b>选择；某渠道失败时自动重试其他渠道，连续失败会临时熔断，对调用方透明无感。</p>
+              <p>按<b>优先级 + 权重</b>选择渠道；首块输出前失败可切换，开始输出后不重放。所有重试共用总预算，取消和超时单独记录，不计为成功。</p>
             </div>
             <div class="feature-item">
               <div class="feature-icon">📋</div>
@@ -425,10 +426,10 @@
         <div class="card">
           <h3 class="card-title">怎么用起来</h3>
           <ol class="step-list">
-            <li><b>加渠道</b>：在「渠道」页签新增上游（协议 openai/anthropic/ollama + Base URL + 上游 ApiKey + 模型清单），设好优先级与权重，点「连通测试」验证配置。</li>
+            <li><b>加渠道</b>：配置协议、地址、模型与权重。「Proxy 连通测试」由独立 Proxy 实际访问上游，可能产生费用；需先配置内部诊断凭据，不会回退为 Agent 直连测试。</li>
             <li><b>发密钥</b>：在「密钥」页签为下游生成本地密钥，按需设置配额与可访问模型；复制明文密钥交给调用方。</li>
             <li><b>下游调用</b>：调用方用本地密钥请求 <code>/v1/chat/completions</code>（与 OpenAI 用法一致），网关自动选路转发并归一化响应。</li>
-            <li><b>看日志与链路</b>：在「日志」页签搜索筛选调用记录，展开可看<b>可视化调用链路</b>（鉴权 → 配额 → 安全审计 → 选路 → 上游调用 → 响应处理 → 日志入库）与风险明细，快速定位失败环节。</li>
+            <li><b>看日志与链路</b>：鉴权/模型授权 → 安全审计 → 选路 → 原子请求认领 → 上游。审计拒绝、无渠道不扣次数；进入上游后失败不退，重试不重复扣。Token 为事后计量软限额，<b>不是硬费用上限</b>。</li>
             <li><b>调安全策略</b>：在「安全审计中心」选择审计模式、启停内置规则、配置黑白名单，并用「扫描试跑」即时验证一段文本会命中哪些风险。</li>
           </ol>
           <div class="callout callout-tip">
@@ -440,10 +441,34 @@
         </div>
       </section>
 
-      <!-- 常见问题 -->
+      <!-- 系统架构 -->
       <section class="guide-section">
         <h2 class="section-title">
           <span class="section-num">12</span>
+          系统架构：五层微服务拓扑（管理员/运维）
+        </h2>
+        <div class="card">
+          <h3 class="card-title">五层分别是什么</h3>
+          <ol class="step-list">
+            <li><b>层1 Nginx</b>：静态页面、限流与业务/模型路由。HTTPS 由外部反向代理终止，全路径代理到前端入口；只接受显式可信来源的转发头，公共 <code>/metrics</code> 禁止访问。</li>
+            <li><b>层2 Agent Service</b>：问答、知识库、评测与管理；固定单机、单进程、单业务写者。独占文件锁保护任务恢复与索引写入，第二个 Agent 启动会被拒绝。</li>
+            <li><b>层3 LLM Proxy</b>：独立模型路由、请求配额、审计、故障切换与 Token 用量统计；不恢复 Agent 任务，不提供货币计费或语义缓存承诺。</li>
+            <li><b>层4 数据层</b>：SQLite 保存业务状态，FAISS 保存向量；Redis 为可降级的文件缓存，不是启动硬依赖。</li>
+            <li><b>层5 监控层</b>：Prometheus（端口 9090）抓取两个服务的 <code>/metrics</code>，Grafana（端口 3000）自动装配数据源与「系统总览」大盘；调用级 Trace 见应用内「Agent 可观测性」页。</li>
+          </ol>
+          <div class="callout callout-info">
+            功能架构不变：五层是<b>部署拓扑</b>拆解，全部业务功能与页面和此前一致；仅 LLM 出网可选走层3 网关（控制台设 <code>LLM_PROVIDER=gateway</code>）。
+          </div>
+          <div class="callout callout-tip">
+            默认所有宿主端口仅回环监听，监控经 SSH 隧道访问。Grafana 无默认密码；存活使用 Prometheus 即时 up，readiness 只检查本地资源。Agent/Gateway 分别使用持久 counter，窗口成功率/延迟为 gauge；抓取或 readiness 失败持续1分钟触发规则，不等同于已配置外部通知。
+          </div>
+        </div>
+      </section>
+
+      <!-- 常见问题 -->
+      <section class="guide-section">
+        <h2 class="section-title">
+          <span class="section-num">13</span>
           常见问题
         </h2>
         <div class="faq-list">
@@ -457,7 +482,7 @@
           </details>
           <details class="faq-item">
             <summary>拖进聊天框的文件会自动存进知识库吗？</summary>
-            <p>不会。默认只做识别或总结，不会写入知识库；只有当你的话语中明确包含「上传 / 保存 / 入库」等意图时，系统才会把处理结果存入你当前选择的知识库。</p>
+            <p>不会。保存意图只生成确认卡片，必须点击确认才执行。生成中可点「停止生成」；取消、超时或异常断开后保留部分文本并标注中断，刷新后也不会显示为完整成功。</p>
           </details>
           <details class="faq-item">
             <summary>系统记住的「用户记忆」是什么？别人能看到吗？</summary>

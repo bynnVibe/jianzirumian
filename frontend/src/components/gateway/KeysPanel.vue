@@ -68,7 +68,7 @@
             <input v-model.trim="form.name" class="field-input" placeholder="如 张三的桌面客户端" />
           </label>
           <label class="field">
-            <span class="field-label">Token 配额（0 = 不限）</span>
+            <span class="field-label">Token 软限额（0 = 不限）</span>
             <input v-model.number="form.token_quota" type="number" min="0" class="field-input" />
           </label>
           <label class="field">
@@ -87,6 +87,7 @@
             <input v-model="form.expires_at" type="datetime-local" class="field-input" />
           </label>
         </div>
+        <p class="field-label">Token 为调用后计量，并发与单次响应可能超额，不是硬费用上限。请求次数在进入上游前认领一次，失败不退，渠道重试不重复扣。</p>
         <p v-if="formError" class="err-tip">{{ formError }}</p>
         <div class="modal-actions">
           <button class="btn btn-ghost" @click="showModal = false">取消</button>

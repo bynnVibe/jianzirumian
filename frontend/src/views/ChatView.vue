@@ -57,10 +57,11 @@
             :attachments="msg.attachments"
             :message-id="msg.message_id"
             :feedback="msg.feedback"
-            :can-feedback="!auth.isGuest"
+            :can-feedback="!auth.isGuest && !msg.interrupted"
             @reask="handleReask"
             @feedback="(fb) => handleFeedback(msg, fb)"
           />
+          <ChatActionCard v-for="action in msg.actions || []" :key="action.id" :action="action" @update="store.updateAction" />
         </template>
         <!-- 正在生成的流式响应 -->
         <ChatMessage
@@ -108,6 +109,7 @@
         <span>游客最多可查询 {{ guestQueryLimit }} 次（含知识库检索和联网搜索），超出需登录</span>
         <router-link to="/login" class="guest-login-link">去登录</router-link>
       </div>
+      <button v-if="store.isGenerating" class="stop-generation" @click="store.stopGeneration()">停止生成</button>
       <ChatInput
         ref="chatInputRef"
         :disabled="store.isGenerating"
@@ -118,18 +120,20 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, nextTick, onMounted } from 'vue'
+import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useChatStore } from '@/stores/chat'
 import { useAuthStore } from '@/stores/auth'
 import { submitFeedback, getPublicConfig } from '@/api'
 import ChatMessage from '@/components/ChatMessage.vue'
 import ChatInput from '@/components/ChatInput.vue'
+import ChatActionCard from '@/components/ChatActionCard.vue'
 
 const route = useRoute()
 const router = useRouter()
 const store = useChatStore()
 const auth = useAuthStore()
+onBeforeUnmount(() => store.stopGeneration())
 const messagesRef = ref(null)
 const chatInputRef = ref(null)
 
@@ -278,6 +282,7 @@ onMounted(() => {
 </script>
 
 <style scoped>
+.stop-generation { display: block; margin: 0 auto 10px; padding: 8px 20px; border: 1px solid #8b7355; border-radius: 8px; background: transparent; color: inherit; cursor: pointer; }
 .chat-view {
   display: flex;
   flex-direction: column;

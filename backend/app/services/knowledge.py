@@ -191,6 +191,7 @@ class KnowledgeService:
         owner_id: str = "",
         kb_id: str = "",
         override_text: str = "",
+        write_guard=None,
     ) -> dict:
         """处理单张图片: OCR + 向量化存储
 
@@ -231,6 +232,8 @@ class KnowledgeService:
         import asyncio
 
         def _vectorize():
+            if write_guard:
+                write_guard()
             chunks = vector_store.split_text(ocr_text, image_path, visibility, owner_id, kb_id=kb_id)
             if not chunks:
                 return 0, []
@@ -674,6 +677,7 @@ class KnowledgeService:
         visibility: str = "public",
         owner_id: str = "",
         kb_id: str = "",
+        write_guard=None,
     ) -> dict:
         """处理文档：提取文本 → 分割 → 向量化存储
 
@@ -713,6 +717,8 @@ class KnowledgeService:
 
         # 分割 + 向量化（含 Embedding 调用）整体移入线程池，避免阻塞事件循环
         def _vectorize():
+            if write_guard:
+                write_guard()
             chunks = vector_store.split_text(text, file_path, visibility, owner_id, kb_id=kb_id)
             if not chunks:
                 return 0, []

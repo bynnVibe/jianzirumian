@@ -43,6 +43,9 @@ frontend/dist/
 *.tar.gz
 docker-images/*.tar.gz
 
+# ---- 内部文档（不上传 GitHub）----
+backend/API.md
+
 # ---- IDE / 系统 ----
 .idea/
 .vscode/

@@ -1,0 +1,28 @@
+# ============================================
+# 见字如面 - Prometheus 抓取配置（层5 监控层）
+# ============================================
+# 抓取层2 Agent Service 与层3 LLM Proxy 暴露的 /metrics（Prometheus 文本格式）。
+# 服务名即 compose 网络内的 DNS 名：agent:8000、llm-proxy:8001。
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+scrape_configs:
+  # 层2 Agent Service
+  - job_name: "agent"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["agent:8000"]
+        labels:
+          service: agent
+
+  # 层3 LLM Proxy
+  - job_name: "llm-proxy"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["llm-proxy:8001"]
+        labels:
+          service: llm-proxy

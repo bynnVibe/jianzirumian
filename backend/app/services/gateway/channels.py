@@ -171,7 +171,7 @@ def _weighted_order(rows: List[dict]) -> List[dict]:
         w = max(1, int(r.get("weight") or 1))
         rnd = random.random() or 1e-9
         keyed.append((-math.log(rnd) / w, r))
-    keyed.sort(key=lambda x: x[0], reverse=True)
+    keyed.sort(key=lambda x: x[0])
     return [r for _, r in keyed]
 
 

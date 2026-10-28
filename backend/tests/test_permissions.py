@@ -115,3 +115,36 @@ def test_require_ops_allows_admin(monkeypatch):
     )
     user = deps.require_ops("Bearer some-token")
     assert user["role"] == "admin"
+
+
+# ============================================
+# 仅运维鉴权（require_ops_only：CI/CD 专用，只放行 ops，admin 也拒绝）
+# ============================================
+
+def test_require_ops_only_rejects_normal_user(monkeypatch):
+    monkeypatch.setattr(
+        deps.auth_service, "get_session_user",
+        lambda t: {"id": "u1", "role": "user"},
+    )
+    with pytest.raises(HTTPException) as exc:
+        deps.require_ops_only("Bearer some-token")
+    assert exc.value.status_code == 403
+
+
+def test_require_ops_only_rejects_admin(monkeypatch):
+    monkeypatch.setattr(
+        deps.auth_service, "get_session_user",
+        lambda t: {"id": "u1", "role": "admin"},
+    )
+    with pytest.raises(HTTPException) as exc:
+        deps.require_ops_only("Bearer some-token")
+    assert exc.value.status_code == 403
+
+
+def test_require_ops_only_allows_ops(monkeypatch):
+    monkeypatch.setattr(
+        deps.auth_service, "get_session_user",
+        lambda t: {"id": "u1", "role": "ops"},
+    )
+    user = deps.require_ops_only("Bearer some-token")
+    assert user["role"] == "ops"

@@ -1,14 +1,25 @@
 # ============================================
-# 见字如面 - Docker Compose
+# 见字如面 - Docker Compose（五层微服务拓扑）
 # ============================================
 # 使用方式：
-#   docker compose up -d
+#   docker compose --env-file backend/.env up -d
 #
-# 访问 http://localhost:5173 即可使用
-# 如需自定义配置，复制 .env.example 为 .env 并修改后重启
+# 所有宿主端口默认回环；生产 HTTPS 由外部反向代理终止。
+# 首次部署先配置 backend/.env，必须设置强 Grafana 密码。
+#
+# 五层映射：
+#   层1 API Gateway  -> frontend（Nginx：静态 + 限流 + 路由 /api、/v1；禁止公共 /metrics）
+#   层2 Agent Service-> agent（FastAPI 单机、单进程、单业务写者）
+#   层3 LLM Proxy    -> llm-proxy（模型路由/原子请求配额/审计/故障切换/Token 用量）
+#   层4 数据层        -> redis（可降级文件缓存）+ SQLite + FAISS
+#   层5 监控层        -> prometheus（指标抓取）+ grafana（大屏）
+#
+# Agent 固定单进程单副本；文件锁拒绝第二业务写者，不支持横向扩容。
+# 全量存储迁移、分布式所有权与容量验收不属于当前能力。
 # ============================================
 
 services:
+  # ---- 层4 数据层：Redis（会话/缓存）----
   redis:
     image: docker.m.daocloud.io/library/redis:7-alpine
     container_name: jianziruyang-redis
@@ -18,19 +29,20 @@ services:
     networks:
       - jianziruyang-net
 
-  backend:
+  # ---- 层2 Agent Service（业务单体）----
+  agent:
     # 镜像名与 scripts/deploy-aliyun.sh 一致；服务器上 docker load 后直接复用，无需重新构建
     image: jianzirumian-backend:latest
     build:
       context: .
       dockerfile: Dockerfile.backend
-    container_name: jianziruyang-backend
+    container_name: jianziruyang-agent
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     volumes:
       # 持久化数据（向量库 + 上传图片）
       - ./data:/app/data
-      # 持久化 SQLite 数据库（用户/会话/用量等业务数据）
+      # 持久化 SQLite 数据库（用户/会话/用量等业务数据），与 llm-proxy 共享
       - ./data/db:/app/backend/data
       # 后端日志（按日期文件）挂载到宿主机 logs/backend
       - ./logs/backend:/app/backend/log
@@ -38,7 +50,7 @@ services:
       - ./backend/.env:/app/backend/.env:ro
     env_file:
       - path: ./backend/.env
-        required: false
+        required: true
     environment:
       # 默认使用 Ollama（容器外），如需云端 API 请在 .env 中修改
       - LLM_PROVIDER=${LLM_PROVIDER:-ollama}
@@ -49,6 +61,16 @@ services:
       - CORS_ORIGINS=${CORS_ORIGINS:-}
       # Redis 文件缓存（compose 网络内服务名即 redis）
       - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      # 层3 LLM Proxy 地址（LLM_PROVIDER=gateway 时 Agent 经其 /v1 出网）
+      - LLM_PROXY_URL=http://llm-proxy:8001
+      - TRUSTED_PROXY_CIDRS=${FRONTEND_PROXY_IP:-172.30.0.10}
+      - PROXY_DIAGNOSTIC_TOKEN=${PROXY_DIAGNOSTIC_TOKEN:-}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/ready', timeout=5)"]
+      interval: 15s
+      timeout: 6s
+      retries: 4
+      start_period: 60s
     extra_hosts:
       # 让容器能访问宿主机的 localhost（如 Ollama）
       - "host.docker.internal:host-gateway"
@@ -57,7 +79,43 @@ services:
     restart: unless-stopped
     networks:
       - jianziruyang-net
+    deploy:
+      # 默认单副本；>1 需先迁移 PostgreSQL/向量库（见文件头说明）
+      replicas: 1
 
+  # ---- 层3 LLM Proxy（自建网关，复用同一镜像、独立进程）----
+  llm-proxy:
+    image: jianzirumian-backend:latest
+    container_name: jianziruyang-llm-proxy
+    command: ["uvicorn", "app.llm_proxy:app", "--host", "0.0.0.0", "--port", "8001", "--workers", "1", "--no-proxy-headers"]
+    ports:
+      - "127.0.0.1:8001:8001"
+    volumes:
+      # 与 agent 共享 SQLite（网关渠道/密钥/日志）与数据目录（同宿主机 fs，WAL 多进程可接受）
+      - ./data:/app/data
+      - ./data/db:/app/backend/data
+      - ./logs/backend:/app/backend/log
+      - ./backend/.env:/app/backend/.env:ro
+    env_file:
+      - path: ./backend/.env
+        required: true
+    environment:
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - TRUSTED_PROXY_CIDRS=${FRONTEND_PROXY_IP:-172.30.0.10}
+      - PROXY_DIAGNOSTIC_TOKEN=${PROXY_DIAGNOSTIC_TOKEN:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/ready', timeout=5)"]
+      interval: 15s
+      timeout: 6s
+      retries: 4
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - jianziruyang-net
+
+  # ---- 层1 API Gateway + 前端静态（Nginx 边缘）----
   frontend:
     image: jianzirumian-frontend:latest
     build:
@@ -65,19 +123,66 @@ services:
       dockerfile: Dockerfile.frontend
     container_name: jianziruyang-frontend
     ports:
-      - "5173:80"
+      - "${FRONTEND_BIND_IP:-127.0.0.1}:5173:80"
     volumes:
       # Nginx 访问/错误日志挂载到宿主机 logs/frontend
       - ./logs/frontend:/var/log/nginx
     depends_on:
-      - backend
+      - agent
+      - llm-proxy
     environment:
-      # docker-compose 网络中后端服务名就是 backend
-      - BACKEND_HOST=backend
+      # docker-compose 网络中：层2 服务名 agent、层3 服务名 llm-proxy
+      - BACKEND_HOST=agent
+      - LLM_PROXY_HOST=llm-proxy
+      - EDGE_PROXY_CIDR=${EDGE_PROXY_CIDR:-127.0.0.1/32}
+    restart: unless-stopped
+    networks:
+      jianziruyang-net:
+        ipv4_address: ${FRONTEND_PROXY_IP:-172.30.0.10}
+
+  # ---- 层5 监控层：Prometheus（指标抓取）----
+  prometheus:
+    image: docker.m.daocloud.io/prom/prometheus:latest
+    container_name: jianziruyang-prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus
     restart: unless-stopped
     networks:
       - jianziruyang-net
 
+  # ---- 层5 监控层：Grafana（大屏）----
+  grafana:
+    image: docker.m.daocloud.io/grafana/grafana:latest
+    container_name: jianziruyang-grafana
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:?请在backend/.env设置至少16字符的非默认密码}
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    networks:
+      - jianziruyang-net
+
+volumes:
+  prometheus-data:
+  grafana-data:
+
 networks:
   jianziruyang-net:
     driver: bridge
+    ipam:
+      config:
+        - subnet: ${COMPOSE_SUBNET:-172.30.0.0/24}

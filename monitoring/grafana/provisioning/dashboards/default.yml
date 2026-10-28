@@ -1,0 +1,14 @@
+# Grafana 大盘 provisioning：从挂载目录加载 JSON 大盘
+apiVersion: 1
+
+providers:
+  - name: jianziruyang
+    orgId: 1
+    folder: ""
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

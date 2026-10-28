@@ -9,6 +9,7 @@
 """
 import json
 import logging
+import re
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -41,7 +42,8 @@ def detect_kind(filename: str) -> Optional[str]:
 def _decide_action(query: str) -> str:
     """根据用户文本判断动作：upload | summarize | ocr（安全默认，不入库）"""
     text = query or ""
-    if any(k in text for k in _UPLOAD_KEYWORDS):
+    conservative = bool(re.search(r"不要|不用|不必|别|禁止|无需|不想|不需要|不保存|不上传|不入库|是否|能否|可以吗|怎么|如何|假如|如果|或者|还是|[\"'“”‘’「」『』`？?]", text))
+    if not conservative and any(k in text for k in _UPLOAD_KEYWORDS):
         return "upload"
     if any(k in text for k in _SUMMARIZE_KEYWORDS):
         return "summarize"
@@ -101,8 +103,11 @@ async def handle_attachments(
         )
 
         if action == "upload":
-            tool = image_upload_tool if kind == "image" else document_import_tool
-            kwargs = {}
+            from app.services.chat_actions import propose
+            proposal = propose({**att, "kind": kind}, user_id, session_id, message_id)
+            records.append({"confirmation": proposal})
+            summaries.append(f"附件「{filename}」仅生成入库提案，尚未执行。请用户在确认卡片核对目标并点击确认；不得声称已入库。")
+            continue
         elif action == "summarize":
             tool = knowledge_summarize_tool
             kwargs = {"save_to_kb": False}

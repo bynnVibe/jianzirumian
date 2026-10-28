@@ -240,6 +240,12 @@ def _provider_defaults(category: str, provider: str) -> dict:
             "ollama": {"base_url": settings.OLLAMA_BASE_URL, "model": settings.OLLAMA_MODEL},
             "openai": {"base_url": settings.API_BASE_URL, "api_key": settings.API_KEY, "model": settings.API_MODEL},
             "custom": {"base_url": settings.API_BASE_URL, "api_key": settings.API_KEY, "model": settings.API_MODEL},
+            # gateway：经层3 LLM Proxy（OpenAI 兼容 /v1）出网
+            "gateway": {
+                "base_url": settings.LLM_PROXY_URL.rstrip("/") + "/v1",
+                "api_key": settings.LLM_PROXY_KEY,
+                "model": settings.API_MODEL,
+            },
         },
         "ocr": {
             "local": {},

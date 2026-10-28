@@ -133,7 +133,7 @@ def end_trace(status: str = "", error: str = "") -> None:
             agg = {"n": row["n"], "llm": row["llm"], "tool": row["tool"], "pt": row["pt"], "ct": row["ct"]}
         db.execute(
             "UPDATE agent_traces SET status = ?, error = ?, latency_ms = ?, llm_calls = ?, tool_calls = ?,"
-            " prompt_tokens = ?, completion_tokens = ?, ended_at = ? WHERE id = ?",
+            " prompt_tokens = ?, completion_tokens = ?, ended_at = ? WHERE id = ? AND status = 'running'",
             (status, error, latency, agg["llm"], agg["tool"], agg["pt"], agg["ct"], _now(), tid),
         )
     except Exception as e:
@@ -253,6 +253,9 @@ def metrics(days: int = 7) -> dict:
         "SELECT COUNT(*) AS total,"
         " COALESCE(SUM(status = 'ok'), 0) AS ok,"
         " COALESCE(SUM(status = 'error'), 0) AS errors,"
+                " COALESCE(SUM(status = 'cancelled'), 0) AS cancelled,"
+                " COALESCE(SUM(status = 'timeout'), 0) AS timeout,"
+                " COALESCE(SUM(status = 'interrupted'), 0) AS interrupted,"
         " COALESCE(AVG(latency_ms), 0) AS avg_latency,"
         " COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,"
         " COALESCE(SUM(completion_tokens), 0) AS completion_tokens,"
@@ -261,7 +264,7 @@ def metrics(days: int = 7) -> dict:
         " FROM agent_traces WHERE started_at >= ? AND status != 'running'",
         (since,),
     ) or {}
-    finished = int(overview.get("ok", 0)) + int(overview.get("errors", 0))
+    finished = int(overview.get("total", 0))
     latencies = [
         r["latency_ms"] for r in db.query(
             "SELECT latency_ms FROM agent_traces"
@@ -278,6 +281,9 @@ def metrics(days: int = 7) -> dict:
             "SELECT date(started_at) AS day, COUNT(*) AS total,"
             " COALESCE(SUM(status = 'ok'), 0) AS ok,"
             " COALESCE(SUM(status = 'error'), 0) AS errors,"
+                    " COALESCE(SUM(status = 'cancelled'), 0) AS cancelled,"
+                    " COALESCE(SUM(status = 'timeout'), 0) AS timeout,"
+                    " COALESCE(SUM(status = 'interrupted'), 0) AS interrupted,"
             " COALESCE(AVG(latency_ms), 0) AS avg_latency,"
             " COALESCE(SUM(prompt_tokens + completion_tokens), 0) AS tokens"
             " FROM agent_traces WHERE started_at >= ? AND status != 'running'"
@@ -290,6 +296,9 @@ def metrics(days: int = 7) -> dict:
             "SELECT agent, COUNT(*) AS total,"
             " COALESCE(SUM(status = 'ok'), 0) AS ok,"
             " COALESCE(SUM(status = 'error'), 0) AS errors,"
+                    " COALESCE(SUM(status = 'cancelled'), 0) AS cancelled,"
+                    " COALESCE(SUM(status = 'timeout'), 0) AS timeout,"
+                    " COALESCE(SUM(status = 'interrupted'), 0) AS interrupted,"
             " COALESCE(AVG(latency_ms), 0) AS avg_latency,"
             " COALESCE(SUM(llm_calls), 0) AS llm_calls,"
             " COALESCE(SUM(tool_calls), 0) AS tool_calls,"
@@ -304,6 +313,9 @@ def metrics(days: int = 7) -> dict:
             "SELECT name AS tool, COUNT(*) AS total,"
             " COALESCE(SUM(status = 'ok'), 0) AS ok,"
             " COALESCE(SUM(status = 'error'), 0) AS errors,"
+                    " COALESCE(SUM(status = 'cancelled'), 0) AS cancelled,"
+                    " COALESCE(SUM(status = 'timeout'), 0) AS timeout,"
+                    " COALESCE(SUM(status = 'interrupted'), 0) AS interrupted,"
             " COALESCE(AVG(latency_ms), 0) AS avg_latency"
             " FROM agent_spans WHERE kind = 'tool' AND started_at >= ?"
             " GROUP BY name ORDER BY total DESC",
@@ -316,6 +328,9 @@ def metrics(days: int = 7) -> dict:
             "total": int(overview.get("total", 0)),
             "ok": int(overview.get("ok", 0)),
             "errors": int(overview.get("errors", 0)),
+            "cancelled": int(overview.get("cancelled", 0)),
+            "timeout": int(overview.get("timeout", 0)),
+            "interrupted": int(overview.get("interrupted", 0)),
             "success_rate": round(int(overview.get("ok", 0)) / finished, 4) if finished else 0.0,
             "avg_latency_ms": int(overview.get("avg_latency", 0)),
             "p95_latency_ms": int(p95),

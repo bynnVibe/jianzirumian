@@ -1,0 +1,152 @@
+{
+  "title": "见字如面 - 五层架构总览",
+  "uid": "jzrm-overview",
+  "schemaVersion": 39,
+  "version": 2,
+  "timezone": "browser",
+  "editable": true,
+  "time": { "from": "now-6h", "to": "now" },
+  "refresh": "30s",
+  "panels": [
+    {
+      "type": "stat",
+      "title": "服务存活（即时抓取）",
+      "description": "使用 Prometheus 原生 up；DOWN 为抓取失败，无数据为目标缺失。",
+      "gridPos": { "h": 6, "w": 4, "x": 0, "y": 0 },
+      "targets": [
+        { "expr": "up{job=~\"agent|llm-proxy\"}", "instant": true, "legendFormat": "{{job}}", "refId": "A" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "无数据",
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "DOWN", "color": "red" }, "1": { "text": "UP", "color": "green" } } }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] }
+        },
+        "overrides": []
+      },
+      "options": { "colorMode": "background", "graphMode": "none", "reduceOptions": { "calcs": ["last"] } }
+    },
+    {
+      "type": "stat",
+      "title": "Agent 成功率（当日）",
+      "gridPos": { "h": 6, "w": 4, "x": 4, "y": 0 },
+      "targets": [
+        { "expr": "jzrm_agent_success_rate{service=\"agent\"}", "legendFormat": "success", "refId": "A" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0, "max": 1,
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "orange", "value": 0.9 }, { "color": "green", "value": 0.98 } ] }
+        },
+        "overrides": []
+      },
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["last"] } }
+    },
+    {
+      "type": "stat",
+      "title": "Agent 当日平均延迟 (ms)",
+      "gridPos": { "h": 6, "w": 4, "x": 8, "y": 0 },
+      "targets": [
+        { "expr": "jzrm_agent_avg_latency_ms{service=\"agent\"}", "legendFormat": "avg", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["last"] } }
+    },
+    {
+      "type": "stat",
+      "title": "Agent 当日 P95 (ms，近5000条)",
+      "gridPos": { "h": 6, "w": 4, "x": 12, "y": 0 },
+      "targets": [
+        { "expr": "jzrm_agent_p95_latency_ms{service=\"agent\"}", "legendFormat": "p95", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["last"] } }
+    },
+    {
+      "type": "stat",
+      "title": "Agent 累计 Token",
+      "gridPos": { "h": 6, "w": 4, "x": 16, "y": 0 },
+      "targets": [
+        { "expr": "jzrm_agent_prompt_tokens_total{service=\"agent\"} + jzrm_agent_completion_tokens_total{service=\"agent\"}", "legendFormat": "tokens", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["last"] } }
+    },
+    {
+      "type": "timeseries",
+      "title": "Agent 请求速率 (req/s)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "targets": [
+        { "expr": "rate(jzrm_agent_traces_total[5m])", "legendFormat": "{{service}}", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "drawStyle": "line", "fillOpacity": 15 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } }
+    },
+    {
+      "type": "timeseries",
+      "title": "失败请求速率 (err/s)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "targets": [
+        { "expr": "rate(jzrm_agent_traces_error_total[5m])", "legendFormat": "Agent 失败", "refId": "A" },
+        { "expr": "rate(jzrm_agent_traces_timeout_total[5m])", "legendFormat": "Agent 超时", "refId": "B" },
+        { "expr": "rate(jzrm_gateway_requests_error_total[5m])", "legendFormat": "Gateway 失败", "refId": "C" },
+        { "expr": "rate(jzrm_gateway_requests_timeout_total[5m])", "legendFormat": "Gateway 超时", "refId": "D" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps", "color": { "mode": "fixed", "fixedColor": "red" }, "custom": { "drawStyle": "line", "fillOpacity": 15 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } }
+    },
+    {
+      "type": "timeseries",
+      "title": "LLM / 工具 调用速率",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+      "targets": [
+        { "expr": "rate(jzrm_agent_llm_calls_total[5m])", "legendFormat": "llm", "refId": "A" },
+        { "expr": "rate(jzrm_agent_tool_calls_total[5m])", "legendFormat": "tool", "refId": "B" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops", "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } }
+    },
+    {
+      "type": "timeseries",
+      "title": "Token 消耗速率 (tokens/s)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+      "targets": [
+        { "expr": "rate(jzrm_agent_prompt_tokens_total[5m])", "legendFormat": "prompt", "refId": "A" },
+        { "expr": "rate(jzrm_agent_completion_tokens_total[5m])", "legendFormat": "completion", "refId": "B" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } }
+    },
+    {
+      "type": "stat",
+      "title": "本地就绪（即时）",
+      "gridPos": { "h": 6, "w": 4, "x": 20, "y": 0 },
+      "targets": [{ "expr": "jzrm_ready", "instant": true, "legendFormat": "{{job}}", "refId": "A" }],
+      "fieldConfig": { "defaults": { "noValue": "无数据", "mappings": [
+        { "type": "value", "options": { "0": { "text": "未就绪", "color": "red" }, "1": { "text": "就绪", "color": "green" } } }
+      ] }, "overrides": [] },
+      "options": { "colorMode": "background", "graphMode": "none", "reduceOptions": { "calcs": ["last"] } }
+    },
+    {
+      "type": "timeseries",
+      "title": "Gateway 请求速率 (req/s)",
+      "description": "共享逻辑网关域，仅由 Proxy 导出一次；含兼容 Agent /v1 入口。",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 22 },
+      "targets": [{ "expr": "rate(jzrm_gateway_requests_total{service=\"llm-proxy\"}[5m])", "legendFormat": "Gateway", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] }
+    },
+    {
+      "type": "timeseries",
+      "title": "取消速率（不计成功）",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 22 },
+      "targets": [
+        { "expr": "rate(jzrm_agent_traces_cancelled_total[5m])", "legendFormat": "Agent", "refId": "A" },
+        { "expr": "rate(jzrm_gateway_requests_cancelled_total[5m])", "legendFormat": "Gateway", "refId": "B" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] }
+    }
+  ]
+}

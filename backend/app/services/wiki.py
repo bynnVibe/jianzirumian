@@ -312,8 +312,10 @@ class WikiService:
     def recover_queue(self) -> int:
         """服务启动时恢复队列：清理已完成条目、唤醒 worker 处理遗留 pending。
 
-        db._migrate 已把上次进程遗留的 processing 退回 pending。
+        持锁 Agent 的 runtime.recover 已把上次进程遗留的 processing 退回 pending。
         """
+        from app.core.agent_runtime import runtime
+        runtime.require_owner()
         try:
             db.execute(
                 "DELETE FROM wiki_compile_queue WHERE status IN ('done', 'skipped')"

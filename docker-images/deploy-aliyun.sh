@@ -8,7 +8,7 @@
 #   bash scripts/deploy-aliyun.sh upload    # 上传到阿里云服务器
 #   bash scripts/deploy-aliyun.sh all       # 构建 + 导出 + 上传（一键）
 # ============================================
-set -e
+set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PROJECT_NAME="jianzirumian"
@@ -25,6 +25,29 @@ FRONTEND_IMAGE="${PROJECT_NAME}-frontend:latest"
 
 # 导出目录
 EXPORT_DIR="${PROJECT_DIR}/docker-images"
+
+# 基础镜像源覆盖（Dockerfile 默认走 DaoCloud 代理；如该源失效可换源重建）：
+#   REGISTRY=docker.io/library/ bash scripts/deploy-aliyun.sh build
+REGISTRY_BUILD_ARG=""
+if [ -n "${REGISTRY:-}" ]; then
+    REGISTRY_BUILD_ARG="--build-arg REGISTRY=${REGISTRY}"
+fi
+
+# PyPI 源覆盖（后端镜像依赖安装默认走阿里云镜像；境外机器可切官方源）：
+#   PIP_INDEX_URL=https://pypi.org/simple bash scripts/deploy-aliyun.sh build
+PIP_INDEX_BUILD_ARG=""
+if [ -n "${PIP_INDEX_URL:-}" ]; then
+    PIP_INDEX_BUILD_ARG="--build-arg PIP_INDEX_URL=${PIP_INDEX_URL}"
+fi
+
+# 后端镜像瘦身开关（默认开启）：不装 torch / sentence-transformers / LibreOffice，
+# 实测镜像从 2.27GB 降到 574MB（导出 tar.gz 从 ~745MB 降到 ~206MB），
+# 前提：.env 中 RERANKER_PROVIDER 使用远端提供商（如 dashscope），
+# Word 预览自动降级为 mammoth 渲染。
+# 需要本地重排序 + 原始排版 PDF 预览时：
+#   SLIM=0 bash scripts/deploy-aliyun.sh build
+SLIM="${SLIM:-1}"
+SLIM_BUILD_ARG="--build-arg SLIM=${SLIM}"
 
 # 颜色
 GREEN='\033[0;32m'
@@ -59,12 +82,19 @@ cmd_build() {
 
     cd "$PROJECT_DIR"
 
-    # 构建后端镜像
-    info "构建后端镜像..."
+    # 构建后端镜像（SLIM=1 瘦身模式默认开启，导出包体积大幅缩小）
+    if [ "$SLIM" = "1" ]; then
+        info "构建后端镜像（瘦身模式：不含本地重排序 / LibreOffice）..."
+    else
+        info "构建后端镜像（全量模式：含本地重排序 / LibreOffice）..."
+    fi
     docker build \
         -t "$BACKEND_IMAGE" \
         -f Dockerfile.backend \
         --platform linux/amd64 \
+        $REGISTRY_BUILD_ARG \
+        $PIP_INDEX_BUILD_ARG \
+        $SLIM_BUILD_ARG \
         .
     log "后端镜像构建完成: $BACKEND_IMAGE"
 
@@ -74,6 +104,7 @@ cmd_build() {
         -t "$FRONTEND_IMAGE" \
         -f Dockerfile.frontend \
         --platform linux/amd64 \
+        $REGISTRY_BUILD_ARG \
         .
     log "前端镜像构建完成: $FRONTEND_IMAGE"
 
@@ -111,10 +142,9 @@ cmd_save() {
     docker save "$FRONTEND_IMAGE" | gzip > "$EXPORT_DIR/${PROJECT_NAME}-frontend.tar.gz"
     log "已导出: $EXPORT_DIR/${PROJECT_NAME}-frontend.tar.gz ($(du -h "$EXPORT_DIR/${PROJECT_NAME}-frontend.tar.gz" | cut -f1))"
 
-    # 复制部署文件
-    cp "$PROJECT_DIR/docker-compose.yml" "$EXPORT_DIR/docker-compose.yml"
-    cp "$PROJECT_DIR/nginx.conf" "$EXPORT_DIR/nginx.conf"
-    cp "$PROJECT_DIR/backend/.env.example" "$EXPORT_DIR/.env.example"
+    # 只同步受控配置，不读取真实环境文件或删除部署目录。
+    python3 "$PROJECT_DIR/scripts/sync_deploy.py"
+    python3 "$PROJECT_DIR/scripts/sync_deploy.py" --check
 
     echo ""
     log "所有文件已导出到: $EXPORT_DIR/"
@@ -123,7 +153,11 @@ cmd_save() {
 
     info "打包所有文件为单个压缩包..."
     cd "$PROJECT_DIR"
-    tar czf "${PROJECT_NAME}-deploy.tar.gz" \
+    # COPYFILE_DISABLE=1：禁止 macOS bsdtar 写入 AppleDouble/扩展属性，
+    # 避免 Linux 服务器解压时报 "Ignoring unknown extended header keyword `LIBARCHIVE.xattr...'"
+    # --exclude：避免把上一次生成的部署包也打进新包（会导致包体积翻倍膨胀）
+    COPYFILE_DISABLE=1 tar czf "${PROJECT_NAME}-deploy.tar.gz" \
+        --exclude="${PROJECT_NAME}-deploy.tar.gz" \
         -C "$EXPORT_DIR" \
         .
     mv "${PROJECT_NAME}-deploy.tar.gz" "$EXPORT_DIR/"
@@ -177,8 +211,9 @@ cmd_upload() {
     echo ""
     echo "  ssh ${REMOTE_USER}@${REMOTE_HOST}"
     echo "  cd ${REMOTE_DIR}"
+    echo "  # 已有部署先独立备份旧 Compose/env/挂载配置，再解包"
     echo "  tar xzf ${PROJECT_NAME}-deploy.tar.gz"
-    echo "  bash scripts/deploy-aliyun.sh server-load"
+    echo "  bash deploy-aliyun.sh server-load"
     echo ""
 }
 
@@ -212,47 +247,24 @@ cmd_server_load() {
     docker images --format "table {{.Repository}}\t{{.Tag}}\t{{.Size}}" | grep "$PROJECT_NAME"
 }
 
+server_runtime() {
+    local helper
+    helper="$(dirname "$0")/deploy_runtime.py"
+    if [ ! -f "$helper" ]; then
+        err "缺少部署保护程序 deploy_runtime.py，请使用完整部署包"
+        exit 1
+    fi
+    python3 "$helper" "$@"
+}
+
 cmd_server_start() {
-    echo ""
-    info "=========================================="
-    info "  启动服务"
-    info "=========================================="
-    echo ""
-
-    if [ ! -f "docker-compose.yml" ]; then
-        err "未找到 docker-compose.yml，请先解压部署包"
-        exit 1
-    fi
-
-    # 创建必要目录
-    mkdir -p data/uploads data/vector_store data/knowledge
-
-    # 配置 .env
-    if [ ! -f "backend/.env" ]; then
-        mkdir -p backend
-        cp .env.example backend/.env
-        warn "已创建 backend/.env，请编辑配置后重新启动"
-        warn "  vim backend/.env"
-        exit 1
-    fi
-
-    info "启动所有服务..."
-    docker compose up -d
-    log "服务已启动"
-
-    echo ""
-    info "服务状态："
-    docker compose ps
-
-    echo ""
-    info "访问地址：http://$(curl -s ifconfig.me):5173"
-    info "查看日志：docker compose logs -f"
+    server_runtime start "$@"
 }
 
 cmd_server_status() {
     echo ""
     info "服务状态："
-    docker compose ps 2>/dev/null || echo "服务未运行"
+    docker compose --env-file backend/.env ps
 
     echo ""
     info "资源占用："
@@ -260,23 +272,22 @@ cmd_server_status() {
 }
 
 cmd_server_logs() {
-    docker compose logs --tail=50 -f
+    docker compose --env-file backend/.env logs --tail=50 -f
 }
 
 cmd_server_stop() {
-    docker compose stop
+    docker compose --env-file backend/.env stop
     log "服务已停止"
 }
 
 cmd_server_restart() {
-    docker compose restart
+    server_runtime preflight
+    docker compose --env-file backend/.env restart
     log "服务已重启"
 }
 
 cmd_server_update() {
-    # 更新：加载新镜像后重启
-    cmd_server_load
-    cmd_server_start
+    server_runtime update "$@"
 }
 
 # ============ 帮助 ============
@@ -294,13 +305,17 @@ cmd_help() {
     echo ""
     echo "服务器操作（在阿里云 ECS 上执行）："
     echo ""
-    echo "  bash scripts/deploy-aliyun.sh server-load     # 加载 Docker 镜像"
-    echo "  bash scripts/deploy-aliyun.sh server-start    # 启动服务"
-    echo "  bash scripts/deploy-aliyun.sh server-status   # 查看服务状态"
-    echo "  bash scripts/deploy-aliyun.sh server-logs     # 查看实时日志"
-    echo "  bash scripts/deploy-aliyun.sh server-stop     # 停止服务"
-    echo "  bash scripts/deploy-aliyun.sh server-restart  # 重启服务"
-    echo "  bash scripts/deploy-aliyun.sh server-update   # 更新镜像后重启"
+    echo "  bash deploy-aliyun.sh server-load            # 加载 Docker 镜像"
+    echo "  bash deploy-aliyun.sh server-start           # 预检后启动或应用配置"
+    echo "  bash deploy-aliyun.sh server-status          # 查看服务状态"
+    echo "  bash deploy-aliyun.sh server-logs            # 查看实时日志"
+    echo "  bash deploy-aliyun.sh server-stop            # 停止服务"
+    echo "  bash deploy-aliyun.sh server-restart         # 重启，不更新容器环境"
+    echo "  bash deploy-aliyun.sh server-update          # 拒绝旧 backend 拓扑，预检后更新"
+    echo "  bash deploy-aliyun.sh server-preflight       # 只读预检"
+    echo "  bash deploy-aliyun.sh server-migrate-backend --old-compose /备份/docker-compose.yml --old-env /备份/backend.env --bundle /备份/rollback --dry-run"
+    echo "  # 去掉 --dry-run 才执行停写、快照、升级；不能使用已覆盖的旧配置"
+    echo "  bash deploy-aliyun.sh server-rollback --bundle /备份/rollback --confirm-overwrite-new-data"
     echo ""
     echo "首次部署的完整流程："
     echo ""
@@ -309,10 +324,11 @@ cmd_help() {
     echo ""
     echo "  # 2. SSH 登录服务器后"
     echo "  cd /opt/jianziruyang"
-    echo "  tar xzf jianziruyang-deploy.tar.gz"
-    echo "  bash scripts/deploy-aliyun.sh server-load"
-    echo "  vim backend/.env              # 配置环境变量"
-    echo "  bash scripts/deploy-aliyun.sh server-start"
+    echo "  # 已有部署必须先备份旧配置，不能直接覆盖后迁移"
+    echo "  tar xzf jianzirumian-deploy.tar.gz"
+    echo "  bash deploy-aliyun.sh server-load"
+    echo "  # 首次部署手工创建 backend/.env，配置强密码和模型参数"
+    echo "  bash deploy-aliyun.sh server-start"
     echo ""
 }
 
@@ -324,12 +340,15 @@ case "${1:-help}" in
     upload)         cmd_upload ;;
     all)            cmd_all ;;
     server-load)    cmd_server_load ;;
-    server-start)   cmd_server_start ;;
+    server-start)   shift; cmd_server_start "$@" ;;
     server-status)  cmd_server_status ;;
     server-logs)    cmd_server_logs ;;
     server-stop)    cmd_server_stop ;;
     server-restart) cmd_server_restart ;;
-    server-update)  cmd_server_update ;;
+    server-update)  shift; cmd_server_update "$@" ;;
+    server-preflight) shift; server_runtime preflight "$@" ;;
+    server-migrate-backend) shift; server_runtime migrate-backend "$@" ;;
+    server-rollback) shift; server_runtime rollback "$@" ;;
     help|--help|-h) cmd_help ;;
     *)
         err "未知命令: $1"

@@ -2,6 +2,7 @@
 见字如面 - 聊天 API 路由 (SSE 流式)
 """
 import json
+from contextlib import aclosing
 import mimetypes
 import re
 import uuid
@@ -9,13 +10,15 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse
+from app.core.request_budget import ClosingStreamingResponse as StreamingResponse
 
 from app.api.deps import get_current_user, get_optional_user
 from app.config import settings
 from app.core import db
 from app.models.schemas import (
     ChatHistoryResponse,
+    ConfirmChatActionRequest,
     ChatRequest,
     FeedbackRequest,
     MessageResponse,
@@ -23,6 +26,7 @@ from app.models.schemas import (
     SessionList,
 )
 from app.services.chat import chat_service, Message
+from app.services import chat_actions
 from app.services.guest_limiter import guest_limiter
 from app.services.tool_orchestrator import DOC_EXTS, IMAGE_EXTS, detect_kind
 
@@ -101,15 +105,12 @@ async def send_message(
         session_id = session.session_id
 
     async def event_stream():
-        async for event in chat_service.chat_stream(
-            session_id=session_id,
-            query=body.query,
-            use_knowledge=body.use_knowledge,
-            use_search=body.use_search,
-            llm_provider=body.llm_provider,
-            user_id=user_id,
-        ):
-            yield f"{event}\n"
+        async with aclosing(chat_service.chat_stream(
+            session_id=session_id, query=body.query, use_knowledge=body.use_knowledge,
+            use_search=body.use_search, llm_provider=body.llm_provider, user_id=user_id,
+        )) as stream:
+            async for event in stream:
+                yield f"{event}\n"
 
         # 流式响应结束后，游客计数+1
         if is_guest:
@@ -173,17 +174,13 @@ async def send_message_with_files(
         attachments.append(await _save_attachment(f))
 
     async def event_stream():
-        async for event in chat_service.chat_stream(
-            session_id=session_id,
-            query=message,
-            use_knowledge=use_knowledge,
-            use_search=use_search,
-            llm_provider=llm_provider or None,
-            user_id=user_id,
-            attachments=attachments,
-            kb_id=kb_id,
-        ):
-            yield f"{event}\n"
+        async with aclosing(chat_service.chat_stream(
+            session_id=session_id, query=message, use_knowledge=use_knowledge,
+            use_search=use_search, llm_provider=llm_provider or None,
+            user_id=user_id, attachments=attachments, kb_id=kb_id,
+        )) as stream:
+            async for event in stream:
+                yield f"{event}\n"
 
         if is_guest:
             client_ip = request.client.host if request.client else "unknown"
@@ -239,10 +236,12 @@ async def get_chat_history(session_id: str, user: dict = Depends(get_current_use
     feedback_map = {r["message_id"]: {"rating": r["rating"], "comment": r["comment"]}
                     for r in feedback_rows}
 
+    actions = chat_actions.history(session_id, user["id"])
     messages = []
     for m in session.messages:
         d = m.to_dict()
         d["feedback"] = feedback_map.get(m.message_id)
+        d["actions"] = [a for a in actions if a["message_id"] == m.message_id]
         messages.append(d)
 
     return ChatHistoryResponse(
@@ -258,11 +257,31 @@ async def clear_chat_history(session_id: str, user: dict = Depends(get_current_u
     session = chat_service.get_user_session(session_id, user["id"])
     if not session:
         raise HTTPException(status_code=404, detail="会话不存在或无权访问")
+    chat_service.cancel_generation(session_id)
+    chat_actions.invalidate_session(session_id)
     session.messages = []
     db.execute("DELETE FROM chat_messages WHERE session_id = ?", (session_id,))
     db.execute("DELETE FROM chat_session_summaries WHERE session_id = ?", (session_id,))
     chat_service._persist_session(session)
     return {"message": "聊天历史已清空"}
+
+
+@router.get("/actions/{action_id}")
+def get_action(action_id: str, user: dict = Depends(get_current_user)):
+    return chat_actions.get_action(action_id, user["id"])
+
+
+@router.post("/actions/{action_id}/confirm")
+async def confirm_action(action_id: str, body: ConfirmChatActionRequest, user: dict = Depends(get_current_user)):
+    action, claimed = chat_actions.confirm(action_id, user["id"], body.kb_id)
+    if claimed:
+        chat_actions.schedule(action_id, user["id"])
+    return JSONResponse(action, status_code=202 if action["status"] == "running" else 200)
+
+
+@router.post("/actions/{action_id}/cancel")
+def cancel_action(action_id: str, user: dict = Depends(get_current_user)):
+    return chat_actions.cancel(action_id, user["id"])
 
 
 @router.post("/feedback")

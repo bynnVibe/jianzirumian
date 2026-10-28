@@ -102,14 +102,15 @@
       </section>
 
       <!-- ============ 当前运行 ============ -->
-      <section v-if="currentRun" class="card">
+      <section v-if="currentRun" ref="runCard" class="card run-card">
         <div class="card-head">
           <h3 class="card-title">
             当前运行
             <span class="status-pill" :class="runStatusClass(currentRun.status)">{{ runStatusText(currentRun.status) }}</span>
           </h3>
           <span class="card-meta">
-            {{ currentRun.git_ref ? `ref: ${currentRun.git_ref} · ` : '' }}触发: {{ currentRun.trigger }} · {{ formatTime(currentRun.started_at) }}
+            {{ currentRun.git_ref ? `ref: ${currentRun.git_ref} · ` : '' }}触发: {{ currentRun.trigger }} ·
+            发起人: {{ currentRun.created_by_name || currentRun.created_by || '—' }} · {{ formatTime(currentRun.started_at) }}
           </span>
         </div>
 
@@ -148,9 +149,9 @@
         <div v-if="expandedStage" class="log-viewer">
           <div class="log-head">
             <span>{{ stageLabel(expandedStage) }} · 日志</span>
-            <button class="icon-btn" @click="expandedStage = ''">收起</button>
+            <button class="icon-btn" @click="collapseLog">收起</button>
           </div>
-          <pre class="log-body">{{ stageLog(expandedStage) || '（暂无日志输出）' }}</pre>
+          <pre ref="logBox" class="log-body">{{ stageLog(expandedStage) || '（暂无日志输出）' }}</pre>
         </div>
       </section>
 
@@ -199,7 +200,7 @@
                   :title="`${s.label}: ${stageStatusText(s.status)}`"
                 ></span>
               </td>
-              <td>{{ r.created_by || '—' }}</td>
+              <td>{{ r.created_by_name || r.created_by || '—' }}</td>
               <td>{{ formatTime(r.started_at) }}</td>
               <td><span class="link">查看</span></td>
             </tr>
@@ -211,7 +212,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue'
+import { ref, reactive, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import {
   getPipelineStages,
   getPipelineSettings,
@@ -249,6 +250,10 @@ const settingsForm = reactive({
 })
 
 const expandedStage = ref('')
+const logBox = ref(null)
+const runCard = ref(null)
+// 用户手动收起日志后，轮询期间不再自动展开（尊重用户操作）
+const userCollapsed = ref(false)
 
 let pollTimer = null
 
@@ -287,7 +292,52 @@ function stageLog(name) {
 }
 function toggleStage(name) {
   expandedStage.value = expandedStage.value === name ? '' : name
+  if (expandedStage.value) {
+    userCollapsed.value = false
+    scrollLogBottom()
+  }
 }
+function collapseLog() {
+  expandedStage.value = ''
+  userCollapsed.value = true
+}
+function scrollLogBottom() {
+  nextTick(() => {
+    if (logBox.value) logBox.value.scrollTop = logBox.value.scrollHeight
+  })
+}
+// 运行中且用户未手动收起时，自动展开当前执行阶段的日志（构建输出实时可见）
+function autoExpandRunningStage() {
+  const run = currentRun.value
+  if (!run || run.status !== 'running' || userCollapsed.value || expandedStage.value) return
+  const target = run.current_stage || (run.stages || []).find((s) => s.status === 'running')?.name
+  if (target) expandedStage.value = target
+}
+// 非运行中的运行（历史查看）：自动展开首个失败/中止阶段，
+// 都没有则展开最后一个有日志的阶段，保证点「查看」立即看到关键日志
+function autoExpandFailedStage() {
+  const run = currentRun.value
+  if (!run || run.status === 'running' || expandedStage.value) return
+  const stages = run.stages || []
+  const target =
+    stages.find((s) => s.status === 'failed' || s.status === 'aborted') ||
+    [...stages].reverse().find((s) => (s.log || '').trim())
+  if (target) expandedStage.value = target.name
+}
+// 运行详情在页面顶部卡片：选择历史运行后滚动到该卡片，避免"点了没反应"
+function scrollToRunCard() {
+  nextTick(() => {
+    runCard.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  })
+}
+
+// 日志内容随轮询增长时自动滚到底部，保证最新输出始终可见
+watch(
+  () => stageLog(expandedStage.value),
+  () => {
+    if (expandedStage.value) scrollLogBottom()
+  }
+)
 function formatTime(iso) {
   if (!iso) return '—'
   try {
@@ -373,7 +423,11 @@ async function selectRun(runId) {
   try {
     const res = await getPipelineRun(runId)
     currentRun.value = res.data.run
+    userCollapsed.value = false
+    autoExpandRunningStage()
+    autoExpandFailedStage()
     schedulePoll()
+    scrollToRunCard()
   } catch (e) {
     errorMsg.value = e.response?.data?.detail || '加载运行详情失败'
   } finally {
@@ -386,6 +440,7 @@ async function refreshCurrentRun() {
   try {
     const res = await getPipelineRun(currentRun.value.id)
     currentRun.value = res.data.run
+    autoExpandRunningStage()
     // 运行结束后刷新历史列表
     if (res.data.run.status !== 'running') {
       await loadRuns()
@@ -483,6 +538,8 @@ onBeforeUnmount(() => {
   box-shadow: 0 1px 3px rgba(120, 90, 50, 0.04);
 }
 .card-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+/* 历史"查看"滚动定位时避开吸顶标题栏 */
+.run-card { scroll-margin-top: 110px; }
 .card-title { font-size: 15px; font-weight: 700; display: flex; align-items: center; gap: 10px; }
 .card-meta { font-size: 12px; color: var(--color-text-secondary); }
 

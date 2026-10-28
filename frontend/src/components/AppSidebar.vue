@@ -69,76 +69,18 @@
         知识百科
       </router-link>
 
-      <!-- 系统管理（仅管理员可见：系统设置 + 用户管理） -->
+      <!-- 系统管理（管理员/运维可见）：进入独立管理控制台，收纳系统设置/用户管理/CI-CD/模型网关/回归评测/可观测性 -->
       <router-link
-        v-if="auth.isAdmin"
-        to="/management"
+        v-if="auth.canOps"
+        to="/admin"
         class="btn-upload"
-        :class="{ active: isManagementPage }"
+        :class="{ active: isAdminConsole }"
         @click="handleNavClick"
       >
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="btn-icon">
           <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
         </svg>
         系统管理
-      </router-link>
-
-      <!-- 回归评测（管理员/运维可见：评测集 / 一键回归 / 运行对比） -->
-      <router-link
-        v-if="auth.canOps"
-        to="/eval"
-        class="btn-upload"
-        :class="{ active: isEvalPage }"
-        @click="handleNavClick"
-      >
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="btn-icon">
-          <path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
-        </svg>
-        回归评测
-      </router-link>
-
-      <!-- Agent 可观测性（管理员/运维可见：日志/指标/全链路追踪） -->
-      <router-link
-        v-if="auth.canOps"
-        to="/observability"
-        class="btn-upload"
-        :class="{ active: isObservabilityPage }"
-        @click="handleNavClick"
-      >
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="btn-icon">
-          <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
-        </svg>
-        Agent 可观测性
-      </router-link>
-
-      <!-- CI/CD 流水线（管理员/运维可见：评估驱动部署 EDD） -->
-      <router-link
-        v-if="auth.canOps"
-        to="/pipeline"
-        class="btn-upload"
-        :class="{ active: isPipelinePage }"
-        @click="handleNavClick"
-      >
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="btn-icon">
-          <circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="6" r="2.5"/><circle cx="12" cy="18" r="2.5"/>
-          <path d="M6 8.5v2a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2v-2"/><path d="M12 12.5v3"/>
-        </svg>
-        CI/CD 流水线
-      </router-link>
-
-      <!-- 模型网关（管理员/运维可见：密钥配额 / 负载均衡 / 日志审计 / 安全审计中心） -->
-      <router-link
-        v-if="auth.canOps"
-        to="/gateway"
-        class="btn-upload"
-        :class="{ active: isGatewayPage }"
-        @click="handleNavClick"
-      >
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="btn-icon">
-          <rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>
-          <path d="M10 6.5h4a2 2 0 0 1 2 2V14"/><path d="M14 17.5h-4a2 2 0 0 1-2-2V10"/>
-        </svg>
-        模型网关
       </router-link>
     </div>
 
@@ -507,15 +449,11 @@ function toggleGroup(key) {
 }
 
 const isUploadPage = computed(() => route.path === '/upload')
-const isManagementPage = computed(() => route.path.startsWith('/management'))
 const isKnowledgePage = computed(() => route.path === '/knowledge')
 const isBookmarksPage = computed(() => route.path === '/bookmarks')
 const isWikiPage = computed(() => route.path === '/wiki')
-const isAdminUsersPage = computed(() => route.path === '/admin/users')
-const isEvalPage = computed(() => route.path === '/eval')
-const isObservabilityPage = computed(() => route.path === '/observability')
-const isPipelinePage = computed(() => route.path === '/pipeline')
-const isGatewayPage = computed(() => route.path === '/gateway')
+// 系统管理控制台（/admin/*）入口高亮
+const isAdminConsole = computed(() => route.path.startsWith('/admin'))
 
 onMounted(async () => {
   // 仅已登录用户加载会话列表（游客/未登录不发起请求，避免 401 触发跳转）

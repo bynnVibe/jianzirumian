@@ -42,6 +42,12 @@ class ChatRequest(BaseModel):
     llm_provider: Optional[str] = None
 
 
+class ConfirmChatActionRequest(BaseModel):
+    """只接收批准的目标库；附件、工具及所属用户全部取服务端记录。"""
+    model_config = {"extra": "forbid"}
+    kb_id: Optional[str] = Field(default=None, max_length=100)
+
+
 class SourceItem(BaseModel):
     """来源信息"""
     index: int
@@ -76,6 +82,8 @@ class MessageResponse(BaseModel):
     search_results: List[SearchResultItem] = []
     use_knowledge: bool = False
     use_search: bool = False
+    actions: List[dict] = Field(default_factory=list)
+    interrupted: bool = False
     feedback: Optional[dict] = None  # {rating, comment} 当前用户的反馈
     attachments: List[dict] = []  # 用户消息附件元数据 [{file_id, filename, kind}]
 

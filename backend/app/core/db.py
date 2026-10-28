@@ -5,7 +5,9 @@
 import logging
 import sqlite3
 import threading
+import time
 from datetime import datetime
+from contextlib import contextmanager
 from pathlib import Path
 from typing import List, Optional
 
@@ -25,11 +27,28 @@ def get_conn() -> sqlite3.Connection:
     with _lock:
         if _conn is None:
             DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-            _conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
-            _conn.row_factory = sqlite3.Row
-            _conn.execute("PRAGMA journal_mode=WAL")
-            _conn.execute("PRAGMA foreign_keys=ON")
-            init_db(_conn)
+            conn = sqlite3.connect(str(DB_PATH), check_same_thread=False, timeout=30)
+            conn.row_factory = sqlite3.Row
+            try:
+                conn.execute("PRAGMA busy_timeout=30000")
+                deadline = time.monotonic() + 30
+                while True:
+                    try:
+                        conn.execute("PRAGMA journal_mode=WAL")
+                        break
+                    except sqlite3.OperationalError as exc:
+                        # 模式切换的锁升级可能直接返回 BUSY，不经过 busy_timeout。
+                        code = getattr(exc, "sqlite_errorcode", 0) & 0xff
+                        if code not in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED) or time.monotonic() >= deadline:
+                            raise
+                        time.sleep(min(0.05, max(0, deadline - time.monotonic())))
+                conn.execute("PRAGMA foreign_keys=ON")
+                init_db(conn)
+            except BaseException:
+                conn.rollback()
+                conn.close()
+                raise
+            _conn = conn
         return _conn
 
 
@@ -37,6 +56,34 @@ def init_db(conn: sqlite3.Connection):
     """建表（幂等）"""
     conn.executescript(
         """
+        BEGIN IMMEDIATE;
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+            version TEXT PRIMARY KEY,
+            applied_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS chat_pending_actions (
+            id TEXT PRIMARY KEY,
+            owner_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            message_id TEXT NOT NULL,
+            file_id TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            file_hash TEXT NOT NULL,
+            tool_name TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            kb_id TEXT NOT NULL DEFAULT '',
+            visibility TEXT NOT NULL DEFAULT 'private',
+            status TEXT NOT NULL DEFAULT 'pending',
+            result TEXT NOT NULL DEFAULT '{}',
+            error TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            UNIQUE(session_id, message_id, file_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_chat_actions_session
+            ON chat_pending_actions(session_id, message_id);
         CREATE TABLE IF NOT EXISTS users (
             id            TEXT PRIMARY KEY,
             username      TEXT UNIQUE NOT NULL,
@@ -377,6 +424,7 @@ def init_db(conn: sqlite3.Connection):
             edd_threshold REAL NOT NULL DEFAULT 0.85,
             summary       TEXT NOT NULL DEFAULT '{}',
             created_by    TEXT NOT NULL DEFAULT '',
+            created_by_name TEXT NOT NULL DEFAULT '',
             started_at    TEXT NOT NULL,
             finished_at   TEXT
         );
@@ -510,7 +558,18 @@ def init_db(conn: sqlite3.Connection):
         );
         """
     )
-    _migrate(conn)
+    version = 'production_ab_v1'
+    if not conn.execute("SELECT 1 FROM schema_migrations WHERE version=?", (version,)).fetchone():
+        _migrate(conn)
+        from app.core.metric_counters import initialize
+        initialize(conn)
+        conn.execute("INSERT INTO schema_migrations(version,applied_at) VALUES (?,?)",
+                     (version, datetime.now().isoformat()))
+    if not conn.execute("SELECT 1 FROM schema_migrations WHERE version='production_ab_v2'").fetchone():
+        columns = {r[1] for r in conn.execute("PRAGMA table_info(chat_messages)")}
+        if "interrupted" not in columns:
+            conn.execute("ALTER TABLE chat_messages ADD COLUMN interrupted INTEGER NOT NULL DEFAULT 0")
+        conn.execute("INSERT INTO schema_migrations VALUES ('production_ab_v2',?)", (datetime.now().isoformat(),))
     conn.commit()
 
 
@@ -540,6 +599,14 @@ def _migrate(conn: sqlite3.Connection):
         )
         logger.info("upload_records 补加列: title")
 
+    # CI/CD 流水线：运行记录补加发起人用户名（历史列表显性展示，存量数据按 created_by 回查）
+    run_cols = {r[1] for r in conn.execute("PRAGMA table_info(pipeline_runs)")}
+    if "created_by_name" not in run_cols:
+        conn.execute(
+            "ALTER TABLE pipeline_runs ADD COLUMN created_by_name TEXT NOT NULL DEFAULT ''"
+        )
+        logger.info("pipeline_runs 补加列: created_by_name")
+
     # llm-wiki：wiki_pages 补加 source_hash（增量编译）与 analysis（两步思维链分析结果）
     wiki_cols = {r[1] for r in conn.execute("PRAGMA table_info(wiki_pages)")}
     if "source_hash" not in wiki_cols:
@@ -552,19 +619,6 @@ def _migrate(conn: sqlite3.Connection):
             "ALTER TABLE wiki_pages ADD COLUMN analysis TEXT NOT NULL DEFAULT '{}'"
         )
         logger.info("wiki_pages 补加列: analysis")
-
-    # llm-wiki：服务重启时把上次进程遗留的 processing 编译任务退回 pending，
-    # 交由启动恢复流程重新入队处理（后台 worker 随进程重启已丢失）
-    try:
-        cur = conn.execute(
-            "UPDATE wiki_compile_queue SET status = 'pending', updated_at = ?"
-            " WHERE status = 'processing'",
-            (datetime.now().isoformat(),),
-        )
-        if cur.rowcount:
-            logger.info("wiki_compile_queue 遗留 processing 任务退回 pending: %d 条", cur.rowcount)
-    except sqlite3.OperationalError:
-        pass
 
     # 回归评测 Ragas 化：eval_results 补加四项指标列与判定明细列（幂等）
     eval_cols = {r[1] for r in conn.execute("PRAGMA table_info(eval_results)")}
@@ -579,38 +633,18 @@ def _migrate(conn: sqlite3.Connection):
             conn.execute(f"ALTER TABLE eval_results ADD COLUMN {col} {ddl}")
             logger.info("eval_results 补加列: %s", col)
 
-    # 回归评测：服务启动时把上次进程遗留的 running 运行标记为 interrupted，
-    # 避免历史列表出现永远"执行中"的僵尸运行（后台任务随进程重启已丢失）
-    try:
-        cur = conn.execute(
-            "UPDATE eval_runs SET status = 'interrupted', finished_at = COALESCE(finished_at, ?)"
-            " WHERE status = 'running'",
-            (datetime.now().isoformat(),),
-        )
-        if cur.rowcount:
-            logger.info("eval_runs 遗留 running 运行标记为 interrupted: %d 条", cur.rowcount)
-    except sqlite3.OperationalError:
-        # 表尚未创建（首次建表在 executescript 中已完成，此处仅防御）
-        pass
-
-    # CI/CD 流水线：确保默认配置行存在（EDD 阈值 0.85），并把遗留 running 运行标记为 aborted
+    # 运行状态恢复只允许持有独占锁的 Agent 在启动时执行。
+    # CI/CD 流水线：仅初始化默认配置行。
     try:
         row = conn.execute("SELECT id FROM pipeline_settings WHERE id = 'default'").fetchone()
         if not row:
             conn.execute(
-                "INSERT INTO pipeline_settings (id, edd_threshold, edd_dataset_id, run_unit_test,"
+                "INSERT OR IGNORE INTO pipeline_settings (id, edd_threshold, edd_dataset_id, run_unit_test,"
                 " run_build_image, build_cmd, canary_cmd, full_cmd, updated_at)"
                 " VALUES ('default', 0.85, '', 1, 0, '', '', '', ?)",
                 (datetime.now().isoformat(),),
             )
             logger.info("pipeline_settings 初始化默认配置行")
-        cur = conn.execute(
-            "UPDATE pipeline_runs SET status = 'aborted', finished_at = COALESCE(finished_at, ?)"
-            " WHERE status = 'running'",
-            (datetime.now().isoformat(),),
-        )
-        if cur.rowcount:
-            logger.info("pipeline_runs 遗留 running 运行标记为 aborted: %d 条", cur.rowcount)
     except sqlite3.OperationalError:
         pass
 
@@ -619,7 +653,7 @@ def _migrate(conn: sqlite3.Connection):
         row = conn.execute("SELECT id FROM gateway_settings WHERE id = 'default'").fetchone()
         if not row:
             conn.execute(
-                "INSERT INTO gateway_settings (id, audit_mode, unicode_detection, tool_cmd_detection,"
+                "INSERT OR IGNORE INTO gateway_settings (id, audit_mode, unicode_detection, tool_cmd_detection,"
                 " outbound_detection, retry_count, disabled_rules, blacklist, whitelist,"
                 " log_retention_days, updated_at)"
                 " VALUES ('default', 'audit', 1, 1, 1, 2, '[]', '[]', '[]', 30, ?)",
@@ -628,6 +662,20 @@ def _migrate(conn: sqlite3.Connection):
             logger.info("gateway_settings 初始化默认配置行")
     except sqlite3.OperationalError:
         pass
+
+
+@contextmanager
+def transaction():
+    """跨进程串行写事务；事务内仅使用返回连接，避免再次取得全局锁。"""
+    conn = get_conn()
+    with _lock:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield conn
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
 
 
 def query(sql: str, params: tuple = ()) -> List[dict]:

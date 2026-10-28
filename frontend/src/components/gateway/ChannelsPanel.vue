@@ -28,8 +28,8 @@
             <span v-if="!c.enabled" class="disabled-pill">已停用</span>
           </div>
           <div class="ch-actions">
-            <button class="btn btn-ghost sm" :disabled="testing === c.id" @click="onTest(c)">
-              {{ testing === c.id ? '测试中…' : '连通测试' }}
+            <button class="btn btn-ghost sm" title="由独立 Proxy 请求真实模型，可能产生上游费用" :disabled="testing === c.id" @click="onTest(c)">
+              {{ testing === c.id ? '测试中…' : 'Proxy 连通测试' }}
             </button>
             <button v-if="c.health !== 'healthy'" class="btn btn-ghost sm" @click="onResetHealth(c)">重置健康</button>
             <button class="btn btn-ghost sm" @click="openEdit(c)">编辑</button>

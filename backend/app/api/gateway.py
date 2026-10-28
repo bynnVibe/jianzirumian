@@ -24,7 +24,8 @@ from app.services.gateway import keys as key_svc
 from app.services.gateway import logs as log_svc
 from app.services.gateway import security
 from app.services.gateway import settings as settings_svc
-from app.services.gateway import upstream
+from app.config import settings as app_settings
+from urllib.parse import quote
 
 logger = logging.getLogger("jianziruyang.gateway.api")
 
@@ -171,32 +172,24 @@ async def reset_channel_health(channel_id: str, _ops: dict = Depends(require_ops
 
 @router.post("/channels/{channel_id}/test")
 async def test_channel(channel_id: str, _ops: dict = Depends(require_ops)):
-    """向渠道发一条最小补全请求，验证连通性与协议配置（不计入网关日志/配额）。"""
-    row = ch_svc.get_channel(channel_id, with_secret=True)
-    if not row:
-        raise HTTPException(status_code=404, detail="渠道不存在")
-    models = row.get("models") or []
-    mapping = row.get("model_mapping") or {}
-    model = (mapping and next(iter(mapping.keys()))) or (models[0] if models else "gpt-3.5-turbo")
-    mapped = ch_svc.map_model(row, model)
-    url = ch_svc.build_upstream_url(row)
-    body = {"model": model, "messages": [{"role": "user", "content": "ping"}],
-            "stream": False, "max_tokens": 5}
+    """通过独立 Proxy 执行最小模型请求；手动诊断可能产生上游费用。"""
+    if not ch_svc.get_channel(channel_id):
+        raise HTTPException(404, "渠道不存在")
+    token = app_settings.PROXY_DIAGNOSTIC_TOKEN
+    if len(token) < 32:
+        raise HTTPException(503, "内部诊断凭据未配置（至少32字符），未执行任何渠道探测")
+    url = app_settings.LLM_PROXY_URL.rstrip("/") + "/internal/diagnostics/channels/" + quote(channel_id, safe="")
     try:
-        headers, payload = upstream.build_request(row, body, mapped, stream=False)
-        async with httpx.AsyncClient(timeout=_TEST_TIMEOUT) as client:
-            resp = await client.post(url, headers=headers, json=payload)
-        ok = resp.status_code < 400
-        if ok:
-            ch_svc.mark_success(channel_id)
-        else:
-            ch_svc.mark_failure(channel_id, f"测试 HTTP {resp.status_code}")
-        return {"success": ok, "status_code": resp.status_code, "url": url,
-                "model": mapped, "detail": resp.text[:300]}
-    except Exception as e:
-        ch_svc.mark_failure(channel_id, f"测试失败: {e}")
-        return {"success": False, "status_code": 0, "url": url, "model": mapped,
-                "detail": str(e)[:300]}
+        async with httpx.AsyncClient(timeout=35, follow_redirects=False) as client:
+            resp = await client.post(url, headers={"X-Diagnostic-Token": token})
+        if resp.status_code != 200:
+            raise HTTPException(502, f"独立 Proxy 诊断不可用（HTTP {resp.status_code}）")
+        result = resp.json()
+        if result.get("executor") != "llm-proxy":
+            raise HTTPException(502, "Proxy 诊断返回无效的执行来源")
+        return result
+    except (httpx.HTTPError, ValueError):
+        raise HTTPException(502, "无法连接独立 Proxy 诊断服务；没有回退到 Agent 直连")
 
 
 # ---------------------------------------------------------------------------

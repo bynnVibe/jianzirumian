@@ -14,6 +14,8 @@ class DocumentImportTool(BaseTool):
     description = "解析 Word/PDF 文档内容并存入知识库"
 
     async def run(self, ctx: ToolContext, **kwargs) -> ToolResult:
+        from app.services.chat_actions import validate_execution
+        validate_execution(ctx)
         doc_type = ctx.kind
         if doc_type not in ("word", "pdf"):
             return ToolResult(
@@ -28,6 +30,7 @@ class DocumentImportTool(BaseTool):
                 visibility=ctx.visibility,
                 owner_id=ctx.user_id,
                 kb_id=ctx.kb_id,
+                write_guard=lambda: validate_execution(ctx),
             )
         except Exception as e:
             return ToolResult(

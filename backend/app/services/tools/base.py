@@ -22,6 +22,7 @@ class ToolContext:
     ocr_provider: Optional[str] = None
     session_id: str = ""
     message_id: str = ""
+    action_id: str = ""
 
 
 @dataclass

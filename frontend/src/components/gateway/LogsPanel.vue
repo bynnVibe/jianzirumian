@@ -19,6 +19,8 @@
         <option value="ok">成功</option>
         <option value="error">失败</option>
         <option value="blocked">阻断</option>
+        <option value="cancelled">已取消</option>
+        <option value="timeout">超时</option>
       </select>
       <select v-model="filters.risk_level" class="field-input">
         <option value="">全部风险</option>
@@ -160,7 +162,7 @@ const filters = reactive({ keyword: '', status: '', risk_level: '', model: '', k
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / PAGE_SIZE)))
 
 const RISK_LABELS = { none: '无风险', low: '低', medium: '中', high: '高', critical: '严重' }
-const STATUS_LABELS = { ok: '成功', error: '失败', blocked: '阻断' }
+const STATUS_LABELS = { ok: '成功', error: '失败', blocked: '阻断', cancelled: '已取消', timeout: '超时' }
 const AUDIT_LABELS = { warn: '警告', mask: '已脱敏', block: '已阻断', '': '审计' }
 const SEV_LABELS = { low: '低危', medium: '中危', high: '高危', critical: '严重' }
 function riskLabel(l) { return RISK_LABELS[l] || l }
@@ -265,6 +267,8 @@ onMounted(async () => { await Promise.all([loadOptions(), load()]) })
 .st-ok { background: #e4f4e8; color: #3d8b52; }
 .st-error { background: #fbe4e3; color: #c0392b; }
 .st-blocked { background: #f3e6f7; color: #8e44ad; }
+.st-cancelled { background: #edf0f2; color: #637080; }
+.st-timeout { background: #fff1dc; color: #986513; }
 .log-code { color: var(--color-text-secondary); font-size: 11.5px; min-width: 26px; }
 .log-key { font-weight: 600; }
 .log-model { color: var(--color-text-secondary); font-size: 11.5px; }

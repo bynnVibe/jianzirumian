@@ -14,6 +14,7 @@ from openai import AsyncOpenAI
 
 from app.config import settings
 from app.core import observability as agent_obs
+from app.core.request_budget import close_resources
 from app.services.config_manager import effective_provider_config, runtime_config
 
 logger = logging.getLogger("jianziruyang.llm")
@@ -108,6 +109,7 @@ class OllamaLLM(BaseLLM):
 
         client = _get_ollama_client()
         if stream:
+            finished = False
             async with client.stream("POST", url, json=payload) as resp:
                 resp.raise_for_status()
                 async for line in resp.aiter_lines():
@@ -115,9 +117,12 @@ class OllamaLLM(BaseLLM):
                         continue
                     try:
                         chunk = json.loads(line)
+                        if chunk.get("error"):
+                            raise RuntimeError(str(chunk["error"]))
                         if content := chunk.get("message", {}).get("content", ""):
                             yield content
                         if chunk.get("done"):
+                            finished = True
                             # 可观测性：Ollama 结束块携带真实 token 用量
                             agent_obs.note_usage(
                                 chunk.get("prompt_eval_count"), chunk.get("eval_count")
@@ -125,6 +130,8 @@ class OllamaLLM(BaseLLM):
                             break
                     except json.JSONDecodeError:
                         continue
+            if not finished:
+                raise RuntimeError("Ollama 流缺少正常结束信号")
         else:
             resp = await client.post(url, json=payload)
             resp.raise_for_status()
@@ -149,6 +156,9 @@ class OpenAICompatibleLLM(BaseLLM):
         client = _get_openai_client(self.base_url, self.api_key, self.model)
 
         if stream:
+            yielded_any = False
+            finished = False
+            response = None
             # 先尝试非流式作为保底方案
             try:
                 response = await client.chat.completions.create(
@@ -158,8 +168,11 @@ class OpenAICompatibleLLM(BaseLLM):
                 )
                 yielded_any = False
                 async for chunk in response:
+                    _report_openai_usage(chunk)
                     if not chunk.choices:
                         continue
+                    if chunk.choices[0].finish_reason:
+                        finished = True
                     delta = chunk.choices[0].delta
                     # DeepSeek 模型将部分内容放在 reasoning_content
                     # （思考过程），需要同时检查 reasoning_content
@@ -170,6 +183,8 @@ class OpenAICompatibleLLM(BaseLLM):
                         yielded_any = True
                         yield content
 
+                if not finished:
+                    raise RuntimeError("LLM 流缺少正常结束信号")
                 # 流式未返回任何内容 → 降级为非流式重试
                 if not yielded_any:
                     logger.warning("LLM 流式返回为空，降级为非流式重试")
@@ -191,6 +206,8 @@ class OpenAICompatibleLLM(BaseLLM):
 
             except Exception as e:
                 _log_llm_failure("stream", e)
+                if yielded_any:
+                    raise
                 # 异常时也降级为非流式
                 try:
                     response2 = await client.chat.completions.create(
@@ -210,6 +227,8 @@ class OpenAICompatibleLLM(BaseLLM):
                 except Exception as e2:
                     _log_llm_failure("非流式降级", e2)
                     raise
+            finally:
+                await close_resources(getattr(response, "response", None))
         else:
             response = await client.chat.completions.create(
                 model=self.model,
@@ -228,6 +247,13 @@ class LLMFactory:
         """按提供商类型与生效参数构造 LLM 实例。"""
         if provider == "ollama":
             return OllamaLLM(base_url=cfg.get("base_url"), model=cfg.get("model"))
+        elif provider == "gateway":
+            # 经层3 LLM Proxy（OpenAI 兼容 /v1）出网：多模型路由/Key轮换/缓存/降级/成本统计
+            return OpenAICompatibleLLM(
+                base_url=cfg.get("base_url"),
+                api_key=cfg.get("api_key"),
+                model=cfg.get("model"),
+            )
         elif provider in ("openai", "custom"):
             return OpenAICompatibleLLM(
                 base_url=cfg.get("base_url"),
@@ -255,7 +281,7 @@ class LLMFactory:
         if not override.get("enabled"):
             return LLMFactory.create()
         provider = (override.get("provider") or "").strip()
-        if provider not in ("ollama", "openai", "custom"):
+        if provider not in ("ollama", "openai", "custom", "gateway"):
             return LLMFactory.create()
         cfg = effective_provider_config("llm", provider)
         for k in ("base_url", "api_key", "model"):

@@ -150,6 +150,9 @@
               <option value="">全部状态</option>
               <option value="ok">成功</option>
               <option value="error">失败</option>
+              <option value="cancelled">已取消</option>
+              <option value="timeout">超时</option>
+              <option value="interrupted">重启中断</option>
               <option value="running">进行中</option>
             </select>
           </div>
@@ -344,7 +347,7 @@ function formatTime(iso) {
 }
 
 function statusText(status) {
-  return { ok: '成功', error: '失败', running: '进行中' }[status] || status
+  return { ok: '成功', error: '失败', running: '进行中', cancelled: '已取消', timeout: '超时', interrupted: '重启中断' }[status] || status
 }
 
 function barHeight(count) {
@@ -630,6 +633,8 @@ function barHeight(count) {
   background: #9e9e9e;
 }
 
+.status-dot.cancelled, .status-dot.interrupted { background: #637080; }
+.status-dot.timeout { background: #c28725; }
 .status-dot.ok {
   background: #43a047;
 }

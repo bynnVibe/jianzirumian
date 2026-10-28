@@ -2,13 +2,14 @@
 见字如面 - 模型网关代理主流程（OpenAI 兼容）
 
 一次调用的完整链路（每步都记入可视化 trace_steps，便于问题排查与运维）：
-    密钥鉴权 → 模型授权/配额扣减 → 安全审计（脱敏/阻断）→ 渠道选路（优先级+权重）
-    → 上游调用（失败自动切换其他渠道）→ Token 计量 → 日志入库 → 响应下游
+    密钥鉴权 → 模型授权 → 安全审计（脱敏/阻断）→ 渠道选路（优先级+权重）
+    → 原子请求认领 → 上游调用（首块前可切换渠道）→ Token 计量 → 日志入库 → 响应下游
 
 对外契约统一为 OpenAI 兼容：POST /v1/chat/completions（支持 stream）。
 所有终端性失败（鉴权失败/被阻断/无可用渠道）在 prepare 阶段写日志并抛 GatewayError，
 由 API 层转换为对应 HTTP 状态码；上游失败在 failover 后仍无渠道可用时抛 502。
 """
+import asyncio
 import json
 import logging
 import time
@@ -18,6 +19,8 @@ from typing import AsyncGenerator, List, Optional
 
 import httpx
 
+from app.config import settings as app_settings
+from app.core.request_budget import remaining, iterate, close_resources
 from app.core import observability as agent_obs
 from app.services.gateway import channels as ch_svc
 from app.services.gateway import keys as key_svc
@@ -72,6 +75,8 @@ class Ctx:
         self.log_id = str(uuid.uuid4())
         self.created_at = datetime.now().isoformat()
         self.t_start = time.monotonic()
+        self.deadline = self.t_start + max(0.01, app_settings.PROXY_REQUEST_TIMEOUT)
+        self.finalized = False
         self.tracer = Tracer()
         self.settings: dict = {}
         self.key_row: dict = {}
@@ -107,7 +112,7 @@ def _latency(ctx: Ctx) -> int:
 
 
 # ---------------------------------------------------------------------------
-# prepare：鉴权 → 配额 → 安全审计 → 选路（同步；终端失败写日志并抛错）
+# prepare：鉴权/模型授权 → 安全审计 → 选路 → 原子认领（同步；失败写日志并抛错）
 # ---------------------------------------------------------------------------
 
 def prepare(body: dict, raw_key: str, client_ip: str = "") -> Ctx:
@@ -132,12 +137,12 @@ def prepare(body: dict, raw_key: str, client_ip: str = "") -> Ctx:
         ctx.tracer.add("auth", "密钥鉴权", "ok", f"密钥「{base['key_name']}」校验通过")
     except key_svc.KeyRejected as e:
         ctx.tracer.add("auth", "密钥鉴权", "error", e.message)
-        log_svc.write_log({**base, "status": "error", "status_code": 401,
+        log_svc.write_log({**base, "status": "error", "status_code": e.status_code,
                            "latency_ms": _latency(ctx), "trace_steps": ctx.tracer.dump(),
                            "error": e.message, "risk_level": "none"})
-        raise GatewayError(401, e.message, e.code)
+        raise GatewayError(e.status_code, e.message, e.code)
 
-    # 2. 模型授权 + 配额扣减
+    # 2. 模型授权（此时尚不扣减请求次数）
     if not key_svc.check_model_allowed(ctx.key_row, ctx.model_req):
         msg = f"该密钥无权访问模型「{ctx.model_req}」"
         ctx.tracer.add("quota", "模型授权", "error", msg)
@@ -145,11 +150,6 @@ def prepare(body: dict, raw_key: str, client_ip: str = "") -> Ctx:
                            "latency_ms": _latency(ctx), "trace_steps": ctx.tracer.dump(),
                            "error": msg, "audit_action": "block"})
         raise GatewayError(403, msg, "model_not_allowed")
-    key_svc.consume_request(ctx.key_row["id"])
-    quota_txt = f"第 {int(ctx.key_row.get('request_count') or 0) + 1} 次调用"
-    if int(ctx.key_row.get("request_quota") or 0):
-        quota_txt += f" / 配额 {ctx.key_row['request_quota']}"
-    ctx.tracer.add("quota", "配额扣减", "ok", quota_txt)
 
     # 3. 安全审计（脱敏 / 阻断）
     mode = ctx.settings.get("audit_mode", "audit")
@@ -190,6 +190,17 @@ def prepare(body: dict, raw_key: str, client_ip: str = "") -> Ctx:
     ctx.tracer.add("route", "渠道选路", "ok",
                    f"{len(ctx.candidates)} 个候选：{health_note}")
     ctx._base = base  # 供 finalize 复用
+    try:
+        remaining(ctx.deadline)
+        ctx.key_row = key_svc.consume_request(ctx.key_row["id"], ctx.model_req)
+    except key_svc.KeyRejected as e:
+        ctx.tracer.add("quota", "原子配额认领", "error", e.message)
+        _finalize(ctx, status="error", status_code=e.status_code, error=e.message)
+        raise GatewayError(e.status_code, e.message, e.code) from e
+    except TimeoutError as e:
+        _finalize(ctx, status="timeout", status_code=504, error=str(e))
+        raise GatewayError(504, str(e), "request_timeout") from e
+    ctx.tracer.add("quota", "原子配额认领", "ok", f"已认领第 {ctx.key_row['request_count']} 次请求")
     return ctx
 
 
@@ -201,9 +212,13 @@ def _finalize(ctx: Ctx, *, status: str, status_code: int, prompt_tokens: int = 0
               completion_tokens: int = 0, response_preview: str = "",
               tool_calls: Optional[list] = None, error: str = "") -> None:
     """组装并写入最终日志，扣减密钥 Token 用量。"""
+    if ctx.finalized:
+        return
+    ctx.finalized = True
+    if not (prompt_tokens or completion_tokens) and response_preview:
+        completion_tokens = agent_obs.estimate_tokens(response_preview)
+        prompt_tokens = agent_obs.estimate_tokens(json.dumps(ctx.forward_body.get("messages") or [], ensure_ascii=False))
     total = int(prompt_tokens or 0) + int(completion_tokens or 0)
-    if not total and response_preview:
-        total = agent_obs.estimate_tokens(response_preview)
     try:
         key_svc.consume_tokens(ctx.key_row.get("id", ""), total)
     except Exception:
@@ -231,14 +246,27 @@ def _finalize(ctx: Ctx, *, status: str, status_code: int, prompt_tokens: int = 0
 # ---------------------------------------------------------------------------
 
 async def json_response(ctx: Ctx) -> tuple[int, dict]:
+    try:
+        async with asyncio.timeout(remaining(ctx.deadline)):
+            return await _json_response(ctx)
+    except (TimeoutError, httpx.TimeoutException) as e:
+        _finalize(ctx, status="timeout", status_code=504, error="请求总预算耗尽")
+        raise GatewayError(504, "请求总预算耗尽", "request_timeout") from e
+    except asyncio.CancelledError:
+        _finalize(ctx, status="cancelled", status_code=499, error="客户端取消")
+        raise
+
+
+async def _json_response(ctx: Ctx) -> tuple[int, dict]:
     last_err = ""
     for idx, ch in enumerate(ctx.candidates[:_max_attempts(ctx)]):
         ctx.retries = idx
         mapped = ch_svc.map_model(ch, ctx.model_req)
         url = ch_svc.build_upstream_url(ch)
+        ctx.channel, ctx.model_mapped, ctx.upstream_url = ch, mapped, url
         try:
             headers, payload = upstream.build_request(ch, ctx.forward_body, mapped, stream=False)
-            async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            async with httpx.AsyncClient(timeout=_network_timeout(ctx)) as client:
                 resp = await client.post(url, headers=headers, json=payload)
             sc = resp.status_code
             # 需要故障切换的状态：连接类/鉴权/限流/5xx；其余 4xx 直接返回不重试
@@ -292,81 +320,77 @@ def _extract_preview(normalized: dict) -> tuple[str, list]:
 # 流式响应
 # ---------------------------------------------------------------------------
 
-async def stream_response(ctx: Ctx) -> AsyncGenerator[str, None]:
-    """流式代理：连接阶段支持故障切换，一旦开始产出内容即锁定该渠道。
+def _network_timeout(ctx):
+    budget = remaining(ctx.deadline)
+    return httpx.Timeout(budget, connect=min(10, budget), pool=min(10, budget))
 
-    结束时（finally）统一写日志，保证异常中断也有链路留存。
-    """
+
+async def stream_response(ctx: Ctx) -> AsyncGenerator[str, None]:
+    """收到协议终止信号才成功；产出首块后不切换，所有重试共用预算。"""
     acc_text: List[str] = []
     usage = {"pt": 0, "ct": 0}
     tool_names: List[str] = []
     final_status, final_code, final_err = "error", 502, "所有渠道均调用失败"
     committed = False
-
     try:
         for idx, ch in enumerate(ctx.candidates[:_max_attempts(ctx)]):
             ctx.retries = idx
             mapped = ch_svc.map_model(ch, ctx.model_req)
             url = ch_svc.build_upstream_url(ch)
-            headers, payload = upstream.build_request(ch, ctx.forward_body, mapped, stream=True)
-            client = httpx.AsyncClient(timeout=_TIMEOUT)
+            ctx.channel, ctx.model_mapped, ctx.upstream_url = ch, mapped, url
+            client = resp = iterator = None
             try:
-                req = client.build_request("POST", url, headers=headers, json=payload)
-                resp = await client.send(req, stream=True)
-                if resp.status_code in _FAILOVER_STATUS or resp.status_code >= 400:
-                    body_txt = (await resp.aread()).decode("utf-8", "ignore")[:200]
-                    await resp.aclose(); await client.aclose()
-                    ch_svc.mark_failure(ch["id"], f"HTTP {resp.status_code}: {body_txt}")
-                    ctx.tracer.add("upstream", f"调用渠道 {ch['name']}", "error",
-                                   f"HTTP {resp.status_code}")
-                    final_err = f"上游 {resp.status_code}: {body_txt}"
-                    continue
-                # 连接成功，锁定渠道
-                ctx.channel, ctx.model_mapped, ctx.upstream_url = ch, mapped, url
-                ch_svc.mark_success(ch["id"])
-                committed = True
-                final_status, final_code, final_err = "ok", resp.status_code, ""
-                ctx.tracer.add("upstream", f"调用渠道 {ch['name']}", "ok",
-                               f"{ch.get('protocol')} → {mapped}（流式）")
-                try:
-                    async for sse in upstream.stream_iterator(ch, resp.aiter_lines()):
-                        _account_sse(sse, acc_text, usage, tool_names)
+                headers, payload = upstream.build_request(ch, ctx.forward_body, mapped, stream=True)
+                client = httpx.AsyncClient(timeout=_network_timeout(ctx))
+                async with asyncio.timeout(remaining(ctx.deadline)):
+                    req = client.build_request("POST", url, headers=headers, json=payload)
+                    resp = await client.send(req, stream=True)
+                    if resp.status_code >= 400:
+                        body_txt = (await resp.aread()).decode("utf-8", "ignore")[:200]
+                        raise RuntimeError(f"上游 {resp.status_code}: {body_txt}")
+                ctx.tracer.add("upstream", f"调用渠道 {ch['name']}", "ok", f"{mapped}（流式）")
+                iterator = iterate(upstream.stream_iterator(ch, resp.aiter_lines()), ctx.deadline)
+                async for sse in iterator:
+                    _account_sse(sse, acc_text, usage, tool_names)
+                    if any(line.strip() == "data: [DONE]" for line in sse.splitlines()):
+                        final_status, final_code, final_err = "ok", resp.status_code, ""
+                        ch_svc.mark_success(ch["id"])
                         yield sse
-                finally:
-                    await resp.aclose()
-                    await client.aclose()
+                        break
+                    for line in sse.splitlines():
+                        if line.startswith("data:"):
+                            obj = json.loads(line[5:].strip())
+                            if obj.get("error"):
+                                raise RuntimeError(str(obj["error"]))
+                    committed = True
+                    yield sse
+                if final_status != "ok":
+                    raise RuntimeError("上游流缺少正常结束标志")
+                break
+            except (TimeoutError, httpx.TimeoutException):
+                final_status, final_code, final_err = "timeout", 504, "请求超时或总预算耗尽"
                 break
             except Exception as e:
-                try:
-                    await client.aclose()
-                except Exception:
-                    pass
-                if committed:
-                    final_status, final_err = "error", str(e)
-                    ctx.tracer.add("upstream", f"渠道 {ch['name']} 流式中断", "error", str(e))
-                    break
-                ch_svc.mark_failure(ch["id"], str(e))
-                ctx.tracer.add("upstream", f"调用渠道 {ch['name']}", "error", str(e))
                 final_err = str(e)
-                continue
-        if not committed:
-            # 无一渠道可用：向下游返回一个错误 SSE 块，保持协议一致
-            err_obj = {"error": {"message": final_err, "type": "gateway_error"}}
-            yield "data: " + json.dumps(err_obj, ensure_ascii=False) + "\n\n"
-            ctx.tracer.add("response", "响应下游", "error", final_err)
+                ch_svc.mark_failure(ch["id"], final_err)
+                ctx.tracer.add("upstream", f"调用渠道 {ch['name']}", "error", final_err)
+                if committed:
+                    break
+            finally:
+                await close_resources(iterator, resp, client)
+        if final_status != "ok":
+            error = {"error": {"message": final_err, "type": final_status,
+                               "code": "request_timeout" if final_status == "timeout" else "upstream_error"}}
+            yield "data: " + json.dumps(error, ensure_ascii=False) + "\n\n"
+    except (asyncio.CancelledError, GeneratorExit):
+        if final_status != "ok":
+            final_status, final_code, final_err = "cancelled", 499, "客户端取消或断开"
+        raise
     finally:
-        preview = "".join(acc_text)
-        pt, ct = usage["pt"], usage["ct"]
-        if not (pt or ct) and preview:
-            ct = agent_obs.estimate_tokens(preview)
-            pt = agent_obs.estimate_tokens(json.dumps(ctx.forward_body.get("messages") or [],
-                                                      ensure_ascii=False))
-        ctx.tracer.add("response", "响应下游",
-                       "ok" if final_status == "ok" else "error",
-                       f"tokens={pt}+{ct}，预览 {len(preview)} 字")
-        ctx.tracer.add("log", "日志入库", "ok", "已留存流式调用链路")
-        _finalize(ctx, status=final_status, status_code=final_code, prompt_tokens=pt,
-                  completion_tokens=ct, response_preview=preview, error=final_err,
+        ctx.tracer.add("response", "响应下游", final_status, final_err)
+        _finalize(ctx, status=final_status, status_code=final_code,
+                  prompt_tokens=usage["pt"], completion_tokens=usage["ct"],
+                  response_preview="".join(acc_text), error=final_err,
                   tool_calls=[{"function": {"name": n}} for n in tool_names])
 
 

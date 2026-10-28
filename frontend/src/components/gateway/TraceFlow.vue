@@ -39,11 +39,11 @@ const expanded = ref(null)
 function toggle(idx) { expanded.value = expanded.value === idx ? null : idx }
 
 const PHASE_LABELS = {
-  auth: '① 鉴权', quota: '② 配额', security: '③ 安全审计', route: '④ 选路',
-  upstream: '⑤ 上游调用', response: '⑥ 响应处理', log: '⑦ 日志入库',
+  auth: '鉴权', quota: '模型授权/请求认领', security: '安全审计', route: '选路',
+  upstream: '上游调用', response: '响应处理', log: '日志入库',
 }
 function phaseLabel(p) { return PHASE_LABELS[p] || p }
-const STATUS_LABELS = { ok: '成功', error: '失败', fail: '失败', warn: '警告', skip: '跳过' }
+const STATUS_LABELS = { ok: '成功', error: '失败', fail: '失败', warn: '警告', skip: '跳过', blocked: '阻断', cancelled: '取消', timeout: '超时' }
 function statusLabel(s) { return STATUS_LABELS[s] || s }
 function formatTime(iso) {
   if (!iso) return ''
@@ -77,6 +77,9 @@ function formatTime(iso) {
 .st-skip .trace-dot { border-color: #d8cfc2; background: #f2ede6; color: #a99c8c; }
 .ar-error, .ar-fail { color: #d9534f; }
 .ar-ok { color: #4a9d5f; }
+.st-cancelled .trace-dot, .trace-detail-status.st-cancelled { background: #eee; color: #666; border-color: #999; }
+.st-timeout .trace-dot, .trace-detail-status.st-timeout { background: #fdf0d9; color: #b8802a; border-color: #e0a92e; }
+.st-blocked .trace-dot, .trace-detail-status.st-blocked { background: #fbe4e3; color: #c0392b; border-color: #d9534f; }
 
 .trace-detail { width: 100%; margin-top: 10px; border: 1px solid var(--color-border); border-radius: 10px; overflow: hidden; }
 .trace-detail-head { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: #faf6f0; font-size: 12px; flex-wrap: wrap; }

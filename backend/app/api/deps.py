@@ -48,3 +48,15 @@ def require_ops(authorization: str = Header("")) -> dict:
     if user.get("role") not in ("admin", "ops"):
         raise HTTPException(status_code=403, detail="仅管理员或运维角色可执行此操作")
     return user
+
+
+def require_ops_only(authorization: str = Header("")) -> dict:
+    """要求当前用户为运维（ops）角色，否则抛 403。
+
+    专用于 CI/CD 流水线：只允许运维账号操作，管理员（admin）同样被拒绝。
+    运维账号本身由管理员在「用户管理」中分配角色来控制。
+    """
+    user = get_current_user(authorization)
+    if user.get("role") != "ops":
+        raise HTTPException(status_code=403, detail="仅运维角色可执行此操作")
+    return user

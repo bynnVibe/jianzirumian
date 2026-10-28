@@ -1,5 +1,6 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
+import AdminConsoleLayout from '@/components/AdminConsoleLayout.vue'
 
 const routes = [
   {
@@ -53,15 +54,14 @@ const routes = [
     component: () => import('@/views/IngestDetailView.vue'),
     meta: { requiresAuth: true },
   },
+  // 旧路径兼容重定向（系统管理已迁移到 /admin 控制台）
   {
     path: '/settings',
-    redirect: '/management',
+    redirect: '/admin/settings',
   },
   {
     path: '/management',
-    name: 'Management',
-    component: () => import('@/views/ManagementView.vue'),
-    meta: { requiresAuth: true },
+    redirect: '/admin/settings',
   },
   {
     path: '/knowledge',
@@ -93,36 +93,58 @@ const routes = [
     component: () => import('@/views/WikiView.vue'),
     meta: { requiresAuth: true },
   },
+  // ============ 系统管理控制台（独立布局 + 专属左侧导航） ============
+  // 收纳所有管理/运维模块；admin 与 ops 均可进（requiresConsole=canOps），
+  // 各子页再按 requiresAdmin / requiresOps / requiresOpsOnly 细分权限。
   {
-    path: '/admin/users',
-    name: 'UserManagement',
-    component: () => import('@/views/UserManagementView.vue'),
-    meta: { requiresAuth: true, requiresAdmin: true },
+    path: '/admin',
+    component: AdminConsoleLayout,
+    meta: { requiresAuth: true, requiresConsole: true },
+    redirect: () => (useAuthStore().isOps ? { name: 'Pipeline' } : { name: 'AdminSettings' }),
+    children: [
+      {
+        path: 'settings',
+        name: 'AdminSettings',
+        component: () => import('@/views/ManagementView.vue'),
+        meta: { requiresAuth: true, requiresAdmin: true },
+      },
+      {
+        path: 'users',
+        name: 'UserManagement',
+        component: () => import('@/views/UserManagementView.vue'),
+        meta: { requiresAuth: true, requiresAdmin: true },
+      },
+      {
+        path: 'pipeline',
+        name: 'Pipeline',
+        component: () => import('@/views/PipelineView.vue'),
+        meta: { requiresAuth: true, requiresOpsOnly: true },
+      },
+      {
+        path: 'gateway',
+        name: 'Gateway',
+        component: () => import('@/views/GatewayView.vue'),
+        meta: { requiresAuth: true, requiresOps: true },
+      },
+      {
+        path: 'eval',
+        name: 'Eval',
+        component: () => import('@/views/EvalView.vue'),
+        meta: { requiresAuth: true, requiresOps: true },
+      },
+      {
+        path: 'observability',
+        name: 'Observability',
+        component: () => import('@/views/ObservabilityView.vue'),
+        meta: { requiresAuth: true, requiresOps: true },
+      },
+    ],
   },
-  {
-    path: '/eval',
-    name: 'Eval',
-    component: () => import('@/views/EvalView.vue'),
-    meta: { requiresAuth: true, requiresOps: true },
-  },
-  {
-    path: '/observability',
-    name: 'Observability',
-    component: () => import('@/views/ObservabilityView.vue'),
-    meta: { requiresAuth: true, requiresOps: true },
-  },
-  {
-    path: '/pipeline',
-    name: 'Pipeline',
-    component: () => import('@/views/PipelineView.vue'),
-    meta: { requiresAuth: true, requiresOps: true },
-  },
-  {
-    path: '/gateway',
-    name: 'Gateway',
-    component: () => import('@/views/GatewayView.vue'),
-    meta: { requiresAuth: true, requiresOps: true },
-  },
+  // 旧运维/管理扁平路径兼容重定向
+  { path: '/pipeline', redirect: '/admin/pipeline' },
+  { path: '/gateway', redirect: '/admin/gateway' },
+  { path: '/eval', redirect: '/admin/eval' },
+  { path: '/observability', redirect: '/admin/observability' },
 ]
 
 const router = createRouter({
@@ -163,6 +185,12 @@ router.beforeEach(async (to, from, next) => {
     }
   }
 
+  // 需要进入系统管理控制台（管理员或运维角色）
+  if (to.meta.requiresConsole && !auth.canOps) {
+    next({ name: 'Chat' })
+    return
+  }
+
   // 需要管理员角色
   if (to.meta.requiresAdmin && !auth.isAdmin) {
     next({ name: 'Chat' })
@@ -171,6 +199,12 @@ router.beforeEach(async (to, from, next) => {
 
   // 需要运维权限（管理员或运维角色）
   if (to.meta.requiresOps && !auth.canOps) {
+    next({ name: 'Chat' })
+    return
+  }
+
+  // 仅限运维角色（CI/CD 流水线）：管理员同样不可访问
+  if (to.meta.requiresOpsOnly && !auth.isOps) {
     next({ name: 'Chat' })
     return
   }

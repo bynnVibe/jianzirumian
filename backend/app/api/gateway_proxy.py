@@ -10,7 +10,8 @@
 import logging
 
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse
+from app.core.request_budget import ClosingStreamingResponse as StreamingResponse, until_disconnect
 
 from app.services.gateway import channels as ch_svc
 from app.services.gateway import keys as key_svc
@@ -61,7 +62,7 @@ async def chat_completions(request: Request):
                      "X-Gateway-Risk": ctx.risk_level},
         )
     try:
-        status, data = await proxy.json_response(ctx)
+        status, data = await until_disconnect(request, proxy.json_response(ctx))
         resp = JSONResponse(status_code=status, content=data)
     except proxy.GatewayError as e:
         resp = _err(e.status_code, e.message, e.code)
@@ -77,7 +78,7 @@ async def list_models(request: Request):
     try:
         key_row = key_svc.authenticate(raw_key)
     except key_svc.KeyRejected as e:
-        return _err(401, e.message, e.code)
+        return _err(e.status_code, e.message, e.code)
     models = ch_svc.all_models()
     # 若密钥限制了可访问模型，只返回其允许的子集
     import json as _json

@@ -16,6 +16,7 @@ class Settings:
     # ---- Server ----
     HOST: str = os.getenv("HOST", "0.0.0.0")
     PORT: int = int(os.getenv("PORT", "8000"))
+    TRUSTED_PROXY_CIDRS: str = os.getenv("TRUSTED_PROXY_CIDRS", "")
     # 默认关闭 DEBUG，避免生产环境意外输出调试日志；本地开发在 .env 中显式开启
     DEBUG: bool = os.getenv("DEBUG", "false").lower() == "true"
 
@@ -31,6 +32,15 @@ class Settings:
     API_BASE_URL: str = os.getenv("API_BASE_URL", "https://api.deepseek.com/v1")
     API_KEY: str = os.getenv("API_KEY", "")
     API_MODEL: str = os.getenv("API_MODEL", "deepseek-chat")
+
+    # ---- LLM Proxy（层3 自建网关）----
+    # LLM_PROVIDER=gateway 时，Agent 的 LLM 调用经 LLM Proxy 的 /v1 出网，
+    # 获得多模型路由 / Key 轮换 / 缓存 / 降级 / 成本统计；默认不启用（直连提供商）
+    # 本地开发默认 localhost:8001；compose 部署时由环境变量覆盖为 http://llm-proxy:8001
+    LLM_PROXY_URL: str = os.getenv("LLM_PROXY_URL", "http://localhost:8001")
+    # 调用网关所用的本地服务密钥（sk-jzrm-...），在网关「密钥」页签生成
+    LLM_PROXY_KEY: str = os.getenv("LLM_PROXY_KEY", "")
+    LLM_PROXY_PORT: int = int(os.getenv("LLM_PROXY_PORT", "8001"))
 
     # ---- Embedding 配置 ----
     EMBEDDING_PROVIDER: str = os.getenv("EMBEDDING_PROVIDER", "ollama")
@@ -96,6 +106,9 @@ class Settings:
 
     # ---- 会话 ----
     SESSION_MAX_HISTORY: int = int(os.getenv("SESSION_MAX_HISTORY", "20"))
+    CHAT_REQUEST_TIMEOUT: float = float(os.getenv("CHAT_REQUEST_TIMEOUT", "300"))
+    PROXY_REQUEST_TIMEOUT: float = float(os.getenv("PROXY_REQUEST_TIMEOUT", "240"))
+    PROXY_DIAGNOSTIC_TOKEN: str = os.getenv("PROXY_DIAGNOSTIC_TOKEN", "")
     # 登录态有效期（秒），每次请求滑动续期，默认 24 小时
     SESSION_DURATION: int = int(os.getenv("SESSION_DURATION", "86400"))
 

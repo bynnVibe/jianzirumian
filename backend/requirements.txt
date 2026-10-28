@@ -39,6 +39,7 @@ duckduckgo-search==6.2.13
 
 # ---- 工具 ----
 python-dotenv==1.0.1
+filelock==3.16.1
 Pillow==10.4.0
 pydantic==2.9.2
 pydantic-settings==2.5.2
@@ -61,3 +62,8 @@ pymupdf-layout>=1.28.0
 # Redis 客户端：知识库原始文件（图片/Word/PDF）缓存，加速检索来源跳转与预览；
 # Redis 不可用时自动降级直读磁盘
 redis>=5.0.0
+
+# ---- 测试 ----
+# CI/CD 流水线（EDD）单元测试阶段在后端进程内以 sys.executable -m pytest 执行，
+# 部署镜像必须自带 pytest，否则该阶段必然失败
+pytest==9.1.1

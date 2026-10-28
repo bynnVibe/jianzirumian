@@ -17,9 +17,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
-# -------- JSON → SQLite 一次性迁移（必须在服务单例初始化前执行） --------
+# -------- JSON → SQLite 一次性迁移（在 lifespan 获得写者锁后执行） --------
 from app.core.migrate_json_to_sqlite import run_migration
-run_migration()
+from app.core.agent_runtime import runtime, readiness
+from app.core.trusted_proxy import TrustedProxyMiddleware
 
 from app.api import chat as chat_api
 from app.api import config_api
@@ -36,6 +37,7 @@ from app.services import auth as auth_service
 from app.config import settings
 from app.core.log_setup import setup_logging, current_username
 from app.core.vector_store import vector_store
+from app.core import metrics_export
 from app.services.config_manager import runtime_config
 
 # -------- 日志配置 --------
@@ -81,17 +83,17 @@ class RequestLogMiddleware(BaseHTTPMiddleware):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期"""
-    # 启动时: 尝试加载向量库（失败不阻塞启动）
-    try:
-        vector_store.initialize()
-    except Exception:
-        pass
+    runtime.acquire()
+    for directory in (settings.UPLOAD_DIR, settings.KNOWLEDGE_DIR, settings.WIKI_DIR,
+                      str(Path(settings.VECTOR_STORE_PATH).parent)):
+        Path(directory).mkdir(parents=True, exist_ok=True)
+    run_migration()
+    runtime.recover()
+    # 只加载本地索引，不调用 Embedding；本地持久化损坏阻断启动。
+    index_loaded = vector_store.initialize()
     # 存量向量归入默认公共知识库（依赖向量库元数据，不依赖 Embedding 服务）
-    try:
-        from app.services import kb as kb_service
-        kb_service.patch_legacy_metadata()
-    except Exception as e:
-        logger.warning("知识库存量补丁失败: %s", e)
+    from app.services import kb as kb_service
+    kb_service.patch_legacy_metadata()
     # 上传流水线：恢复重启前未完成解析的文件（后台多线程继续解析）
     try:
         from app.services.upload_pipeline import upload_pipeline
@@ -127,10 +129,14 @@ async def lifespan(app: FastAPI):
     print(f"  - OCR: {runtime_config.ocr_provider or settings.OCR_PROVIDER} (默认: {settings.OCR_PROVIDER})")
     print(f"  - 搜索: {runtime_config.search_provider or settings.SEARCH_PROVIDER} (默认: {settings.SEARCH_PROVIDER})")
     print(f"  - Embedding: {settings.EMBEDDING_PROVIDER}")
-    print(f"  - 向量库: {'可用' if vector_store.is_available() else '⚠ 不可用(请检查Embedding服务)'}")
+    print(f"  - 向量库: {'已加载本地索引' if index_loaded else '尚无索引，首次业务写入时创建'}（未探测 Embedding）")
     print(f"  - 上传目录: {settings.UPLOAD_DIR}")
-    yield
-    print("[见字如面] 服务关闭")
+    runtime.ready = True
+    try:
+        yield
+    finally:
+        runtime.stop()
+        print("[见字如面] 服务关闭")
 
 
 app = FastAPI(
@@ -185,7 +191,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
     # 不需要登录的路径前缀
     # /v1/ 为模型网关 OpenAI 兼容代理入口，凭网关本地密钥（sk-jzrm-...）自行鉴权，
     # 不使用站点登录态，故在白名单放行。
-    WHITELIST = ("/api/auth/", "/api/health", "/v1/")
+    # /metrics 为监控层 Prometheus 抓取入口，无敏感业务数据，放行。
+    WHITELIST = ("/api/auth/", "/api/health", "/api/ready", "/v1/", "/metrics")
     # 图片类资源：<img> 标签无法携带 Authorization 头，允许通过 ?token= 鉴权
     IMAGE_PREFIXES = ("/api/knowledge/image", "/uploads")
     # 游客可访问的 API 路径前缀（无 token 时标记为游客，有 token 时正常验证）
@@ -246,6 +253,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
 # 鉴权中间件注册（在路由注册之后，类定义之后）
 app.add_middleware(AuthMiddleware)
+app.add_middleware(TrustedProxyMiddleware, trusted_hosts=settings.TRUSTED_PROXY_CIDRS)
 
 
 @app.get("/api/health")
@@ -262,6 +270,22 @@ async def health_check():
         "session_count": len(chat_api.chat_service.sessions) if hasattr(chat_api, 'chat_service') else 0,
         "file_cache": file_cache.status(),
     }
+
+
+@app.get("/metrics")
+async def prometheus_metrics():
+    """Prometheus 指标抓取入口（监控层，层5）"""
+    from fastapi.responses import Response
+    return Response(
+        content=metrics_export.render_prometheus("agent"),
+        media_type="text/plain; version=0.0.4; charset=utf-8",
+    )
+
+
+@app.get("/api/ready")
+async def ready():
+    result = readiness("agent")
+    return JSONResponse(result, status_code=200 if result["status"] == "ready" else 503)
 
 
 @app.post("/api/vector-store/retry")
@@ -318,4 +342,5 @@ if __name__ == "__main__":
         host=settings.HOST,
         port=settings.PORT,
         reload=settings.DEBUG,
+        proxy_headers=False,
     )

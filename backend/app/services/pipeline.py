@@ -19,6 +19,7 @@
 import asyncio
 import json
 import logging
+import sys
 import time
 import uuid
 from datetime import datetime
@@ -134,19 +135,32 @@ def save_settings(patch: dict) -> dict:
 
 def _set_stage(run_id: str, name: str, status: str, log: str = "",
                detail: Optional[dict] = None, finish: bool = False) -> None:
+    """更新阶段状态与伴随信息。
+
+    log 仅在非空时覆盖：保护 _append_stage_log 逐行追加的实时日志
+    不被阶段结束时的状态更新（log 默认空串）清空；
+    detail 仅在显式传入 dict 时写入，避免状态流转抹掉已有明细。
+    """
     now = _now()
+    cols = ["status=?"]
+    args: list = [status]
     if status == "running":
-        db.execute(
-            "UPDATE pipeline_stages SET status=?, started_at=?, log=?, detail=? WHERE run_id=? AND name=?",
-            (status, now, log, json.dumps(detail or {}, ensure_ascii=False), run_id, name),
-        )
-    else:
-        finished_at = now if finish else None
-        db.execute(
-            "UPDATE pipeline_stages SET status=?, log=?, detail=?, finished_at=COALESCE(?, finished_at)"
-            " WHERE run_id=? AND name=?",
-            (status, log, json.dumps(detail or {}, ensure_ascii=False), finished_at, run_id, name),
-        )
+        cols.append("started_at=?")
+        args.append(now)
+    if log:
+        cols.append("log=?")
+        args.append(log)
+    if detail is not None:
+        cols.append("detail=?")
+        args.append(json.dumps(detail, ensure_ascii=False))
+    if finish:
+        cols.append("finished_at=COALESCE(?, finished_at)")
+        args.append(now)
+    args.extend([run_id, name])
+    db.execute(
+        f"UPDATE pipeline_stages SET {', '.join(cols)} WHERE run_id=? AND name=?",
+        tuple(args),
+    )
 
 
 def _append_stage_log(run_id: str, name: str, text: str) -> None:
@@ -244,7 +258,10 @@ async def _stage_unit_test(run_id: str, settings: dict) -> tuple:
         _set_stage(run_id, "unit_test", "skipped", log="（配置未开启单元测试，跳过）\n", finish=True)
         return "skipped", {}
     _set_stage(run_id, "unit_test", "running")
-    rc, ok = await _run_cmd("python -m pytest -q", BACKEND_DIR, run_id, "unit_test")
+    # 用当前运行后端的解释器执行 pytest（开发 venv / 容器镜像均自带），
+    # 避免 PATH 中的系统 python 未装 pytest 导致 "No module named pytest"
+    cmd = f'"{sys.executable}" -m pytest -q'
+    rc, ok = await _run_cmd(cmd, BACKEND_DIR, run_id, "unit_test")
     status = "passed" if ok else "failed"
     _set_stage(run_id, "unit_test", status, detail={"returncode": rc}, finish=True)
     return status, {"returncode": rc}
@@ -445,12 +462,13 @@ def start_pipeline(user: dict, git_ref: str = "", trigger: str = "manual") -> st
     settings = get_settings()
     run_id = _new_id()
     user_id = user.get("id") or user.get("username") or ""
+    user_name = user.get("username") or user_id
     db.execute(
         "INSERT INTO pipeline_runs (id, trigger, git_ref, status, current_stage, edd_score,"
-        " edd_threshold, summary, created_by, started_at, finished_at)"
-        " VALUES (?,?,?,'running','',NULL,?, '{}', ?, ?, NULL)",
+        " edd_threshold, summary, created_by, created_by_name, started_at, finished_at)"
+        " VALUES (?,?,?,'running','',NULL,?, '{}', ?, ?, ?, NULL)",
         (run_id, trigger, git_ref or "", float(settings.get("edd_threshold") or 0.85),
-         user_id, _now()),
+         user_id, user_name, _now()),
     )
     # 初始化六条阶段记录
     for seq, (name, label) in enumerate(STAGES):
@@ -461,7 +479,7 @@ def start_pipeline(user: dict, git_ref: str = "", trigger: str = "manual") -> st
         )
 
     asyncio.create_task(_run_pipeline(run_id, user, git_ref, trigger))
-    logger.info("发起流水线运行: %s | by=%s | trigger=%s", run_id, user_id, trigger)
+    logger.info("发起流水线运行: %s | by=%s(%s) | trigger=%s", run_id, user_name, user_id, trigger)
     return run_id
 
 
@@ -476,6 +494,23 @@ def abort_pipeline(run_id: str) -> bool:
 
 class ConcurrentRunError(Exception):
     """已有正在执行的流水线运行。"""
+
+
+def _resolve_creator_name(row: dict) -> str:
+    """发起人展示名：优先取发起时落库的 created_by_name；
+    存量数据（该列为空）按 created_by 回查 users 表用户名；都取不到回退原值。
+    """
+    name = (row.get("created_by_name") or "").strip()
+    if name:
+        return name
+    key = (row.get("created_by") or "").strip()
+    if not key:
+        return ""
+    user_row = db.query_one("SELECT username FROM users WHERE id=?", (key,))
+    if user_row and user_row.get("username"):
+        return user_row["username"]
+    user_row = db.query_one("SELECT username FROM users WHERE username=?", (key,))
+    return user_row["username"] if user_row and user_row.get("username") else key
 
 
 def _row_to_stage(row: dict) -> dict:
@@ -517,6 +552,7 @@ def get_run(run_id: str) -> Optional[dict]:
         "edd_threshold": run["edd_threshold"],
         "summary": summary,
         "created_by": run["created_by"],
+        "created_by_name": _resolve_creator_name(run),
         "started_at": run["started_at"],
         "finished_at": run["finished_at"],
         "stages": [_row_to_stage(r) for r in stage_rows],
@@ -547,6 +583,7 @@ def list_runs(limit: int = 20) -> List[dict]:
             "edd_threshold": r["edd_threshold"],
             "summary": summary,
             "created_by": r["created_by"],
+            "created_by_name": _resolve_creator_name(r),
             "started_at": r["started_at"],
             "finished_at": r["finished_at"],
             "stages": [{"name": s["name"], "label": STAGE_LABELS.get(s["name"], s["name"]),

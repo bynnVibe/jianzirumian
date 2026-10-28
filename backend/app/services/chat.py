@@ -11,15 +11,18 @@
 会话数据持久化到 SQLite (backend/data/app.db)
 """
 import asyncio
+import anyio
 import json
 import logging
 import time
 import uuid
 from datetime import datetime
+from contextlib import aclosing
 from typing import AsyncGenerator, List, Optional
 
 from app.config import settings
 from app.core import db
+from app.core.request_budget import iterate, close_resources
 from app.core import observability as obs
 from app.core.evidence_checker import check_evidence_sufficiency, verify_citations
 from app.core.llm import LLMFactory
@@ -49,10 +52,12 @@ class Message:
         use_search: bool = False,
         message_id: str = None,
         attachments: Optional[List[dict]] = None,
+        interrupted: bool = False,
     ):
         self.message_id = message_id or str(uuid.uuid4())
         self.role = role  # "user" | "assistant"
         self.content = content
+        self.interrupted = interrupted
         self.sources = sources or []
         self.search_results = search_results or []
         self.use_knowledge = use_knowledge
@@ -69,6 +74,7 @@ class Message:
             "use_knowledge": self.use_knowledge,
             "use_search": self.use_search,
             "attachments": self.attachments,
+            "interrupted": self.interrupted,
         }
 
 
@@ -114,6 +120,11 @@ class ChatService:
     def __init__(self):
         # 仅缓存活跃会话；不再启动时全量加载历史消息，避免数据增长后占用内存
         self.sessions: dict[str, ChatSession] = {}
+        self._active_tasks = {}
+
+    def cancel_generation(self, session_id):
+        for task in tuple(self._active_tasks.get(session_id, ())):
+            task.cancel()
 
     # ---- SQLite 持久化 ----
 
@@ -141,6 +152,7 @@ class ChatService:
                     use_search=bool(m_row["use_search"]),
                     message_id=m_row["message_id"],
                     attachments=json.loads(m_row["attachments"] or "[]"),
+                    interrupted=bool(m_row.get("interrupted", 0)),
                 ))
             self.sessions[session_id] = session
             return session
@@ -151,7 +163,14 @@ class ChatService:
     def _persist_session(self, session: ChatSession):
         """将单个会话完整写入 SQLite（会话行 upsert + 消息全量替换）"""
         try:
-            db.execute(
+            with db.transaction() as conn:
+                self._persist_session_transaction(conn, session)
+        except Exception as e:
+            logger.error("保存会话失败: %s", e)
+            raise
+
+    def _persist_session_transaction(self, conn, session):
+            conn.execute(
                 "INSERT INTO chat_sessions (session_id, user_id, title, created_at, updated_at)"
                 " VALUES (?,?,?,?,?)"
                 " ON CONFLICT(session_id) DO UPDATE SET"
@@ -159,11 +178,11 @@ class ChatService:
                 (session.session_id, session.user_id, session.title,
                  session.created_at, session.updated_at),
             )
-            db.execute("DELETE FROM chat_messages WHERE session_id = ?", (session.session_id,))
-            db.executemany(
+            conn.execute("DELETE FROM chat_messages WHERE session_id = ?", (session.session_id,))
+            conn.executemany(
                 "INSERT INTO chat_messages (message_id, session_id, seq, role, content,"
-                " sources, search_results, use_knowledge, use_search, attachments, created_at)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                " sources, search_results, use_knowledge, use_search, attachments, created_at, interrupted)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 [
                     (
                         m.message_id, session.session_id, seq, m.role, m.content,
@@ -172,13 +191,11 @@ class ChatService:
                         1 if m.use_knowledge else 0,
                         1 if m.use_search else 0,
                         json.dumps(m.attachments, ensure_ascii=False),
-                        session.created_at,
+                        session.created_at, int(m.interrupted),
                     )
                     for seq, m in enumerate(session.messages)
                 ],
             )
-        except Exception as e:
-            logger.error("保存会话失败: %s", e)
 
     def _save_sessions(self):
         """兼容旧调用：仅持久化最近变更的会话由调用方显式指定，此方法保留为空操作"""
@@ -213,6 +230,9 @@ class ChatService:
             # 仅允许删除自己的会话（空 user_id 的旧数据允许任何人删除）
             if session.user_id and session.user_id != user_id:
                 return False
+            self.cancel_generation(session_id)
+            from app.services.chat_actions import invalidate_session
+            invalidate_session(session_id)
             self.sessions.pop(session_id, None)
             db.execute("DELETE FROM chat_sessions WHERE session_id = ?", (session_id,))
             db.execute("DELETE FROM chat_messages WHERE session_id = ?", (session_id,))
@@ -266,17 +286,60 @@ class ChatService:
             SSE 格式的事件流
         """
         obs.start_trace("chat", user_id, query)
+        deadline = time.monotonic() + max(0.01, settings.CHAT_REQUEST_TIMEOUT)
+        tasks, partial = set(), []
+        current_task = asyncio.current_task()
+        self._active_tasks.setdefault(session_id, set()).add(current_task)
+        user_message_id = None
+        status = "error"
+        iterator = iterate(self._chat_stream_inner(
+            session_id, query, use_knowledge, use_search,
+            llm_provider, user_id, attachments, kb_id, tasks,
+        ), deadline)
         try:
-            async for event in self._chat_stream_inner(
-                session_id, query, use_knowledge, use_search,
-                llm_provider, user_id, attachments, kb_id,
-            ):
+            async for event in iterator:
+                data = json.loads(event.strip()[5:].strip())
+                if user_message_id is None:
+                    session = self.sessions.get(session_id)
+                    user_message_id = next((m.message_id for m in reversed(session.messages) if m.role == "user"), None) if session else None
+                if data.get("event") == "token":
+                    partial.append(data.get("content", ""))
+                elif data.get("event") == "done":
+                    status = "ok"
                 yield event
+                if data.get("event") == "error":
+                    return
+            if status != "ok":
+                obs.mark_failed("响应没有正常完成")
+        except TimeoutError:
+            status = "timeout"
+            yield f"data: {self._json_event('error', {'message': '请求总预算耗尽，生成已中断', 'code': 'request_timeout'})}\n\n"
+        except (asyncio.CancelledError, GeneratorExit):
+            if status != "ok":
+                status = "cancelled"
+            raise
         except Exception as e:
             obs.mark_failed(str(e))
-            raise
+            yield f"data: {self._json_event('error', {'message': str(e)})}\n\n"
         finally:
-            obs.end_trace()
+            try:
+                await close_resources(iterator)
+                for task in tasks:
+                    task.cancel()
+                with anyio.CancelScope(shield=True):
+                    if tasks:
+                        await asyncio.gather(*tasks, return_exceptions=True)
+                if status != "ok" and partial:
+                    session = self.sessions.get(session_id)
+                    if session and db.query_one("SELECT message_id FROM chat_messages WHERE message_id=? AND session_id=?", (user_message_id, session_id)):
+                        session.add_message(Message(role="assistant", content="".join(partial) + "\n\n[生成已中断，内容不完整]", interrupted=True))
+                        self._persist_session(session)
+            finally:
+                active = self._active_tasks.get(session_id, set())
+                active.discard(current_task)
+                if not active:
+                    self._active_tasks.pop(session_id, None)
+                obs.end_trace(status=status)
 
     async def _chat_stream_inner(
         self,
@@ -288,6 +351,7 @@ class ChatService:
         user_id: str,
         attachments: Optional[List[dict]],
         kb_id: str,
+        tasks: set,
     ) -> AsyncGenerator[str, None]:
         """流式聊天内层主流程（检索/搜索/工具/生成各环节记录 trace span）"""
         logger.info("开始处理聊天: session=%s, query=%.50s, knowledge=%s, search=%s",
@@ -309,8 +373,9 @@ class ChatService:
         ]
         user_msg = Message(role="user", content=query, attachments=att_meta)
         session.add_message(user_msg)
+        self._persist_session(session)
         if att_meta:
-            yield f"data: {self._json_event('status', {'phase': 'attachments_saved', 'attachments': att_meta})}\n\n"
+            yield f"data: {self._json_event('status', {'phase': 'attachments_saved', 'attachments': att_meta, 'message_id': user_msg.message_id})}\n\n"
 
         # 2.5 聊天框附件工具调用：按用户文本意图路由到 OCR / 入库 / 总结工具
         tool_context_text = ""
@@ -325,6 +390,9 @@ class ChatService:
                 logger.error("附件工具调用失败: %s", e)
                 tool_context_text = ""
             for rec in tool_records:
+                if rec.get("confirmation"):
+                    yield f"data: {self._json_event('tool_confirmation', {'action': rec['confirmation']})}\n\n"
+                    continue
                 obs.record_tool(
                     rec.get("tool_name") or "attachment_tool",
                     {"filename": rec.get("filename", "")},
@@ -333,8 +401,9 @@ class ChatService:
                     error="" if rec.get("success") else "工具执行失败",
                     fail_trace=False,
                 )
-            if tool_records:
-                yield f"data: {self._json_event('status', {'phase': 'tool_done', 'message': '附件处理完成', 'tool_calls': tool_records})}\n\n"
+            executed = [rec for rec in tool_records if not rec.get("confirmation")]
+            if executed:
+                yield f"data: {self._json_event('status', {'phase': 'tool_done', 'message': '附件处理完成', 'tool_calls': executed})}\n\n"
 
         # 3. 构建 LLM 消息列表：系统 prompt + 用户跨会话记忆 + 历史消息（摘要压缩后）+ 工具结果
         llm = LLMFactory.create(llm_provider)
@@ -388,10 +457,12 @@ class ChatService:
             retrieve_task = asyncio.create_task(
                 asyncio.to_thread(knowledge_service.retrieve_for_user, search_query, user_id)
             )
+            tasks.add(retrieve_task)
 
         if use_search:
             yield f"data: {self._json_event('status', {'phase': 'searching', 'message': '正在联网搜索...'})}\n\n"
             search_task = asyncio.create_task(web_search(query))
+            tasks.add(search_task)
 
         # 等待检索结果（与联网搜索并行进行中）
         if retrieve_task is not None:
@@ -480,9 +551,13 @@ class ChatService:
         llm_error = None
         t_gen = time.monotonic()
         try:
-            async for chunk in llm.chat(llm_messages, stream=True):
-                full_response += chunk
-                yield f"data: {self._json_event('token', {'content': chunk})}\n\n"
+            async with aclosing(llm.chat(llm_messages, stream=True)) as stream:
+                async for chunk in stream:
+                    full_response += chunk
+                    yield f"data: {self._json_event('token', {'content': chunk})}\n\n"
+        except (asyncio.CancelledError, GeneratorExit):
+            obs.record_llm("answer", llm_messages, full_response, t0=t_gen, status="cancelled")
+            raise
         except Exception as e:
             llm_error = e
 
@@ -495,10 +570,14 @@ class ChatService:
                 yield f"data: {self._json_event('status', {'phase': 'fallback', 'message': f'当前模型不可用，已自动切换为免费模型 {fallback_model}'})}\n\n"
                 llm = LLMFactory.create(llm_provider)
                 try:
-                    async for chunk in llm.chat(llm_messages, stream=True):
-                        full_response += chunk
-                        yield f"data: {self._json_event('token', {'content': chunk})}\n\n"
+                    async with aclosing(llm.chat(llm_messages, stream=True)) as stream:
+                        async for chunk in stream:
+                            full_response += chunk
+                            yield f"data: {self._json_event('token', {'content': chunk})}\n\n"
                     llm_error = None
+                except (asyncio.CancelledError, GeneratorExit):
+                    obs.record_llm("answer", llm_messages, full_response, t0=t_gen, status="cancelled")
+                    raise
                 except Exception as e2:
                     llm_error = e2
 
@@ -565,11 +644,15 @@ class ChatService:
             use_knowledge=use_knowledge,
             use_search=use_search,
         )
+        # 后处理也属于本轮总预算；取消后不再发起摘要或记忆模型调用。
+        from copy import copy
+        summary_session = copy(session)
+        summary_session.messages = [*session.messages, assistant_msg]
+        await self._post_turn_background(summary_session, user_msg, assistant_msg, llm_provider)
+        if not db.query_one("SELECT message_id FROM chat_messages WHERE message_id=?", (user_msg.message_id,)):
+            raise asyncio.CancelledError()
         session.add_message(assistant_msg)
         self._persist_session(session)  # 每次对话后持久化
-
-        # 后台异步触发会话摘要压缩与用户跨会话记忆抽取，失败不影响主流程
-        asyncio.create_task(self._post_turn_background(session, user_msg, assistant_msg, llm_provider))
 
         # 用量统计埋点：查询次数 + 字符数（Token 估算由统计层完成）
         from app.services.usage import record_usage
@@ -649,7 +732,7 @@ class ChatService:
             return first_results, context_text, sources
 
     async def _post_turn_background(self, session, user_msg, assistant_msg, llm_provider):
-        """对话结束后的后台任务：会话摘要压缩 + 用户记忆抽取（都内含异常降级，不抛出）"""
+        """在当前请求总预算内完成摘要与记忆；普通错误降级，取消继续传播。"""
         try:
             await session_summary.maybe_summarize(session, llm_provider)
         except Exception as e:

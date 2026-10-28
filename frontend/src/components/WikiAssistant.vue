@@ -216,7 +216,8 @@ const inputRef = ref(null)
 const editBusy = ref('')
 
 // 对话/登录/指南/独立预览页不显示助手（与侧边栏隐藏规则一致，且助手需登录）
-const HIDDEN_ROUTES = ['Login', 'Register', 'Guide', 'Chat', 'ChatWithSession', 'DocPreview', 'AttachmentPreview']
+// 系统管理控制台（/admin/*）为管理/运维场景，同样不浮出知识助手
+const HIDDEN_ROUTES = ['Login', 'Register', 'Guide', 'Chat', 'ChatWithSession', 'DocPreview', 'AttachmentPreview', 'AdminSettings', 'UserManagement', 'Pipeline', 'Gateway', 'Eval', 'Observability']
 const ROUTE_LABELS = {
   Wiki: '知识百科',
   KnowledgeBase: '知识库管理',

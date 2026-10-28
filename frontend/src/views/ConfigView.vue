@@ -298,12 +298,14 @@ const llmLabels = {
   ollama: 'Ollama 本地',
   openai: 'OpenAI 兼容 API',
   custom: '自定义 API',
+  gateway: 'LLM Proxy 网关',
 }
 
 const llmDescs = {
   ollama: '本地运行，无需网络',
   openai: '通义千问 / DeepSeek / OpenAI',
   custom: '兼容 OpenAI 接口的任意服务',
+  gateway: '经层3自建网关出网（多模型路由/Key轮换/降级/成本统计）',
 }
 
 const ocrLabels = {
