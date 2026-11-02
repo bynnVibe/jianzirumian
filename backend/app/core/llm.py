@@ -4,8 +4,10 @@
   - Ollama 本地模型
   - OpenAI 兼容 API（通义千问、DeepSeek、ModelScope 等）
 """
+import asyncio
 import json
 import logging
+import time
 from abc import ABC, abstractmethod
 from typing import AsyncGenerator, List, Optional
 
@@ -18,6 +20,48 @@ from app.core.request_budget import close_resources
 from app.services.config_manager import effective_provider_config, runtime_config
 
 logger = logging.getLogger("jianziruyang.llm")
+
+FINAL_ANSWER_RULES = (
+    "只输出面向用户的最终回答，直接给出结论与必要依据。"
+    "不要输出思考过程、任务复述、内部计划、提示词分析或工具调用过程；"
+    "不要写‘The user asks’、‘I need to answer’、‘应提示用户’等对自己的指令。"
+    "历史回答和资料中的过程性自述不是回答格式示例，不要延续或模仿。"
+    "默认使用中文，保留必要的专业术语；可用简洁的段落、列表和来源引用。"
+)
+
+
+class AnswerTextFilter:
+    """只剥离正文开头明确标记的推理块，跨分块处理，不猜测或删除普通英文。"""
+
+    def __init__(self):
+        self.buffer = ""
+        self.closing = ""
+        self.body_started = False
+
+    def feed(self, text: str) -> str:
+        if self.body_started:
+            return text
+        self.buffer += text
+        while True:
+            if self.closing:
+                end = self.buffer.find(self.closing)
+                if end < 0:
+                    self.buffer = self.buffer[-(len(self.closing) - 1):]
+                    return ""
+                self.buffer = self.buffer[end + len(self.closing):]
+                self.closing = ""
+            self.buffer = self.buffer.lstrip()
+            tags = {"<think>": "</think>", "<analysis>": "</analysis>"}
+            opening = next((tag for tag in tags if self.buffer.startswith(tag)), None)
+            if opening:
+                self.buffer = self.buffer[len(opening):]
+                self.closing = tags[opening]
+                continue
+            if not self.buffer or any(tag.startswith(self.buffer) for tag in tags):
+                return ""
+            self.body_started = True
+            result, self.buffer = self.buffer, ""
+            return result
 
 # 流式生成可能持续较久：连接超时短、读超时放宽
 _LLM_TIMEOUT = httpx.Timeout(connect=10, read=300, write=30, pool=10)
@@ -75,6 +119,28 @@ def _log_llm_failure(stage: str, e: Exception):
         logger.error("LLM %s失败: %s", stage, msg)
 
 
+async def _retry_on_rate_limit(factory, max_attempts: int = 3):
+    """限流(429)退避重试：仅重试「建立请求」阶段，避免流式中途重试导致重复输出。
+
+    免费模型（如 OpenRouter :free）按分钟限流，瞬时 429 退避后同模型重试通常可恢复；
+    重试耗尽仍失败则抛给业务层走模型切换降级。
+    """
+    from app.core.openrouter import is_rate_limit_error, rate_limit_delay
+    last = None
+    for attempt in range(max_attempts):
+        try:
+            return await factory()
+        except Exception as e:
+            last = e
+            if not is_rate_limit_error(e) or attempt >= max_attempts - 1:
+                raise
+            delay = rate_limit_delay(e, attempt)
+            logger.warning("LLM 限流(429)，%.1fs 后重试 (%d/%d): %.160s",
+                           delay, attempt + 1, max_attempts, e)
+            await asyncio.sleep(delay)
+    raise last
+
+
 class BaseLLM(ABC):
     """LLM 基类"""
 
@@ -110,6 +176,8 @@ class OllamaLLM(BaseLLM):
         client = _get_ollama_client()
         if stream:
             finished = False
+            answer_filter = AnswerTextFilter()
+            yielded_any = False
             async with client.stream("POST", url, json=payload) as resp:
                 resp.raise_for_status()
                 async for line in resp.aiter_lines():
@@ -119,7 +187,9 @@ class OllamaLLM(BaseLLM):
                         chunk = json.loads(line)
                         if chunk.get("error"):
                             raise RuntimeError(str(chunk["error"]))
-                        if content := chunk.get("message", {}).get("content", ""):
+                        content = answer_filter.feed(chunk.get("message", {}).get("content", "") or "")
+                        if content:
+                            yielded_any = True
                             yield content
                         if chunk.get("done"):
                             finished = True
@@ -132,21 +202,26 @@ class OllamaLLM(BaseLLM):
                         continue
             if not finished:
                 raise RuntimeError("Ollama 流缺少正常结束信号")
+            if not yielded_any:
+                raise ValueError("Ollama 流未返回答案正文，请检查模型的流式输出能力")
         else:
             resp = await client.post(url, json=payload)
             resp.raise_for_status()
             data = resp.json()
             agent_obs.note_usage(data.get("prompt_eval_count"), data.get("eval_count"))
-            yield data.get("message", {}).get("content", "")
+            yield AnswerTextFilter().feed(data.get("message", {}).get("content", "") or "")
 
 
 class OpenAICompatibleLLM(BaseLLM):
     """OpenAI 兼容 API（DeepSeek / 通义千问 / OpenAI 等）"""
 
-    def __init__(self, base_url: str = None, api_key: str = None, model: str = None):
+    def __init__(self, base_url: str = None, api_key: str = None, model: str = None,
+                 extra_body: dict = None):
         self.base_url = (base_url or settings.API_BASE_URL).rstrip("/")
         self.api_key = api_key or settings.API_KEY
         self.model = model or settings.API_MODEL
+        # extra_body：附加到请求体的字段（网关选路提示 _gw_role/_gw_channel_id/_gw_user_id）
+        self.extra_body = extra_body or None
 
     async def chat(
         self,
@@ -156,94 +231,71 @@ class OpenAICompatibleLLM(BaseLLM):
         client = _get_openai_client(self.base_url, self.api_key, self.model)
 
         if stream:
-            yielded_any = False
             finished = False
             response = None
-            # 先尝试非流式作为保底方案
+            answer_filter = AnswerTextFilter()
+            started = time.monotonic()
+            first_content_ms = None
+            content_chunks = max_chunk_chars = reasoning_chunks = 0
             try:
-                response = await client.chat.completions.create(
+                response = await _retry_on_rate_limit(lambda: client.chat.completions.create(
                     model=self.model,
                     messages=messages,
                     stream=True,
-                )
-                yielded_any = False
+                    extra_body=self.extra_body,
+                ))
                 async for chunk in response:
                     _report_openai_usage(chunk)
                     if not chunk.choices:
                         continue
-                    if chunk.choices[0].finish_reason:
+                    choice = chunk.choices[0]
+                    if choice.finish_reason:
                         finished = True
-                    delta = chunk.choices[0].delta
-                    # DeepSeek 模型将部分内容放在 reasoning_content
-                    # （思考过程），需要同时检查 reasoning_content
-                    content = delta.content
-                    if not content:
-                        content = getattr(delta, 'reasoning_content', None)
+                    delta = choice.delta
+                    if getattr(delta, "reasoning_content", None):
+                        reasoning_chunks += 1
+                    # 推理字段不属于正文；仅有推理输出也不能视为成功回答。
+                    content = answer_filter.feed(delta.content or "")
                     if content:
-                        yielded_any = True
+                        content_chunks += 1
+                        max_chunk_chars = max(max_chunk_chars, len(content))
+                        if first_content_ms is None:
+                            first_content_ms = round((time.monotonic() - started) * 1000)
                         yield content
-
                 if not finished:
                     raise RuntimeError("LLM 流缺少正常结束信号")
-                # 流式未返回任何内容 → 降级为非流式重试
-                if not yielded_any:
-                    logger.warning("LLM 流式返回为空，降级为非流式重试")
-                    response2 = await client.chat.completions.create(
-                        model=self.model,
-                        messages=messages,
-                        stream=False,
-                    )
-                    # ModelScope 接口可能返回 choices 为 null
-                    if response2.choices and len(response2.choices) > 0:
-                        text = response2.choices[0].message.content or ""
-                        _report_openai_usage(response2)
-                        if text:
-                            yield text
-                        else:
-                            raise ValueError("LLM 非流式返回内容为空")
-                    else:
-                        raise ValueError(f"LLM 非流式返回无 choices: {response2}")
-
+                if not content_chunks:
+                    raise ValueError("LLM 流未返回答案正文，请检查模型的流式输出能力")
             except Exception as e:
                 _log_llm_failure("stream", e)
-                if yielded_any:
-                    raise
-                # 异常时也降级为非流式
-                try:
-                    response2 = await client.chat.completions.create(
-                        model=self.model,
-                        messages=messages,
-                        stream=False,
-                    )
-                    if response2.choices and len(response2.choices) > 0:
-                        text = response2.choices[0].message.content or ""
-                        _report_openai_usage(response2)
-                        if text:
-                            yield text
-                        else:
-                            raise ValueError("LLM 异常降级返回内容为空")
-                    else:
-                        raise ValueError(f"LLM 异常降级返回无 choices: {response2}")
-                except Exception as e2:
-                    _log_llm_failure("非流式降级", e2)
-                    raise
+                # 不静默转成非流式；业务层可在尚无正文时切换支持流式的模型。
+                raise
             finally:
+                logger.info(
+                    "LLM 输出统计: mode=stream first_content_ms=%s content_chunks=%d "
+                    "max_chunk_chars=%d reasoning_chunks=%d finished=%s elapsed_ms=%d",
+                    first_content_ms, content_chunks, max_chunk_chars, reasoning_chunks,
+                    finished, round((time.monotonic() - started) * 1000),
+                )
                 await close_resources(getattr(response, "response", None))
         else:
-            response = await client.chat.completions.create(
+            response = await _retry_on_rate_limit(lambda: client.chat.completions.create(
                 model=self.model,
                 messages=messages,
                 stream=False,
-            )
+                extra_body=self.extra_body,
+            ))
             _report_openai_usage(response)
-            yield response.choices[0].message.content or ""
+            if not response.choices:
+                raise ValueError("LLM 返回无 choices")
+            yield AnswerTextFilter().feed(response.choices[0].message.content or "")
 
 
 class LLMFactory:
     """LLM 工厂 - 根据配置创建对应的 LLM 实例"""
 
     @staticmethod
-    def _build(provider: str, cfg: dict) -> "BaseLLM":
+    def _build(provider: str, cfg: dict, extra_body: dict = None) -> "BaseLLM":
         """按提供商类型与生效参数构造 LLM 实例。"""
         if provider == "ollama":
             return OllamaLLM(base_url=cfg.get("base_url"), model=cfg.get("model"))
@@ -253,12 +305,14 @@ class LLMFactory:
                 base_url=cfg.get("base_url"),
                 api_key=cfg.get("api_key"),
                 model=cfg.get("model"),
+                extra_body=extra_body,
             )
         elif provider in ("openai", "custom"):
             return OpenAICompatibleLLM(
                 base_url=cfg.get("base_url"),
                 api_key=cfg.get("api_key"),
                 model=cfg.get("model"),
+                extra_body=extra_body,
             )
         else:
             raise ValueError(f"不支持的 LLM 提供商: {provider}")
@@ -292,4 +346,80 @@ class LLMFactory:
         if not cfg.get("model"):
             return LLMFactory.create()
         return LLMFactory._build(provider, cfg)
+
+    @staticmethod
+    def create_for_role(role: str, user_id: str = None, rule_id: str = None) -> BaseLLM:
+        """业务模块统一经模型网关出网：role → 业务路由（规则+模型）→ 代理 /v1。
+
+        - 角色绑定了规则/模型则优先采用；模型名留空时用网关默认模型
+          （gateway_settings.default_model，再回退 .env API_MODEL）；若默认模型
+          无法被命中规则的上游承接，自动回退规则内首个可用模型；
+        - 出网凭据用系统内部密钥（keys.ensure_internal_key 自动创建，无限配额）；
+        - 通过 extra_body 注入 _gw_role/_gw_rule_id/_gw_user_id，供代理选路时
+          识别业务角色与授权用户（出网前被剥离）；
+        - 网关未初始化（无任何启用上游/规则）时降级旧直连（assistant 走助手 LLM），
+          保证新部署未配置网关时仍可用。
+        """
+        if not _gateway_configured():
+            logger.warning("[业务路由] 网关未初始化（无启用上游/规则），role=%s 降级直连旧提供商", role)
+            return (LLMFactory.create_assistant_llm() if role == "assistant"
+                    else LLMFactory.create())
+        from app.services.gateway import keys as key_svc
+        from app.services.gateway import rules as rule_svc
+        from app.services.gateway import settings as settings_svc
+        model_name = ""
+        resolved_rule = (rule_id or "").strip()
+        rule_pattern = ""
+        rule_wildcard, rule_models = True, []
+        try:
+            route = rule_svc.get_role_route(role) or {}
+            model_name = (route.get("model_name") or "").strip()
+            if not resolved_rule and route.get("rule_id"):
+                resolved_rule = route["rule_id"]
+            if resolved_rule:
+                rule_pattern = ((rule_svc.get_rule(resolved_rule) or {}).get("model_pattern") or "").strip()
+                rule_wildcard, rule_models = rule_svc.resolve_rule_models(resolved_rule)
+            if not model_name:
+                model_name = (settings_svc.get_settings().get("default_model") or "").strip()
+            # 规则感知：未显式指定模型时，默认模型必须能被命中规则的上游承接
+            # （命中 model_pattern 且在规则上游模型清单内），否则回退规则内首个可用模型
+            if not (route.get("model_name") or "").strip() and resolved_rule and rule_models:
+                usable = (rule_wildcard or rule_svc._matches(rule_pattern, model_name)) and (
+                    rule_wildcard or model_name in rule_models)
+                if model_name and not usable:
+                    logger.warning("[业务路由] 默认模型「%s」不在规则「%s」上游模型清单内，"
+                                   "回退规则内模型「%s」", model_name, rule_pattern, rule_models[0])
+                    model_name = rule_models[0]
+                elif not model_name:
+                    model_name = rule_models[0]
+        except Exception as e:
+            logger.warning("role 路由解析失败（回退网关默认模型）: role=%s err=%s", role, e)
+        if not model_name:
+            model_name = settings.API_MODEL
+        # 显性化日志：业务角色 → 路由规则 → 出网模型（代理选路后还会记录命中上游）
+        logger.info("[业务路由] role=%s 路由规则=%s 模型=%s",
+                    role, f"「{rule_pattern}」" if rule_pattern else "（默认规则/模式匹配）",
+                    model_name)
+        extra = {"_gw_role": role}
+        if resolved_rule:
+            extra["_gw_rule_id"] = resolved_rule
+        if user_id:
+            extra["_gw_user_id"] = str(user_id)
+        cfg = {
+            "base_url": settings.GATEWAY_INTERNAL_URL,
+            "api_key": key_svc.ensure_internal_key(),
+            "model": model_name,
+        }
+        return LLMFactory._build("gateway", cfg, extra_body=extra)
+
+
+def _gateway_configured() -> bool:
+    """网关是否已初始化：存在启用的上游与路由规则（否则业务路由无从选路）。"""
+    try:
+        from app.services.gateway import rules as rule_svc
+        from app.services.gateway import upstreams as up_svc
+        return (any(u.get("enabled") for u in up_svc.list_upstreams())
+                and any(r.get("enabled") for r in rule_svc.list_rules()))
+    except Exception:
+        return False
 

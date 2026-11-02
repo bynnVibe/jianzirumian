@@ -8,7 +8,7 @@
           <button
             class="module-tab"
             :class="{ active: activeTab === 'upload' }"
-            @click="activeTab = 'upload'"
+            @click="switchTab('upload')"
           >
             文件上传
           </button>
@@ -29,11 +29,22 @@
           </button>
         </div>
       </div>
-      <p class="page-desc">图片 / Word / PDF 上传后后台多线程自动解析；在「知识入库」检查解析结果无误后，一键入库知识库与 llm-wiki 百科</p>
+      <p class="page-desc">上传图片 / Word / PDF，或导入公开文章链接；后台解析后在「知识入库」检查、修改并确认，写入知识库与 llm-wiki 百科</p>
     </div>
 
     <!-- ==================== Tab 1：文件上传 ==================== -->
     <div v-show="activeTab === 'upload'" class="tab-panel">
+      <section class="upload-section">
+        <div class="module-head"><span class="module-badge">链</span><div>
+          <div class="module-title">公开链接导入</div>
+          <div class="module-sub">支持微信公众号、知乎公开文章／回答、博客；解析后可编辑确认，不自动入库</div>
+        </div></div>
+        <form class="url-input-row" @submit.prevent="submitUrl">
+          <input v-model="urlInput" type="url" maxlength="4096" required placeholder="https://… 粘贴公开文章链接" aria-label="公开文章链接" />
+          <button class="btn btn-primary" :disabled="urlSubmitting">{{ urlSubmitting ? '提交中…' : '解析链接' }}</button>
+        </form>
+        <p class="module-sub">不绕过登录、验证码或付费限制。{{ rendererEnabled ? '已启用隔离浏览器兜底。' : '当前使用直接抓取；浏览器兜底需要启用隔离 renderer。' }}网页图片仅保留链接。</p>
+      </section>
       <!-- ---------- 图片上传 ---------- -->
       <div class="upload-section">
         <div class="module-head">
@@ -228,9 +239,10 @@
           <div class="fi-main">
             <div class="fi-name" :title="f.filename">{{ f.filename }}</div>
             <div class="fi-meta">
-              <span class="fi-size">{{ formatSize(f.file_size || f.size || 0) }}</span>
+              <span v-if="f.source_type !== 'url'" class="fi-size">{{ formatSize(f.file_size || f.size || 0) }}</span>
               <span class="fi-status">
-                <template v-if="f.status === 'uploading'">上传中 {{ f.progress }}%</template>
+                <template v-if="f.source_type === 'url'">{{ urlStatusLabel(f) }} · {{ f.text_length || 0 }} 字</template>
+                <template v-else-if="f.status === 'uploading'">上传中 {{ f.progress }}%</template>
                 <template v-else-if="f.status === 'pending'">排队等待解析…</template>
                 <template v-else-if="f.status === 'parsing'"><span class="spinner-xs"></span> 后台解析中…</template>
                 <template v-else-if="f.status === 'done'">
@@ -249,10 +261,10 @@
             <div v-if="f.status === 'error' && f.error" class="fi-error" :title="f.error">{{ f.error }}</div>
           </div>
           <div class="fi-actions" @click.stop>
-            <button v-if="f.status === 'done'" class="btn btn-sm btn-success" @click="goIngest(f)">去入库 →</button>
+            <button v-if="f.status === 'done' || f.source_type === 'url'" class="btn btn-sm btn-success" @click="goIngest(f)">{{ f.source_type === 'url' ? '查看／确认 →' : '去入库 →' }}</button>
             <button v-if="canPreview(f)" class="btn btn-sm btn-outline" @click="previewOriginal(f)">预览</button>
-            <button v-if="f.status === 'error'" class="btn btn-sm btn-primary" @click="retryParse(f)">重试</button>
-            <button v-if="f.status !== 'uploading'" class="btn btn-sm btn-outline-danger" @click="removeFile(f)">删除</button>
+            <button v-if="f.status === 'error' && f.phase !== 'ingest'" class="btn btn-sm btn-primary" @click="retryParse(f)">重试</button>
+            <button v-if="f.status !== 'uploading' && f.phase !== 'ingest'" class="btn btn-sm btn-outline-danger" @click="removeFile(f)">删除</button>
           </div>
         </div>
       </div>
@@ -337,7 +349,8 @@
               <div class="ii-main">
                 <div class="ii-name" :title="it.filename">{{ it.filename }}</div>
                 <div class="ii-meta">
-                  <template v-if="it.status === 'done'">
+                  <template v-if="it.source_type === 'url'">{{ urlStatusLabel(it) }} · {{ it.text_length }} 字</template>
+                  <template v-else-if="it.status === 'done'">
                     <span class="status-ok">✓ 待入库</span>
                     {{ it.source_type === 'image' ? `OCR ${it.text_length} 字` : `${it.page_count} 页 / ${it.text_length} 字` }}
                   </template>
@@ -351,21 +364,24 @@
           </div>
 
           <button
-            v-if="doneCount > 1"
+            v-if="fileDoneCount > 1"
             class="btn btn-success ingest-all-btn"
             :disabled="ingestBusy"
             @click="ingestAll"
           >
             <span v-if="ingestBusy" class="spinner-xs"></span>
-            全部入库（{{ doneCount }} 个）
+            全部文件入库（{{ fileDoneCount }} 个）
           </button>
         </template>
+
+        <p v-if="serverItems.some(item => item.source_type === 'url')" class="module-sub">链接正文需逐条查看并确认，不包含在“全部文件入库”中。</p>
 
         <!-- 选中项：处理效果检查 / 编辑 / 入库 -->
         <div v-if="detail" class="review-panel">
           <div class="review-head">
             <span class="review-title">处理效果检查 · {{ detail.filename }}</span>
             <input
+              v-if="detail.source_type !== 'url'"
               v-model="ingestTitle"
               type="text"
               class="title-input"
@@ -373,7 +389,10 @@
             />
           </div>
 
-          <template v-if="detail.status === 'error'">
+          <UrlImportReview v-if="detail.source_type === 'url'" :key="detail.id + ':' + urlDetailGeneration" :item="detail"
+            :kb-id="selectedKbId" :can-write="canWriteUrlTarget" @dirty="urlDirty = $event" @busy="urlBusy = $event"
+            @updated="updateUrlDetail" @submitted="onUrlSubmitted" />
+          <template v-else-if="detail.status === 'error'">
             <div class="review-error">解析失败：{{ detail.error }}</div>
             <div class="review-actions">
               <button class="btn btn-primary" @click="retryParse(detail)">重新解析</button>
@@ -428,7 +447,7 @@
             </div>
           </template>
 
-          <div v-if="detail.status === 'done'" class="review-actions">
+          <div v-if="detail.status === 'done' && detail.source_type !== 'url'" class="review-actions">
             <button
               v-if="detail.source_type === 'image'"
               class="btn btn-primary"
@@ -487,8 +506,9 @@
               <span class="ht-seq">{{ historyOffset + idx + 1 }}</span>
               <span class="ht-time">{{ formatDateTime(item.ingested_at) }}</span>
               <span class="ht-source">
+                <UrlSource v-if="item.source_type === 'url'" :source="item" />
                 <button
-                  v-if="item.source_file_exists"
+                  v-else-if="item.source_file_exists"
                   class="ht-link"
                   :title="item.source_name"
                   @click="openHistorySource(item)"
@@ -663,10 +683,15 @@
 
 <script setup>
 import { ref, computed, reactive, onMounted, onUnmounted, nextTick } from 'vue'
-import { useRouter, useRoute } from 'vue-router'
+import { useRouter, useRoute, onBeforeRouteLeave } from 'vue-router'
+import { useAuthStore } from '@/stores/auth'
+import UrlImportReview from '@/components/UrlImportReview.vue'
+import UrlSource from '@/components/UrlSource.vue'
+import { safeArticleUrl, urlStatusLabel } from '@/utils/urlArticles'
 import Cropper from 'cropperjs/dist/cropper.esm.js'
 import {
   uploadPendingFile,
+  createUrlImport, listUrlImports, getUrlImport, retryUrlImport, deleteUrlImport,
   listPendingUploads,
   getPendingUpload,
   ingestPendingUpload,
@@ -683,17 +708,59 @@ import { analyzeImageBlur, BLUR_VARIANCE_THRESHOLD } from '@/utils/imageQuality'
 
 const router = useRouter()
 const route = useRoute()
-
+const auth = useAuthStore()
+const urlInput = ref('')
+const urlSubmitting = ref(false)
+const rendererEnabled = ref(false)
+const urlDirty = ref(false)
+const urlBusy = ref(false)
+const urlDetailGeneration = ref(0)
+let detailRequest = 0
+let pageAlive = true
+function allowLeave() {
+  if (urlBusy.value) { showStatus('正在保存或确认，请稍候。'); return false }
+  return !urlDirty.value || confirm('链接草稿有未保存的修改，确定放弃修改吗？')
+}
+function switchTab(tab) {
+  if (activeTab.value === tab) return true
+  if (!allowLeave()) return false
+  if (urlDirty.value) clearDetail()
+  activeTab.value = tab
+  return true
+}
+onBeforeRouteLeave(() => allowLeave())
+function beforeUnload(event) {
+  if (urlDirty.value || urlBusy.value) { event.preventDefault(); event.returnValue = '' }
+}
+async function submitUrl() {
+  if (urlSubmitting.value) return
+  if (!safeArticleUrl(urlInput.value.trim())) { showStatus('请输入有效的 HTTP／HTTPS 公开链接', 'error'); return }
+  urlSubmitting.value = true
+  try {
+    const res = await createUrlImport(urlInput.value.trim())
+    serverItems.value.unshift(res.data.item)
+    urlInput.value = ''
+    showStatus('链接已提交，解析后请在知识入库中检查并确认。', 'success')
+    startPolling()
+  } catch (error) { showStatus(error.response?.data?.detail || '提交链接失败', 'error') }
+  finally { urlSubmitting.value = false }
+}
+function updateUrlDetail(value) {
+  if (selectedItemId.value === value.id) detail.value = value
+  const index = serverItems.value.findIndex(item => item.id === value.id)
+  if (index >= 0) serverItems.value[index] = value
+}
+function onUrlSubmitted() { startPolling(); refreshPending() }
 
 // ---- 模块切换 ----
 const activeTab = ref('upload')
 function switchToIngest() {
-  activeTab.value = 'ingest'
+  if (!switchTab('ingest')) return false
   refreshPending()
   startPolling()
 }
 function switchToHistory() {
-  activeTab.value = 'history'
+  if (!switchTab('history')) return
   loadHistory(true)
 }
 
@@ -888,7 +955,7 @@ function detectType(file) {
   return null
 }
 function typeIcon(type) {
-  return type === 'image' ? '图' : type === 'word' ? 'W' : type === 'pdf' ? 'P' : '文'
+  return type === 'url' ? '链' : type === 'image' ? '图' : type === 'word' ? 'W' : type === 'pdf' ? 'P' : '文'
 }
 function formatSize(bytes) {
   if (!bytes && bytes !== 0) return ''
@@ -1383,21 +1450,32 @@ function stopPolling() {
     pollTimer = null
   }
 }
+let pollInFlight = false
 async function refreshPending() {
+  if (pollInFlight || !pageAlive) return
+  pollInFlight = true
   try {
-    const res = await listPendingUploads()
-    serverItems.value = res.data.items || []
-  } catch (e) {
-    /* 静默：下个周期重试 */
-  }
-  const active = serverItems.value.some((i) => i.status === 'pending' || i.status === 'parsing')
-  if (!active && uploadingItems.value.length === 0 && !batchUploading.value) stopPolling()
+    const results = await Promise.allSettled([listPendingUploads(), listUrlImports()])
+    if (!pageAlive) return
+    const files = results[0].status === 'fulfilled' ? results[0].value.data.items || [] : serverItems.value.filter(i => i.source_type !== 'url')
+    const urls = results[1].status === 'fulfilled' ? results[1].value.data.items || [] : serverItems.value.filter(i => i.source_type === 'url')
+    if (results[1].status === 'fulfilled') rendererEnabled.value = !!results[1].value.data.renderer_enabled
+    serverItems.value = [...files, ...urls].sort((a, b) => b.created_at.localeCompare(a.created_at))
+    const current = urls.find(item => item.id === selectedItemId.value)
+    if (current && detail.value?.source_type === 'url' && detail.value.phase === 'ingest') {
+      // 状态轮询不得覆盖正在编辑的正文、标题和版本。
+      detail.value = { ...detail.value, status: current.status, result: current.result, error: current.error }
+    }
+    const active = serverItems.value.some(i => ['pending', 'parsing', 'ingesting'].includes(i.status))
+    if (results.every(result => result.status === 'fulfilled') && !active && uploadingItems.value.length === 0 && !batchUploading.value) stopPolling()
+  } finally { pollInFlight = false }
 }
 
 // ---- 文件操作：预览 / 重试 / 删除 ----
 const previewImageSrc = ref('')
 
 function canPreview(item) {
+  if (item.source_type === 'url') return false
   if (item.status === 'uploading' || item.status === 'error') return false
   if (item.source_type === 'image') return true
   // 文档：PDF 随时可预览；Word 需解析阶段生成 PDF 预览后
@@ -1439,8 +1517,12 @@ function pageLink(item, pageNumber) {
 }
 
 async function retryParse(item) {
+  if (item.source_type === 'url' && (!allowLeave() || !confirm('重新解析会替换已保存的草稿正文，继续吗？'))) return
   try {
-    await retryPendingParse(item.id)
+    if (item.source_type === 'url') {
+      await retryUrlImport(item.id, item.revision)
+      if (selectedItemId.value === item.id) clearDetail()
+    } else await retryPendingParse(item.id)
     showStatus(`《${item.filename}》已重新提交解析`, 'info')
     startPolling()
     refreshPending()
@@ -1450,6 +1532,7 @@ async function retryParse(item) {
 }
 
 async function removeFile(item) {
+  if (selectedItemId.value === item.id && !allowLeave()) return
   if (!item.id) {
     // 本地上传失败条目，直接移除
     uploadingItems.value = uploadingItems.value.filter((x) => x.localId !== item.localId)
@@ -1457,7 +1540,8 @@ async function removeFile(item) {
   }
   if (!confirm(`确定删除《${item.filename}》吗？原始文件将一并删除`)) return
   try {
-    await deletePendingUpload(item.id)
+    if (item.source_type === 'url') await deleteUrlImport(item.id)
+    else await deletePendingUpload(item.id)
     serverItems.value = serverItems.value.filter((x) => x.id !== item.id)
     if (selectedItemId.value === item.id) clearDetail()
     showStatus('已删除', 'info')
@@ -1468,9 +1552,10 @@ async function removeFile(item) {
 
 // ---- 知识入库模块 ----
 const ingestItems = computed(() =>
-  serverItems.value.filter((i) => i.status === 'done' || i.status === 'error')
+  serverItems.value.filter((i) => i.status === 'done' || i.status === 'error' || (i.source_type === 'url' && ['ingesting', 'interrupted', 'succeeded'].includes(i.status)))
 )
 const doneCount = computed(() => serverItems.value.filter((i) => i.status === 'done').length)
+const fileDoneCount = computed(() => serverItems.value.filter((i) => i.status === 'done' && i.source_type !== 'url').length)
 
 const selectedItemId = ref(null)
 const detail = ref(null)
@@ -1481,7 +1566,7 @@ const polishingPages = ref(new Set())
 
 function goIngest(item) {
   // 「去入库」：切换到知识入库 Tab 并选中该项
-  switchToIngest()
+  if (switchToIngest() === false) return
   selectItem(item)
   setTimeout(() => {
     document.querySelector('.review-panel')?.scrollIntoView({ behavior: 'smooth' })
@@ -1489,22 +1574,34 @@ function goIngest(item) {
 }
 
 async function selectItem(item) {
+  if (!allowLeave()) return
+  urlDirty.value = false
+  urlDetailGeneration.value++
+  const request = ++detailRequest
   selectedItemId.value = item.id
   ingestTitle.value = ''
   detail.value = null
-  if (item.status === 'error') {
+  if (item.status === 'error' && item.source_type !== 'url') {
     detail.value = { ...item }
     return
   }
   try {
-    const res = await getPendingUpload(item.id)
+    const res = await (item.source_type === 'url' ? getUrlImport(item.id) : getPendingUpload(item.id))
+    if (request !== detailRequest || !pageAlive) return
     detail.value = res.data.item
+    if (item.source_type === 'url' && !canWriteUrlTarget.value) {
+      const target = kbList.value.find(kb => kb.visibility === 'private' && kb.owner_id === auth.user?.id)
+      selectedKbId.value = target?.id || ''
+      kbVisibilityFilter.value = 'private'
+    }
   } catch (e) {
     showStatus('加载解析结果失败：' + (e.response?.data?.detail || e.message), 'error')
   }
 }
 
 function clearDetail() {
+  detailRequest++
+  urlDirty.value = false
   selectedItemId.value = null
   detail.value = null
   ingestTitle.value = ''
@@ -1563,6 +1660,7 @@ const ingestProgressPercent = computed(() => {
 
 async function ingestCurrent() {
   const d = detail.value
+  if (d.source_type === 'url') throw new Error('链接需要通过专用确认流程入库')
   const payload = {
     kb_id: selectedKbId.value,
     title: ingestTitle.value.trim(),
@@ -1607,7 +1705,7 @@ async function ingestSelected() {
 }
 
 async function ingestAll() {
-  const targets = serverItems.value.filter((i) => i.status === 'done')
+  const targets = serverItems.value.filter((i) => i.status === 'done' && i.source_type !== 'url')
   if (!targets.length || ingestBusy.value) return
   if (!confirm(`将 ${targets.length} 个文件依次入库到当前选中的知识库，继续吗？`)) return
   ingestBusy.value = true
@@ -1666,6 +1764,10 @@ const kbList = ref([])
 const kbIsAdmin = ref(false)
 const selectedKbId = ref('')
 const kbVisibilityFilter = ref('public')
+const canWriteUrlTarget = computed(() => {
+  const kb = kbList.value.find(item => item.id === selectedKbId.value)
+  return !!kb && (kb.visibility === 'public' ? auth.isAdmin : kb.owner_id === auth.user?.id)
+})
 const filteredKbList = computed(() =>
   kbList.value.filter((kb) => kb.visibility === kbVisibilityFilter.value)
 )
@@ -1722,6 +1824,7 @@ async function submitCreateKb() {
 
 // ---- 生命周期 ----
 onMounted(() => {
+  window.addEventListener('beforeunload', beforeUnload)
   loadKnowledgeBases()
   refreshPending()
   startPolling()
@@ -1734,6 +1837,8 @@ onMounted(() => {
   }
 })
 onUnmounted(() => {
+  pageAlive = false
+  window.removeEventListener('beforeunload', beforeUnload)
   stopPolling()
   if (statusTimer) clearTimeout(statusTimer)
   if (blurModal.thumb) URL.revokeObjectURL(blurModal.thumb)
@@ -1741,6 +1846,9 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
+.url-input-row { display: flex; gap: 12px; margin-bottom: 12px; }
+.url-input-row input { flex: 1; min-width: 0; padding: 12px; border: 1px solid var(--color-border); border-radius: 8px; font-size: 14px; }
+@media (max-width: 520px) { .url-input-row { flex-direction: column; } }
 .upload-view {
   max-width: 1100px;
   margin: 0 auto;

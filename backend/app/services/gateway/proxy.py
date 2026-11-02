@@ -22,12 +22,13 @@ import httpx
 from app.config import settings as app_settings
 from app.core.request_budget import remaining, iterate, close_resources
 from app.core import observability as agent_obs
-from app.services.gateway import channels as ch_svc
 from app.services.gateway import keys as key_svc
 from app.services.gateway import logs as log_svc
+from app.services.gateway import rules as rule_svc
 from app.services.gateway import security
 from app.services.gateway import settings as settings_svc
 from app.services.gateway import upstream
+from app.services.gateway import upstreams as up_svc
 
 logger = logging.getLogger("jianziruyang.gateway.proxy")
 
@@ -82,6 +83,10 @@ class Ctx:
         self.key_row: dict = {}
         self.model_req = ""
         self.stream = False
+        # 业务路由提示（role/显式规则/发起用户）
+        self.role = ""
+        self.rule_id = ""
+        self.user_id = ""
         self.forward_body: dict = {}
         self.findings: List[dict] = []
         self.risk_level = "none"
@@ -90,7 +95,8 @@ class Ctx:
         self.candidates: List[dict] = []
         self.client_ip = ""
         # 上游结果（failover 后填充）
-        self.channel: Optional[dict] = None
+        self.rule: Optional[dict] = None
+        self.upstream: Optional[dict] = None
         self.model_mapped = ""
         self.upstream_url = ""
         self.retries = 0
@@ -122,6 +128,10 @@ def prepare(body: dict, raw_key: str, client_ip: str = "") -> Ctx:
     ctx.stream = bool(body.get("stream"))
     ctx.model_req = str(body.get("model") or "")
     ctx.forward_body = body
+    # 业务路由提示（由 LLMFactory.create_for_role 通过 extra_body 注入，出网时被 upstream 剥离）
+    ctx.role = str(body.get("_gw_role") or "")
+    ctx.rule_id = str(body.get("_gw_rule_id") or "")
+    ctx.user_id = str(body.get("_gw_user_id") or "")
     base = {
         "id": ctx.log_id, "created_at": ctx.created_at, "client_ip": ctx.client_ip,
         "model_requested": ctx.model_req, "stream": ctx.stream,
@@ -175,20 +185,26 @@ def prepare(body: dict, raw_key: str, client_ip: str = "") -> Ctx:
         })
         raise GatewayError(403, "请求命中安全审计规则，已被网关阻断", "blocked_by_audit")
 
-    # 4. 渠道选路（优先级 + 权重）
-    ctx.candidates = ch_svc.select_candidates(ctx.model_req)
+    # 4. 规则选路（显式规则 > role 路由 > 模式匹配 > 默认规则）
+    ctx.rule, ctx.candidates = rule_svc.select_upstreams(
+        ctx.model_req, role=ctx.role or None,
+        rule_id=ctx.rule_id or None, user_id=ctx.user_id or None)
     if not ctx.candidates:
-        msg = f"没有可用于模型「{ctx.model_req}」的渠道，请先在网关中配置渠道"
-        ctx.tracer.add("route", "渠道选路", "error", msg)
+        msg = f"没有可用于模型「{ctx.model_req}」的上游，请先在网关中配置上游与路由规则"
+        ctx.tracer.add("route", "规则选路", "error", msg)
         log_svc.write_log({**base, "status": "error", "status_code": 503,
                            "latency_ms": _latency(ctx), "risk_level": risk_level,
                            "risk_score": risk_score, "risks": findings,
                            "trace_steps": ctx.tracer.dump(), "error": msg})
-        raise GatewayError(503, msg, "no_channel")
-    health_note = "、".join(f"{c['name']}(P{c.get('priority', 0)}/W{c.get('weight', 1)})"
+        raise GatewayError(503, msg, "no_upstream")
+    pat = (ctx.rule or {}).get("model_pattern", "")
+    health_note = "、".join(f"{c['name']}(W{c.get('weight', 100)})"
                            for c in ctx.candidates[:4])
-    ctx.tracer.add("route", "渠道选路", "ok",
-                   f"{len(ctx.candidates)} 个候选：{health_note}")
+    ctx.tracer.add("route", "规则选路", "ok",
+                   f"规则「{pat}」命中 {len(ctx.candidates)} 个上游：{health_note}")
+    # 显性化日志：路由规则 → 模型 → 上游候选（与 trace_steps 同源，便于直接查日志文件）
+    logger.info("[网关选路] role=%s 路由规则「%s」→ 模型「%s」 上游候选 %d 个：%s",
+                ctx.role or "-", pat, ctx.model_req, len(ctx.candidates), health_note)
     ctx._base = base  # 供 finalize 复用
     try:
         remaining(ctx.deadline)
@@ -229,8 +245,8 @@ def _finalize(ctx: Ctx, *, status: str, status_code: int, prompt_tokens: int = 0
     ]))
     log_svc.write_log({
         **getattr(ctx, "_base", {}),
-        "channel_id": (ctx.channel or {}).get("id", ""),
-        "channel_name": (ctx.channel or {}).get("name", ""),
+        "channel_id": (ctx.rule or {}).get("id", ""),
+        "channel_name": (ctx.rule or {}).get("model_pattern", ""),
         "model_mapped": ctx.model_mapped, "upstream_url": ctx.upstream_url,
         "status": status, "status_code": status_code, "retries": ctx.retries,
         "prompt_tokens": int(prompt_tokens or 0), "completion_tokens": int(completion_tokens or 0),
@@ -259,13 +275,16 @@ async def json_response(ctx: Ctx) -> tuple[int, dict]:
 
 async def _json_response(ctx: Ctx) -> tuple[int, dict]:
     last_err = ""
-    for idx, ch in enumerate(ctx.candidates[:_max_attempts(ctx)]):
+    for idx, up in enumerate(ctx.candidates[:_max_attempts(ctx)]):
         ctx.retries = idx
-        mapped = ch_svc.map_model(ch, ctx.model_req)
-        url = ch_svc.build_upstream_url(ch)
-        ctx.channel, ctx.model_mapped, ctx.upstream_url = ch, mapped, url
+        # 上游自身持有出网配置；请求模型名原样出网（无模型映射）
+        eff = up_svc.effective(up)
+        url = up_svc.build_upstream_url(eff)
+        mapped = ctx.model_req
+        ctx.upstream, ctx.model_mapped, ctx.upstream_url = up, mapped, url
+        t0 = time.monotonic()
         try:
-            headers, payload = upstream.build_request(ch, ctx.forward_body, mapped, stream=False)
+            headers, payload = upstream.build_request(eff, ctx.forward_body, mapped, stream=False)
             async with httpx.AsyncClient(timeout=_network_timeout(ctx)) as client:
                 resp = await client.post(url, headers=headers, json=payload)
             sc = resp.status_code
@@ -276,11 +295,13 @@ async def _json_response(ctx: Ctx) -> tuple[int, dict]:
                 raw = resp.json()
             except Exception:
                 raise RuntimeError(f"上游响应非 JSON: {resp.text[:200]}")
-            normalized = upstream.normalize_response(ch, sc, raw)
-            ch_svc.mark_success(ch["id"])
-            ctx.channel, ctx.model_mapped, ctx.upstream_url = ch, mapped, url
-            ctx.tracer.add("upstream", f"调用渠道 {ch['name']}", "ok",
-                           f"{ch.get('protocol')} → {mapped}，HTTP {sc}")
+            normalized = upstream.normalize_response(eff, sc, raw)
+            up_svc.mark_success(up["id"], int((time.monotonic() - t0) * 1000))
+            ctx.tracer.add("upstream", f"调用上游 {up['name']}", "ok",
+                           f"{eff.get('protocol')} → {mapped}，HTTP {sc}")
+            logger.info("[网关出网] 路由规则「%s」→ 模型「%s」 via 上游「%s」 HTTP %s %dms",
+                        (ctx.rule or {}).get("model_pattern", ""), mapped, up["name"], sc,
+                        int((time.monotonic() - t0) * 1000))
             usage = normalized.get("usage") or {}
             pt, ct = int(usage.get("prompt_tokens") or 0), int(usage.get("completion_tokens") or 0)
             preview, tool_calls = _extract_preview(normalized)
@@ -293,16 +314,16 @@ async def _json_response(ctx: Ctx) -> tuple[int, dict]:
             return sc, normalized
         except Exception as e:
             last_err = str(e)
-            ch_svc.mark_failure(ch["id"], last_err)
-            ctx.tracer.add("upstream", f"调用渠道 {ch['name']}", "error", last_err)
-            logger.warning("网关上游失败，切换下一渠道: channel=%s err=%s", ch.get("name"), last_err)
+            up_svc.mark_failure(up["id"], last_err)
+            ctx.tracer.add("upstream", f"调用上游 {up['name']}", "error", last_err)
+            logger.warning("网关上游失败，切换下一个: upstream=%s err=%s", up.get("name"), last_err)
             continue
     # 所有候选均失败
-    ctx.tracer.add("response", "响应下游", "error", f"全部渠道失败: {last_err}")
+    ctx.tracer.add("response", "响应下游", "error", f"全部上游失败: {last_err}")
     ctx.tracer.add("log", "日志入库", "ok", "已留存失败链路")
-    _finalize(ctx, status="error", status_code=502, error=f"所有渠道均调用失败: {last_err}",
+    _finalize(ctx, status="error", status_code=502, error=f"所有上游均调用失败: {last_err}",
               response_preview="")
-    raise GatewayError(502, f"所有渠道均调用失败: {last_err}", "all_channels_failed")
+    raise GatewayError(502, f"所有上游均调用失败: {last_err}", "all_upstreams_failed")
 
 
 def _extract_preview(normalized: dict) -> tuple[str, list]:
@@ -330,17 +351,19 @@ async def stream_response(ctx: Ctx) -> AsyncGenerator[str, None]:
     acc_text: List[str] = []
     usage = {"pt": 0, "ct": 0}
     tool_names: List[str] = []
-    final_status, final_code, final_err = "error", 502, "所有渠道均调用失败"
+    final_status, final_code, final_err = "error", 502, "所有上游均调用失败"
     committed = False
     try:
-        for idx, ch in enumerate(ctx.candidates[:_max_attempts(ctx)]):
+        for idx, up in enumerate(ctx.candidates[:_max_attempts(ctx)]):
             ctx.retries = idx
-            mapped = ch_svc.map_model(ch, ctx.model_req)
-            url = ch_svc.build_upstream_url(ch)
-            ctx.channel, ctx.model_mapped, ctx.upstream_url = ch, mapped, url
+            eff = up_svc.effective(up)
+            url = up_svc.build_upstream_url(eff)
+            mapped = ctx.model_req
+            ctx.upstream, ctx.model_mapped, ctx.upstream_url = up, mapped, url
+            t0 = time.monotonic()
             client = resp = iterator = None
             try:
-                headers, payload = upstream.build_request(ch, ctx.forward_body, mapped, stream=True)
+                headers, payload = upstream.build_request(eff, ctx.forward_body, mapped, stream=True)
                 client = httpx.AsyncClient(timeout=_network_timeout(ctx))
                 async with asyncio.timeout(remaining(ctx.deadline)):
                     req = client.build_request("POST", url, headers=headers, json=payload)
@@ -348,13 +371,16 @@ async def stream_response(ctx: Ctx) -> AsyncGenerator[str, None]:
                     if resp.status_code >= 400:
                         body_txt = (await resp.aread()).decode("utf-8", "ignore")[:200]
                         raise RuntimeError(f"上游 {resp.status_code}: {body_txt}")
-                ctx.tracer.add("upstream", f"调用渠道 {ch['name']}", "ok", f"{mapped}（流式）")
-                iterator = iterate(upstream.stream_iterator(ch, resp.aiter_lines()), ctx.deadline)
+                ctx.tracer.add("upstream", f"调用上游 {up['name']}", "ok", f"{mapped}（流式）")
+                iterator = iterate(upstream.stream_iterator(eff, resp.aiter_lines()), ctx.deadline)
                 async for sse in iterator:
                     _account_sse(sse, acc_text, usage, tool_names)
                     if any(line.strip() == "data: [DONE]" for line in sse.splitlines()):
                         final_status, final_code, final_err = "ok", resp.status_code, ""
-                        ch_svc.mark_success(ch["id"])
+                        up_svc.mark_success(up["id"], int((time.monotonic() - t0) * 1000))
+                        logger.info("[网关出网] 路由规则「%s」→ 模型「%s」 via 上游「%s」 流式 %dms",
+                                    (ctx.rule or {}).get("model_pattern", ""), mapped, up["name"],
+                                    int((time.monotonic() - t0) * 1000))
                         yield sse
                         break
                     for line in sse.splitlines():
@@ -372,8 +398,8 @@ async def stream_response(ctx: Ctx) -> AsyncGenerator[str, None]:
                 break
             except Exception as e:
                 final_err = str(e)
-                ch_svc.mark_failure(ch["id"], final_err)
-                ctx.tracer.add("upstream", f"调用渠道 {ch['name']}", "error", final_err)
+                up_svc.mark_failure(up["id"], final_err)
+                ctx.tracer.add("upstream", f"调用上游 {up['name']}", "error", final_err)
                 if committed:
                     break
             finally:

@@ -37,7 +37,7 @@ async def rewrite_query(query: str, llm_provider: str = None) -> str:
 
     Args:
         query: 用户原始问题
-        llm_provider: LLM 提供商（可选）
+        llm_provider: 已废弃（保留兼容）；模型统一由网关 intent_rewrite 业务路由解析
 
     Returns:
         改写后的检索查询
@@ -46,7 +46,7 @@ async def rewrite_query(query: str, llm_provider: str = None) -> str:
         return query
 
     try:
-        llm = LLMFactory.create(llm_provider)
+        llm = LLMFactory.create_for_role("intent_rewrite")
         messages = [
             {"role": "system", "content": REWRITE_SYSTEM_PROMPT},
             {"role": "user", "content": query},

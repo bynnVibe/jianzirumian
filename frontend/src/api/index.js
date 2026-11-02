@@ -52,6 +52,15 @@ export function getImageUrl(imagePath) {
 /**
  * 构造聊天附件原文件访问 URL（游客可用，无需 token；文件名为不可猜测的 UUID）
  */
+export const createUrlImport = (url) => api.post('/knowledge/url-imports', { url })
+export const listUrlImports = () => api.get('/knowledge/url-imports')
+export const getUrlImport = (id) => api.get(`/knowledge/url-imports/${encodeURIComponent(id)}`)
+export const saveUrlImport = (id, body) => api.patch(`/knowledge/url-imports/${encodeURIComponent(id)}`, body)
+export const retryUrlImport = (id, revision) => api.post(`/knowledge/url-imports/${encodeURIComponent(id)}/retry`, { expected_revision: revision })
+export const confirmUrlImport = (id, revision, kbId) => api.post(`/knowledge/url-imports/${encodeURIComponent(id)}/confirm`, { revision, kb_id: kbId })
+export const deleteUrlImport = (id) => api.delete(`/knowledge/url-imports/${encodeURIComponent(id)}`)
+export const getUrlSnapshot = (path) => api.get(`/uploads/${encodeURIComponent(path.split('/').pop())}`, { baseURL: '/', responseType: 'text' })
+
 export function getAttachmentFileUrl(fileId) {
   if (!fileId) return ''
   return `/api/chat/attachment/${encodeURIComponent(fileId)}`
@@ -97,6 +106,7 @@ export function sendChatMessageWithFiles(params, files, signal) {
   form.append('use_search', String(!!params.use_search))
   form.append('llm_provider', params.llm_provider || '')
   form.append('kb_id', params.kb_id || '')
+  form.append('rule_id', params.rule_id || '')
   for (const file of files || []) {
     form.append('files', file)
   }
@@ -780,8 +790,8 @@ export function recompileWikiAll() {
 
 /**
  * 知识助手问答（SSE 流式）。
- * payload: { message, page_id, page_title, route_name, route_label, history }
- * onEvent(ev) 事件：status / plan / plan_step / thought / tool / clarify / token / confirm / done / error
+ * payload: { message, page_id, page_title, route_name, route_label, page_state, user_actions, history, session_id }
+ * onEvent(ev) 事件：session / status / thought / tool / clarify / token / confirm / done / error
  */
 export async function assistantChat(payload, onEvent, signal) {
   const token = localStorage.getItem('auth_token')
@@ -846,6 +856,27 @@ export function rejectAssistantEdit(editId) {
   return api.post(`/wiki/assistant/edits/${encodeURIComponent(editId)}/reject`)
 }
 
+/**
+ * 历史助手会话列表（按最近更新倒序）
+ */
+export function listAssistantSessions() {
+  return api.get('/wiki/assistant/sessions')
+}
+
+/**
+ * 历史会话消息（含 meta，供回放思考/工具/追问/编辑卡）
+ */
+export function getAssistantSessionMessages(sessionId) {
+  return api.get(`/wiki/assistant/sessions/${encodeURIComponent(sessionId)}/messages`)
+}
+
+/**
+ * 删除历史会话（仅本人）
+ */
+export function deleteAssistantSession(sessionId) {
+  return api.delete(`/wiki/assistant/sessions/${encodeURIComponent(sessionId)}`)
+}
+
 // ============================================
 // Agent 可观测性 API（仅管理员）
 // ============================================
@@ -856,6 +887,11 @@ export function rejectAssistantEdit(editId) {
  */
 export function getObservabilityMetrics(days = 7) {
   return api.get('/observability/metrics', { params: { days } })
+}
+
+/** 当前登录用户的业务概览，不含任何技术追踪数据。 */
+export function getMyObservabilityMetrics(days = 7) {
+  return api.get('/observability/my-metrics', { params: { days } })
 }
 
 /**
@@ -871,6 +907,10 @@ export function getObservabilityTraces(params = {}) {
  */
 export function getObservabilityTrace(traceId) {
   return api.get(`/observability/traces/${encodeURIComponent(traceId)}`)
+}
+
+export function getObservabilityTraceLogs(traceId, params = {}) {
+  return api.get(`/observability/traces/${encodeURIComponent(traceId)}/logs`, { params })
 }
 
 
@@ -1106,24 +1146,44 @@ export function getGatewayStats(days = 7) {
   return api.get('/gateway/stats', { params: { days } })
 }
 
-// ---- 渠道（负载均衡 + 故障切换）----
-export function listGatewayChannels() {
-  return api.get('/gateway/channels')
+// ---- 上游管理（协议 + Base URL + Key + 成本层级 + 模型清单 + 权重/健康/延迟）----
+export function listGatewayUpstreams() {
+  return api.get('/gateway/upstreams')
 }
-export function createGatewayChannel(payload) {
-  return api.post('/gateway/channels', payload)
+export function createGatewayUpstream(payload) {
+  return api.post('/gateway/upstreams', payload)
 }
-export function updateGatewayChannel(channelId, payload) {
-  return api.put(`/gateway/channels/${encodeURIComponent(channelId)}`, payload)
+export function updateGatewayUpstream(upstreamId, payload) {
+  return api.put(`/gateway/upstreams/${encodeURIComponent(upstreamId)}`, payload)
 }
-export function deleteGatewayChannel(channelId) {
-  return api.delete(`/gateway/channels/${encodeURIComponent(channelId)}`)
+export function deleteGatewayUpstream(upstreamId) {
+  return api.delete(`/gateway/upstreams/${encodeURIComponent(upstreamId)}`)
 }
-export function testGatewayChannel(channelId) {
-  return api.post(`/gateway/channels/${encodeURIComponent(channelId)}/test`)
+export function cloneGatewayUpstream(upstreamId) {
+  return api.post(`/gateway/upstreams/${encodeURIComponent(upstreamId)}/clone`)
 }
-export function resetGatewayChannelHealth(channelId) {
-  return api.post(`/gateway/channels/${encodeURIComponent(channelId)}/reset-health`)
+export function testGatewayUpstream(upstreamId, model = '') {
+  return api.post(`/gateway/upstreams/${encodeURIComponent(upstreamId)}/test`, { model })
+}
+export function resetGatewayUpstreamHealth(upstreamId) {
+  return api.post(`/gateway/upstreams/${encodeURIComponent(upstreamId)}/reset-health`)
+}
+export function listOpenRouterFreeModels() {
+  return api.get('/gateway/openrouter-free')
+}
+
+// ---- 路由规则（模型模式 → 上游列表 + 负载均衡策略）----
+export function listGatewayRoutingRules() {
+  return api.get('/gateway/routing-rules')
+}
+export function createGatewayRoutingRule(payload) {
+  return api.post('/gateway/routing-rules', payload)
+}
+export function updateGatewayRoutingRule(ruleId, payload) {
+  return api.put(`/gateway/routing-rules/${encodeURIComponent(ruleId)}`, payload)
+}
+export function deleteGatewayRoutingRule(ruleId) {
+  return api.delete(`/gateway/routing-rules/${encodeURIComponent(ruleId)}`)
 }
 
 // ---- 密钥与配额 ----
@@ -1166,6 +1226,24 @@ export function saveGatewaySettings(payload) {
 }
 export function gatewayScanPreview(text) {
   return api.post('/gateway/scan-preview', { text })
+}
+
+// ---- （模型注册表与旧上游端点已退役：模型清单并入上游、连接配置归属上游）----
+
+// ---- 业务路由（role → 规则 + 模型）----
+export function listGatewayRoleRoutes() {
+  return api.get('/gateway/role-routes')
+}
+export function upsertGatewayRoleRoute(role, payload) {
+  return api.put(`/gateway/role-routes/${encodeURIComponent(role)}`, payload)
+}
+export function deleteGatewayRoleRoute(role) {
+  return api.delete(`/gateway/role-routes/${encodeURIComponent(role)}`)
+}
+
+// ---- 当前用户可用规则（聊天页路由下拉，普通登录用户可访问）----
+export function listMyGatewayRules(model = '') {
+  return api.get('/gateway/my-rules', { params: { model } })
 }
 
 export default api

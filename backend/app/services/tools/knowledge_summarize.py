@@ -41,7 +41,8 @@ class KnowledgeSummarizeTool(BaseTool):
         try:
             from app.core.llm import LLMFactory
 
-            llm = LLMFactory.create()
+            # 知识点总结走网关业务路由（默认规则）
+            llm = LLMFactory.create_for_role("knowledge_summarize")
             prompt = (
                 "请对以下笔记内容提炼知识点总结，突出重点、结构清晰，200~400字：\n\n"
                 f"{raw_text[:4000]}"

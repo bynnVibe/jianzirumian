@@ -15,6 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
 
+from app.config import settings
 from app.core import db
 from app.services.tools import base as tools_base
 from app.services.tools.document_import import document_import_tool
@@ -65,6 +66,44 @@ def _record_tool_call(session_id: str, message_id: str, user_id: str, tool_name:
         )
     except Exception as e:
         logger.warning("记录工具调用失败（忽略，不影响对话）: %s", e)
+
+
+def _clip_budget(text: str, limit: int) -> str:
+    """按字符预算截断单段文本，超限时保留首部并标注被截断。"""
+    text = text or ""
+    if limit <= 0 or len(text) <= limit:
+        return text
+    return text[:limit] + f"\n…（内容过长，已截断，原长 {len(text)} 字符，仅保留前 {limit} 字符）"
+
+
+def _apply_context_budget(summaries: List[str]) -> Tuple[List[str], bool]:
+    """对附件工具结果施加两级字符预算：先逐条截断，再控制总量。
+
+    附件（OCR/文档解析原文）是单次请求 Token 尖峰的最大来源。返回 (截断后 summaries, 是否发生截断)。
+    """
+    per_item = getattr(settings, "ATTACHMENT_CTX_PER_ITEM_CHARS", 1500)
+    total = getattr(settings, "ATTACHMENT_CTX_TOTAL_CHARS", 4000)
+    clipped = [s for s in summaries]
+    truncated = False
+    for i, s in enumerate(clipped):
+        new = _clip_budget(s, per_item)
+        if new != s:
+            truncated = True
+            clipped[i] = new
+    # 总量预算：从前往后累加，超出的附件以占位提示替代，避免总量失控。
+    if total > 0:
+        acc = 0
+        for i, s in enumerate(clipped):
+            if acc + len(s) > total:
+                remain = max(0, total - acc)
+                clipped[i] = _clip_budget(s, remain) if remain > 80 else "（因附件上下文总量预算已满，本附件内容已省略）"
+                truncated = True
+                # 其后附件全部折叠为占位，避免总量失控
+                for j in range(i + 1, len(clipped)):
+                    clipped[j] = "（因附件上下文总量预算已满，本附件内容已省略）"
+                break
+            acc += len(s)
+    return clipped, truncated
 
 
 async def handle_attachments(
@@ -143,5 +182,9 @@ async def handle_attachments(
             record, status,
         )
 
-    context_text = "【聊天框附件处理结果】\n" + "\n\n".join(summaries) if summaries else ""
+    clipped, truncated = _apply_context_budget(summaries)
+    header = "【聊天框附件处理结果】"
+    if truncated:
+        header += "（部分内容因上下文预算被截断，如需完整内容请单独查看附件）"
+    context_text = header + "\n" + "\n\n".join(clipped) if clipped else ""
     return context_text, records

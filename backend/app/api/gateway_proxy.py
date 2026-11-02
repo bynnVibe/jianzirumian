@@ -13,9 +13,9 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from app.core.request_budget import ClosingStreamingResponse as StreamingResponse, until_disconnect
 
-from app.services.gateway import channels as ch_svc
 from app.services.gateway import keys as key_svc
 from app.services.gateway import proxy
+from app.services.gateway import upstreams as up_svc
 
 logger = logging.getLogger("jianziruyang.gateway.proxy_api")
 
@@ -79,7 +79,7 @@ async def list_models(request: Request):
         key_row = key_svc.authenticate(raw_key)
     except key_svc.KeyRejected as e:
         return _err(e.status_code, e.message, e.code)
-    models = ch_svc.all_models()
+    models = up_svc.all_model_names()
     # 若密钥限制了可访问模型，只返回其允许的子集
     import json as _json
     try:

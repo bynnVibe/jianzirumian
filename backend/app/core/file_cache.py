@@ -276,6 +276,13 @@ async def serve_cached_file(file_path, user: dict):
             headers={"X-File-Cache": "MISS"},
         )
 
+    # URL 确认快照可能处于写入中或失败状态，不能走遗留文件的开放回退。
+    if filename.startswith("url-") and filename.endswith(".md"):
+        from app.core import db
+        draft = db.query_one("SELECT owner_id FROM url_imports WHERE file_path=?", (str(file_path),))
+        if not draft or draft["owner_id"] != user.get("id"):
+            raise HTTPException(status_code=403, detail="无权访问该链接快照")
+
     # 无上传记录：不缓存，直接下发
     data = await asyncio.to_thread(file_path.read_bytes)
     logger.info(

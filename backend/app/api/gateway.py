@@ -1,67 +1,100 @@
 """
 见字如面 - 模型网关管理 API（管理员 / 运维角色）
 
-覆盖四大模块的后台管理与可视化数据：
+覆盖后台管理与可视化数据：
+- 上游管理：/api/gateway/upstreams（增删改查 + 克隆 + 连通性测试 + 健康重置）
+- 路由规则：/api/gateway/routing-rules（模型模式 → 上游列表 + 负载均衡）
+- 业务路由：/api/gateway/role-routes（role → 规则 + 模型）
 - 密钥与配额：/api/gateway/keys（增删改查 + 重置用量）
-- 渠道与负载：/api/gateway/channels（增删改查 + 连通性测试 + 健康重置）
 - 日志与审计：/api/gateway/logs（搜索/筛选/分页 + 展开明细含链路）
 - 安全审计中心：/api/gateway/settings、/api/gateway/rules
 - 仪表盘：/api/gateway/overview、/api/gateway/stats
 
-所有端点均通过 require_ops 校验（admin 与 ops 均可访问）。
+所有端点均通过 require_ops 校验（admin 与 ops 均可访问）；/my-rules 普通登录用户可访问。
 """
-import json
 import logging
 from typing import List, Optional
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict
 
-from app.api.deps import require_ops
-from app.services.gateway import channels as ch_svc
+from app.api.deps import require_ops, get_current_user
 from app.services.gateway import keys as key_svc
 from app.services.gateway import logs as log_svc
+from app.services.gateway import rules as rule_svc
 from app.services.gateway import security
 from app.services.gateway import settings as settings_svc
-from app.config import settings as app_settings
-from urllib.parse import quote
+from app.services.gateway import upstreams as up_svc
 
 logger = logging.getLogger("jianziruyang.gateway.api")
 
 router = APIRouter(prefix="/api/gateway", tags=["gateway"])
-
-_TEST_TIMEOUT = httpx.Timeout(connect=8, read=30, write=15, pool=5)
 
 
 # ---------------------------------------------------------------------------
 # 请求体模型
 # ---------------------------------------------------------------------------
 
-class ChannelBody(BaseModel):
+class UpstreamBody(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
     name: str
     protocol: str = "openai"
-    base_url: str
+    base_url: str = ""
     api_key: str = ""
+    # 成本层级：paid|free|subscription（free 且空 Base URL/Key 回退系统 OpenRouter）
+    tier: str = "paid"
+    # 模型清单（该上游可服务的模型名，图2「模型列表」）
     models: List[str] = []
-    model_mapping: dict = {}
-    priority: int = 0
-    weight: int = 1
+    weight: int = 100
     enabled: bool = True
+    remark: str = ""
 
 
-class ChannelPatch(BaseModel):
+class UpstreamPatch(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
     name: Optional[str] = None
     protocol: Optional[str] = None
     base_url: Optional[str] = None
     api_key: Optional[str] = None
+    tier: Optional[str] = None
     models: Optional[List[str]] = None
-    model_mapping: Optional[dict] = None
-    priority: Optional[int] = None
     weight: Optional[int] = None
     enabled: Optional[bool] = None
+    remark: Optional[str] = None
+
+
+class UpstreamTestBody(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+    model: str = ""
+
+
+class RuleBody(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+    model_pattern: str
+    upstreams: List[str] = []
+    lb_strategy: str = "weighted"
+    priority: int = 0
+    is_default: bool = False
+    allowed_users: List[str] = []
+    enabled: bool = True
+
+
+class RulePatch(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+    model_pattern: Optional[str] = None
+    upstreams: Optional[List[str]] = None
+    lb_strategy: Optional[str] = None
+    priority: Optional[int] = None
+    is_default: Optional[bool] = None
+    allowed_users: Optional[List[str]] = None
+    enabled: Optional[bool] = None
+
+
+class RoleRouteBody(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+    role: str
+    rule_id: str = ""
+    model_name: str = ""
 
 
 class KeyBody(BaseModel):
@@ -91,6 +124,8 @@ class SettingsBody(BaseModel):
     blacklist: Optional[List[str]] = None
     whitelist: Optional[List[str]] = None
     log_retention_days: Optional[int] = None
+    # 网关默认模型（业务路由未指定模型名时的兜底出网模型；空串=清除回退 .env）
+    default_model: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -99,20 +134,24 @@ class SettingsBody(BaseModel):
 
 @router.get("/overview")
 async def overview(_ops: dict = Depends(require_ops)):
-    """网关总览：渠道/密钥计数 + 近 7 天调用统计 + 最近风险日志。"""
+    """网关总览：上游/规则/密钥计数 + 近 7 天调用统计 + 最近风险日志。"""
     stats = log_svc.stats(7)
-    channels = ch_svc.list_channels()
+    ups = up_svc.list_upstreams()
+    rules = rule_svc.list_rules()
     keys = key_svc.list_keys()
     risky = log_svc.query_logs(risk_level="high", limit=5)
     risky_crit = log_svc.query_logs(risk_level="critical", limit=5)
     health = {"healthy": 0, "degraded": 0, "down": 0}
-    for c in channels:
-        health[c.get("health", "healthy")] = health.get(c.get("health", "healthy"), 0) + 1
+    for u in ups:
+        h = u.get("health", "healthy")
+        health[h] = health.get(h, 0) + 1
     return {
         "success": True,
-        "channel_count": len(channels),
-        "channel_enabled": sum(1 for c in channels if c.get("enabled")),
-        "channel_health": health,
+        "upstream_count": len(ups),
+        "upstream_enabled": sum(1 for u in ups if u.get("enabled")),
+        "upstream_health": health,
+        "rule_count": len(rules),
+        "rule_enabled": sum(1 for r in rules if r.get("enabled")),
         "key_count": len(keys),
         "key_enabled": sum(1 for k in keys if k.get("enabled")),
         "stats": stats,
@@ -127,69 +166,155 @@ async def stats(days: int = 7, _ops: dict = Depends(require_ops)):
 
 
 # ---------------------------------------------------------------------------
-# 渠道管理（负载均衡 + 故障切换）
+# 上游管理（协议 + Base URL + Key + 成本层级 + 模型清单 + 权重/健康/延迟）
 # ---------------------------------------------------------------------------
 
-@router.get("/channels")
-async def list_channels(_ops: dict = Depends(require_ops)):
-    return {"success": True, "channels": ch_svc.list_channels(),
-            "models": ch_svc.all_models()}
+@router.get("/upstreams")
+async def list_upstreams(_ops: dict = Depends(require_ops)):
+    return {"success": True, "upstreams": up_svc.list_upstreams(),
+            "protocols": list(up_svc.VALID_PROTOCOLS),
+            "tiers": list(up_svc.TIERS),
+            "models": up_svc.all_model_names()}
 
 
-@router.post("/channels")
-async def create_channel(body: ChannelBody, _ops: dict = Depends(require_ops)):
+@router.post("/upstreams")
+async def create_upstream(body: UpstreamBody, _ops: dict = Depends(require_ops)):
     try:
-        ch = ch_svc.create_channel(body.model_dump())
+        up = up_svc.create_upstream(body.model_dump())
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    return {"success": True, "channel": ch}
+    return {"success": True, "upstream": up}
 
 
-@router.put("/channels/{channel_id}")
-async def update_channel(channel_id: str, body: ChannelPatch, _ops: dict = Depends(require_ops)):
+@router.put("/upstreams/{upstream_id}")
+async def update_upstream(upstream_id: str, body: UpstreamPatch,
+                          _ops: dict = Depends(require_ops)):
     patch = {k: v for k, v in body.model_dump().items() if v is not None}
     try:
-        ch = ch_svc.update_channel(channel_id, patch)
+        up = up_svc.update_upstream(upstream_id, patch)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    if not ch:
-        raise HTTPException(status_code=404, detail="渠道不存在")
-    return {"success": True, "channel": ch}
+    if not up:
+        raise HTTPException(status_code=404, detail="上游不存在")
+    return {"success": True, "upstream": up}
 
 
-@router.delete("/channels/{channel_id}")
-async def delete_channel(channel_id: str, _ops: dict = Depends(require_ops)):
-    if not ch_svc.delete_channel(channel_id):
-        raise HTTPException(status_code=404, detail="渠道不存在")
+@router.delete("/upstreams/{upstream_id}")
+async def delete_upstream(upstream_id: str, _ops: dict = Depends(require_ops)):
+    if not up_svc.delete_upstream(upstream_id):
+        raise HTTPException(status_code=404, detail="上游不存在")
     return {"success": True}
 
 
-@router.post("/channels/{channel_id}/reset-health")
-async def reset_channel_health(channel_id: str, _ops: dict = Depends(require_ops)):
-    ch_svc.reset_health(channel_id)
-    return {"success": True, "channel": ch_svc.get_channel(channel_id)}
+@router.post("/upstreams/{upstream_id}/clone")
+async def clone_upstream(upstream_id: str, _ops: dict = Depends(require_ops)):
+    up = up_svc.clone_upstream(upstream_id)
+    if not up:
+        raise HTTPException(status_code=404, detail="上游不存在")
+    return {"success": True, "upstream": up}
 
 
-@router.post("/channels/{channel_id}/test")
-async def test_channel(channel_id: str, _ops: dict = Depends(require_ops)):
-    """通过独立 Proxy 执行最小模型请求；手动诊断可能产生上游费用。"""
-    if not ch_svc.get_channel(channel_id):
-        raise HTTPException(404, "渠道不存在")
-    token = app_settings.PROXY_DIAGNOSTIC_TOKEN
-    if len(token) < 32:
-        raise HTTPException(503, "内部诊断凭据未配置（至少32字符），未执行任何渠道探测")
-    url = app_settings.LLM_PROXY_URL.rstrip("/") + "/internal/diagnostics/channels/" + quote(channel_id, safe="")
+@router.post("/upstreams/{upstream_id}/reset-health")
+async def reset_upstream_health(upstream_id: str, _ops: dict = Depends(require_ops)):
+    up_svc.reset_health(upstream_id)
+    return {"success": True, "upstream": up_svc.get_upstream(upstream_id)}
+
+
+@router.post("/upstreams/{upstream_id}/test")
+async def test_upstream(upstream_id: str, body: UpstreamTestBody = UpstreamTestBody(),
+                        _ops: dict = Depends(require_ops)):
+    """对上游生效配置发一次最小请求验证连通性（可能产生上游费用）。"""
+    if not up_svc.get_upstream(upstream_id):
+        raise HTTPException(status_code=404, detail="上游不存在")
+    result = await up_svc.test_connection(upstream_id, body.model)
+    return {"success": True, **result}
+
+
+@router.get("/openrouter-free")
+async def openrouter_free(_ops: dict = Depends(require_ops)):
+    """实时拉取 OpenRouter 免费模型列表（供快速导入为 free 层级上游）。"""
+    ids = await up_svc.fetch_openrouter_free()
+    return {"success": True, "models": ids}
+
+
+# ---------------------------------------------------------------------------
+# 路由规则（模型模式 → 上游列表 + 负载均衡策略）
+# ---------------------------------------------------------------------------
+
+@router.get("/routing-rules")
+async def list_routing_rules(_ops: dict = Depends(require_ops)):
+    return {"success": True, "rules": rule_svc.list_rules(),
+            "lb_strategies": list(rule_svc.LB_STRATEGIES),
+            "upstreams": up_svc.list_upstreams(),
+            "models": up_svc.all_model_names()}
+
+
+@router.post("/routing-rules")
+async def create_routing_rule(body: RuleBody, _ops: dict = Depends(require_ops)):
     try:
-        async with httpx.AsyncClient(timeout=35, follow_redirects=False) as client:
-            resp = await client.post(url, headers={"X-Diagnostic-Token": token})
-        if resp.status_code != 200:
-            raise HTTPException(502, f"独立 Proxy 诊断不可用（HTTP {resp.status_code}）")
-        result = resp.json()
-        if result.get("executor") != "llm-proxy":
-            raise HTTPException(502, "Proxy 诊断返回无效的执行来源")
-        return result
-    except (httpx.HTTPError, ValueError):
-        raise HTTPException(502, "无法连接独立 Proxy 诊断服务；没有回退到 Agent 直连")
+        rule = rule_svc.create_rule(body.model_dump())
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"success": True, "rule": rule}
+
+
+@router.put("/routing-rules/{rule_id}")
+async def update_routing_rule(rule_id: str, body: RulePatch, _ops: dict = Depends(require_ops)):
+    patch = {k: v for k, v in body.model_dump().items() if v is not None}
+    try:
+        rule = rule_svc.update_rule(rule_id, patch)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not rule:
+        raise HTTPException(status_code=404, detail="路由规则不存在")
+    return {"success": True, "rule": rule}
+
+
+@router.delete("/routing-rules/{rule_id}")
+async def delete_routing_rule(rule_id: str, _ops: dict = Depends(require_ops)):
+    if not rule_svc.delete_rule(rule_id):
+        raise HTTPException(status_code=404, detail="路由规则不存在")
+    return {"success": True}
+
+
+# ---------------------------------------------------------------------------
+# 业务路由（role → 规则 + 模型）
+# ---------------------------------------------------------------------------
+
+@router.get("/role-routes")
+async def list_role_routes(_ops: dict = Depends(require_ops)):
+    return {"success": True, "routes": rule_svc.list_role_routes(),
+            "roles": list(rule_svc.ROLES)}
+
+
+@router.put("/role-routes/{role}")
+async def upsert_role_route(role: str, body: RoleRouteBody, _ops: dict = Depends(require_ops)):
+    try:
+        route = rule_svc.upsert_role_route(role, body.rule_id, body.model_name)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"success": True, "route": route}
+
+
+@router.delete("/role-routes/{role}")
+async def delete_role_route(role: str, _ops: dict = Depends(require_ops)):
+    rule_svc.delete_role_route(role)
+    return {"success": True}
+
+
+# ---------------------------------------------------------------------------
+# 当前用户可用规则（供聊天页路由下拉，普通登录用户即可访问）
+# ---------------------------------------------------------------------------
+
+@router.get("/my-rules")
+async def my_rules(model: str = "", user: dict = Depends(get_current_user)):
+    user_id = str(user.get("id") or user.get("username") or "")
+    rules = rule_svc.list_rules_for_user(user_id, model=model or None)
+    # 只回传下拉需要的字段，不暴露上游配置细节
+    slim = [{"id": r["id"], "model_pattern": r["model_pattern"],
+             "is_default": r.get("is_default", False),
+             "lb_strategy": r.get("lb_strategy", "weighted")} for r in rules]
+    return {"success": True, "rules": slim}
 
 
 # ---------------------------------------------------------------------------
@@ -198,7 +323,7 @@ async def test_channel(channel_id: str, _ops: dict = Depends(require_ops)):
 
 @router.get("/keys")
 async def list_keys(_ops: dict = Depends(require_ops)):
-    return {"success": True, "keys": key_svc.list_keys(), "models": ch_svc.all_models()}
+    return {"success": True, "keys": key_svc.list_keys(), "models": up_svc.all_model_names()}
 
 
 @router.post("/keys")
@@ -277,7 +402,7 @@ async def purge_logs(_ops: dict = Depends(require_ops)):
 
 @router.get("/rules")
 async def list_rules(_ops: dict = Depends(require_ops)):
-    """内置规则清单（含当前启用状态）+ 分类标签。"""
+    """内置安全规则清单（含当前启用状态）+ 分类标签。"""
     settings = settings_svc.get_settings()
     disabled = set(settings.get("disabled_rules") or [])
     rules = security.list_builtin_rules()

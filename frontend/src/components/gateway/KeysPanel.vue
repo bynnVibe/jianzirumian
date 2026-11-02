@@ -2,10 +2,11 @@
   <div class="panel">
     <div class="panel-head">
       <div class="panel-intro">
-        <h2>本地密钥与配额管理</h2>
+        <h2>访问密钥 · 配额（下游鉴权）</h2>
         <p>
           为每个下游用户 / 应用生成独立的本地访问密钥（<code>sk-jzrm-...</code>），可设置 Token 与请求次数配额、限定可访问模型。
-          下游只持有本地密钥，真实上游 Key 始终留在渠道内。<strong>明文密钥仅在创建时展示一次</strong>，请及时复制保存。
+          本页密钥仅供<strong>调用方接入本网关</strong>使用；上游厂商密钥在「模型 · 上游端点」处维护，两者方向不同、互不通用。
+          <strong>明文密钥仅在创建时展示一次</strong>，请及时复制保存。
         </p>
       </div>
       <button class="btn btn-primary" @click="openCreate">+ 生成密钥</button>
@@ -59,9 +60,12 @@
     </table>
 
     <!-- 表单弹窗 -->
-    <div v-if="showModal" class="modal-mask" @click.self="showModal = false">
+    <div v-if="showModal" class="modal-mask">
       <div class="modal">
-        <h3 class="modal-title">{{ editing ? '编辑密钥' : '生成密钥' }}</h3>
+        <div class="modal-head">
+          <h3 class="modal-title">{{ editing ? '编辑密钥' : '生成密钥' }}</h3>
+          <button class="modal-close" title="关闭" @click="showModal = false">×</button>
+        </div>
         <div class="form-grid">
           <label class="field span-2">
             <span class="field-label">密钥名称 *（下游用户/应用标识）</span>
@@ -97,9 +101,12 @@
     </div>
 
     <!-- 明文密钥展示（仅一次） -->
-    <div v-if="newPlainKey" class="modal-mask" @click.self="newPlainKey = ''">
+    <div v-if="newPlainKey" class="modal-mask">
       <div class="modal">
-        <h3 class="modal-title">🔑 密钥已生成</h3>
+        <div class="modal-head">
+          <h3 class="modal-title">🔑 密钥已生成</h3>
+          <button class="modal-close" title="关闭" @click="newPlainKey = ''">×</button>
+        </div>
         <p class="plain-warn">这是该密钥的<strong>唯一一次</strong>明文展示，数据库仅保存哈希值。请立即复制并妥善保管：</p>
         <div class="plain-key-box">
           <code class="plain-key mono">{{ newPlainKey }}</code>
@@ -257,7 +264,10 @@ onMounted(load)
 
 .modal-mask { position: fixed; inset: 0; background: rgba(45,42,36,0.35); display: flex; align-items: center; justify-content: center; z-index: 100; padding: 20px; }
 .modal { background: #fffdfb; border-radius: 14px; padding: 22px 24px; width: 100%; max-width: 520px; max-height: 88vh; overflow-y: auto; box-shadow: 0 8px 30px rgba(0,0,0,0.18); }
-.modal-title { font-size: 16px; font-weight: 700; margin-bottom: 16px; }
+.modal-title { font-size: 16px; font-weight: 700; margin-bottom: 0; }
+.modal-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
+.modal-close { background: none; border: none; font-size: 22px; line-height: 1; cursor: pointer; color: var(--color-text-secondary); padding: 0 4px; }
+.modal-close:hover { color: var(--color-primary); }
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 18px; }
 .form-grid .span-2 { grid-column: span 2; }
 .field { display: flex; flex-direction: column; gap: 6px; }

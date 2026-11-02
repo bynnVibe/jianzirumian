@@ -66,36 +66,42 @@
       </div>
 
       <!-- 来源信息：可展开的预览 -->
-      <div v-if="sources && sources.length > 0" class="sources-section">
-        <div class="sources-title">
+      <div v-if="documentSources.length > 0" class="sources-section">
+        <button type="button" class="sources-title sources-disclosure" :aria-expanded="sourcesOpen" @click="sourcesOpen = !sourcesOpen">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
             <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
             <polyline points="14 2 14 8 20 8"/>
             <line x1="16" y1="13" x2="8" y2="13"/>
             <line x1="16" y1="17" x2="8" y2="17"/>
           </svg>
-          知识来源 ({{ sources.length }})
-        </div>
-        <div class="sources-list">
+          <span>知识来源 · {{ documentSources.length }} 份文档</span>
+          <span class="sources-count">{{ sourceChunkCount }} 个片段</span>
+          <span class="source-toggle">{{ sourcesOpen ? '收起 ▴' : '展开 ▾' }}</span>
+        </button>
+        <div v-if="sourcesOpen" class="sources-list">
           <div
-            v-for="source in sources"
-            :key="source.index"
+            v-for="doc in documentSources"
+            :key="doc.key"
             class="source-item"
-            :class="{ expanded: expandedSource === source.index }"
-            :ref="el => setSourceRef('k-' + source.index, el)"
+            :class="{ expanded: expandedSource === doc.key }"
+            :ref="el => setSourceRef('k-' + doc.key, el)"
           >
-            <div class="source-header" @click="toggleSource(source.index)">
+            <button type="button" class="source-header" :aria-expanded="expandedSource === doc.key" @click="toggleSource(doc.key)">
               <span class="source-badge">
-                来源 {{ source.index }}
-                <span v-if="source.relevance !== undefined" class="relevance-score" :class="relevanceClass(source.relevance)">
-                  {{ source.relevance }}%
+                来源 {{ doc.index }}
+                <span class="relevance-score" :class="relevanceClass(doc.relevance)" title="置信度按该文档最高检索相关度展示，不代表答案正确率">
+                  {{ doc.relevance }}%
                 </span>
               </span>
-              <span class="source-preview">{{ truncateText(source.text, 80) }}</span>
-              <span class="source-toggle">{{ expandedSource === source.index ? '收起' : '展开' }}</span>
-            </div>
+              <span class="source-preview" :title="doc.document_title">{{ doc.document_title }}</span>
+              <span class="sources-count">{{ doc.chunk_count }} 个片段</span>
+              <span class="source-toggle">{{ expandedSource === doc.key ? '收起' : '展开' }}</span>
+            </button>
             <!-- 展开详细内容 -->
-            <div v-if="expandedSource === source.index" class="source-detail">
+            <div v-if="expandedSource === doc.key" class="source-detail">
+              <div v-if="doc.citation_indices.length > 1" class="source-chunk-label">对应正文引用：{{ doc.citation_indices.map(n => '[来源 ' + n + ']').join('、') }}</div>
+              <div v-for="(source, chunkIndex) in doc.chunks" :key="chunkIndex" class="source-chunk">
+              <div class="source-chunk-label">片段 {{ chunkIndex + 1 }}<span v-if="source.is_wiki_page"> · 百科知识</span><span v-if="source.relevance != null"> · 相关度 {{ source.relevance }}%</span></div>
               <div class="source-full-text">{{ source.text }}</div>
               <div class="source-detail-actions">
                 <button class="btn-bookmark-sm" @click.stop="openBookmarkModal('knowledge', source.text, '', buildBookmarkSourceInfo(source))" title="收藏此知识片段">
@@ -143,8 +149,8 @@
                   </a>
                 </template>
               </div>
-              <!-- 图片类来源才显示原图；Word/PDF 文档不显示图片链接 -->
-              <div v-if="source.source_image && !isDocumentSource(source)" class="source-image-box">
+              <!-- 图片类来源才显示原图；Word/PDF 文档不显示图片链接；URL 来源单独展示 -->
+              <div v-if="chunkIndex === 0 && source.source_image && !isDocumentSource(source) && !isUrlSource(source)" class="source-image-box">
                 <img
                   :src="getImageUrl(source.source_image)"
                   class="source-image"
@@ -152,6 +158,11 @@
                   @click="openImage(source.source_image)"
                 />
                 <a :href="getImageUrl(source.source_image)" target="_blank" class="view-image-link">查看原图</a>
+              </div>
+              <!-- URL 网页来源：原文链接 + 已确认入库正文快照 -->
+              <div v-if="chunkIndex === 0 && isUrlSource(source)" class="source-url-box">
+                <UrlSource :source="source" />
+              </div>
               </div>
             </div>
           </div>
@@ -196,16 +207,17 @@
         </div>
       </div>
 
-      <!-- 联网搜索结果：与知识来源一致的可展开预览 -->
+      <!-- 联网搜索结果：与知识来源一致的可展开预览（整块默认收起，点击展开） -->
       <div v-if="searchResults && searchResults.length > 0" class="search-section">
-        <div class="sources-title">
+        <button type="button" class="sources-title sources-disclosure" :aria-expanded="searchOpen" @click="searchOpen = !searchOpen">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
             <circle cx="11" cy="11" r="8"/>
             <line x1="21" y1="21" x2="16.65" y2="16.65"/>
           </svg>
-          联网搜索结果 ({{ searchResults.length }})
-        </div>
-        <div class="sources-list">
+          <span>联网搜索结果 ({{ searchResults.length }})</span>
+          <span class="source-toggle">{{ searchOpen ? '收起 ▴' : '展开 ▾' }}</span>
+        </button>
+        <div v-if="searchOpen" class="sources-list">
           <div
             v-for="(result, idx) in searchResults"
             :key="idx"
@@ -338,7 +350,9 @@
 <script setup>
 import { ref, reactive, computed, watch, nextTick } from 'vue'
 import MarkdownIt from 'markdown-it'
+import { groupKnowledgeSources } from '@/utils/chatStream'
 import { createBookmark, getImageUrl as buildImageUrl, getAttachmentFileUrl } from '@/api'
+import UrlSource from '@/components/UrlSource.vue'
 
 const props = defineProps({
   role: { type: String, required: true },
@@ -402,6 +416,10 @@ function submitDislike(withComment) {
   emit('feedback', { rating: 'dislike', comment })
 }
 
+const sourcesOpen = ref(false)
+const searchOpen = ref(false)
+const documentSources = computed(() => groupKnowledgeSources(props.sources || []))
+const sourceChunkCount = computed(() => documentSources.value.reduce((count, doc) => count + doc.chunk_count, 0))
 const expandedSource = ref(null)
 const expandedSearch = ref(null)
 
@@ -444,12 +462,15 @@ async function jumpToSource(kind, num) {
   if (kind === 'web') {
     const idx = num - 1
     if (!props.searchResults || idx < 0 || idx >= props.searchResults.length) return
+    searchOpen.value = true
     expandedSearch.value = idx
     key = 'w-' + idx
   } else {
-    if (!props.sources?.some(s => s.index === num)) return
-    expandedSource.value = num
-    key = 'k-' + num
+    const doc = documentSources.value.find(source => source.citation_indices.includes(num))
+    if (!doc) return
+    sourcesOpen.value = true
+    expandedSource.value = doc.key
+    key = 'k-' + doc.key
   }
   await nextTick()
   const el = sourceEls.get(key)
@@ -523,6 +544,10 @@ function getSourceType(source) {
 function isDocumentSource(source) {
   const t = getSourceType(source)
   return t === 'word' || t === 'pdf'
+}
+
+function isUrlSource(source) {
+  return getSourceType(source) === 'url'
 }
 
 function isWordSource(source) {
@@ -621,6 +646,10 @@ function buildBookmarkSourceInfo(source) {
     pdf_preview_path: source.pdf_preview_path,
     kb_name: source.kb_name || '',
     index: source.index,
+    source_url: source.source_url || '',
+    final_url: source.final_url || '',
+    source_site: source.source_site || '',
+    fetched_at: source.fetched_at || '',
   }
 }
 
@@ -778,6 +807,60 @@ async function saveBookmark() {
   margin-bottom: 8px;
 }
 
+.sources-disclosure {
+  width: 100%;
+  padding: 2px 0;
+  margin-bottom: 0;
+  background: none;
+  border: none;
+  text-align: left;
+  cursor: pointer;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.sources-disclosure > .source-toggle {
+  margin-left: auto;
+}
+
+.sources-disclosure[aria-expanded="true"] {
+  margin-bottom: 12px;
+}
+
+.sources-disclosure:focus-visible,
+button.source-header:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+.sources-count {
+  font-size: 11px;
+  font-weight: normal;
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+}
+
+.source-chunk + .source-chunk {
+  border-top: 1px dashed #ede6dc;
+  margin-top: 14px;
+  padding-top: 14px;
+}
+
+.source-chunk-label {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  margin-bottom: 8px;
+  overflow-wrap: anywhere;
+}
+
+button.source-header {
+  width: 100%;
+  border: none;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+}
+
 .sources-list {
   display: flex;
   flex-direction: column;
@@ -860,6 +943,10 @@ async function saveBookmark() {
   flex-direction: column;
   align-items: flex-start;
   gap: 6px;
+}
+
+.source-url-box {
+  margin-top: 6px;
 }
 
 .source-image {

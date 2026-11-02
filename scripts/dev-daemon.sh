@@ -42,6 +42,14 @@ start() {
   sleep 1
   echo "[1/2] 启动后端 (http://localhost:8000)..."
   cd "$PROJECT_DIR/backend"
+  # macOS/pyenv 下 Python ssl 默认上下文缺少 CA，会使 SafeFetcher(trust_env=False) 直连 HTTPS
+  # 报 CERTIFICATE_VERIFY_FAILED；用 venv 内 certifi 的 CA bundle 兜底。
+  # 生产 Docker python:3.11-slim 自带 ca-certificates，此变量存在也无副作用。
+  CERTIFI_BUNDLE="$(.venv/bin/python -m certifi 2>/dev/null)"
+  if [ -n "$CERTIFI_BUNDLE" ]; then
+    export SSL_CERT_FILE="$CERTIFI_BUNDLE"
+    export REQUESTS_CA_BUNDLE="$CERTIFI_BUNDLE"
+  fi
   nohup .venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 \
     > "$LOG_DIR/backend.log" 2>&1 &
   echo $! > "$BACKEND_PID_FILE"

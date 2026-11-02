@@ -22,6 +22,13 @@ REMOTE_DIR="/opt/jianziruyang"
 # 镜像标签
 BACKEND_IMAGE="${PROJECT_NAME}-backend:latest"
 FRONTEND_IMAGE="${PROJECT_NAME}-frontend:latest"
+RENDERER_IMAGE="${PROJECT_NAME}-renderer:latest"
+
+# 隔离浏览器渲染兜底镜像开关（默认关闭，保持现有部署行为不变）：
+# 需要动态页面（公众号/知乎）浏览器兜底时：
+#   ENABLE_RENDERER=1 bash scripts/deploy-aliyun.sh build
+# 启用后还需在服务器 backend/.env 设 URL_RENDERER_ENABLED=true 并以 --profile renderer 启动。
+ENABLE_RENDERER="${ENABLE_RENDERER:-0}"
 
 # 导出目录
 EXPORT_DIR="${PROJECT_DIR}/docker-images"
@@ -108,6 +115,19 @@ cmd_build() {
         .
     log "前端镜像构建完成: $FRONTEND_IMAGE"
 
+    # 构建隔离渲染兜底镜像（仅在 ENABLE_RENDERER=1 时）
+    if [ "$ENABLE_RENDERER" = "1" ]; then
+        info "构建渲染兜底镜像（Playwright Chromium）..."
+        docker build \
+            -t "$RENDERER_IMAGE" \
+            -f renderer/Dockerfile \
+            --platform linux/amd64 \
+            $REGISTRY_BUILD_ARG \
+            $PIP_INDEX_BUILD_ARG \
+            .
+        log "渲染兜底镜像构建完成: $RENDERER_IMAGE"
+    fi
+
     echo ""
     log "镜像列表："
     docker images --format "table {{.Repository}}\t{{.Tag}}\t{{.Size}}" | grep "$PROJECT_NAME"
@@ -141,6 +161,17 @@ cmd_save() {
     info "导出前端镜像..."
     docker save "$FRONTEND_IMAGE" | gzip > "$EXPORT_DIR/${PROJECT_NAME}-frontend.tar.gz"
     log "已导出: $EXPORT_DIR/${PROJECT_NAME}-frontend.tar.gz ($(du -h "$EXPORT_DIR/${PROJECT_NAME}-frontend.tar.gz" | cut -f1))"
+
+    # 导出渲染兜底镜像（仅在 ENABLE_RENDERER=1 且镜像存在时）
+    if [ "$ENABLE_RENDERER" = "1" ]; then
+        if ! docker image inspect "$RENDERER_IMAGE" &>/dev/null; then
+            err "渲染兜底镜像不存在，请先执行: ENABLE_RENDERER=1 bash scripts/deploy-aliyun.sh build"
+            exit 1
+        fi
+        info "导出渲染兜底镜像..."
+        docker save "$RENDERER_IMAGE" | gzip > "$EXPORT_DIR/${PROJECT_NAME}-renderer.tar.gz"
+        log "已导出: $EXPORT_DIR/${PROJECT_NAME}-renderer.tar.gz ($(du -h "$EXPORT_DIR/${PROJECT_NAME}-renderer.tar.gz" | cut -f1))"
+    fi
 
     # 只同步受控配置，不读取真实环境文件或删除部署目录。
     python3 "$PROJECT_DIR/scripts/sync_deploy.py"
@@ -242,6 +273,13 @@ cmd_server_load() {
     info "加载前端镜像..."
     gunzip -c "${PROJECT_NAME}-frontend.tar.gz" | docker load
     log "前端镜像加载完成"
+
+    # 加载渲染兜底镜像（仅当部署包内含该产物时）
+    if [ -f "${PROJECT_NAME}-renderer.tar.gz" ]; then
+        info "加载渲染兜底镜像..."
+        gunzip -c "${PROJECT_NAME}-renderer.tar.gz" | docker load
+        log "渲染兜底镜像加载完成"
+    fi
 
     echo ""
     docker images --format "table {{.Repository}}\t{{.Tag}}\t{{.Size}}" | grep "$PROJECT_NAME"

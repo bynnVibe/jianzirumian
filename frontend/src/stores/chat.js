@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import { consumeChatStream, mergeChatAction } from '@/utils/chatStream'
+import { consumeChatStream, createTextPresenter, mergeChatAction } from '@/utils/chatStream'
 import {
   sendChatMessage,
   sendChatMessageWithFiles,
@@ -33,6 +33,7 @@ export const useChatStore = defineStore('chat', () => {
   const useKnowledge = ref(true)
   const useSearch = ref(false)
   const llmProvider = ref('')
+  const selectedRuleId = ref('') // 用户选择的路由规则（仅启用网关时生效）
 
   // ---- 计算属性 ----
   const currentSession = computed(() => {
@@ -134,6 +135,9 @@ export const useChatStore = defineStore('chat', () => {
     const requestController = new AbortController()
     controller = requestController
     pendingDone.value = null
+    const presenter = createTextPresenter(text => {
+      if (requestId === generationId) handleStreamEvent({ event: 'token', content: text })
+    }, requestController.signal)
 
     try {
       if (!currentSessionId.value) {
@@ -157,6 +161,7 @@ export const useChatStore = defineStore('chat', () => {
               use_knowledge: useKnowledge.value,
               use_search: useSearch.value,
               llm_provider: llmProvider.value,
+              rule_id: selectedRuleId.value,
             },
             files,
             requestController.signal,
@@ -167,13 +172,18 @@ export const useChatStore = defineStore('chat', () => {
             use_knowledge: useKnowledge.value,
             use_search: useSearch.value,
             llm_provider: llmProvider.value,
+            rule_id: selectedRuleId.value,
           }, requestController.signal)
 
       await consumeChatStream(response, data => {
-        if (requestId === generationId) handleStreamEvent(data)
+        if (requestId !== generationId) return
+        if (data.event === 'token') presenter.push(data.content || '')
+        else handleStreamEvent(data)
       }, requestController.signal)
-      streamDoneReceived = true
+      await presenter.finish()
+      streamDoneReceived = !requestController.signal.aborted
     } catch (err) {
+      await presenter.finish()
       if (requestId === generationId) {
         const reason = err.name === 'AbortError' ? '已停止生成' : err.message || '网络连接中断'
         currentResponse.value += `\n\n[生成已中断，内容不完整：${reason}]`
@@ -181,6 +191,7 @@ export const useChatStore = defineStore('chat', () => {
         searchResults.value = []
       }
     } finally {
+      presenter.cancel()
       requestController.abort()
       if (requestId !== generationId) return
       controller = null
@@ -327,6 +338,7 @@ export const useChatStore = defineStore('chat', () => {
     useKnowledge,
     useSearch,
     llmProvider,
+    selectedRuleId,
     // 计算
     currentSession,
     // 方法

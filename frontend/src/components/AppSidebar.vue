@@ -32,41 +32,23 @@
         </svg>
         新对话
       </button>
-
-      <router-link v-if="!auth.isGuest && !auth.isOps" to="/upload" class="btn-upload" :class="{ active: isUploadPage }" @click="handleNavClick">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="btn-icon">
-          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-          <polyline points="17 8 12 3 7 8"/>
-          <line x1="12" y1="3" x2="12" y2="15"/>
-        </svg>
-        知识库上传
-      </router-link>
     </div>
 
     <!-- 配置与管理的入口 -->
     <div class="actions config-actions">
-      <!-- 知识库管理（普通用户/管理员可见，运维角色不可见） -->
-      <router-link v-if="!auth.isOps" to="/knowledge" class="btn-upload" :class="{ active: isKnowledgePage }" @click="handleNavClick">
+      <!-- 知识库（整合 管理/收藏/百科 三入口，进入知识库控制台；运维角色不可见） -->
+      <router-link v-if="!auth.isOps" to="/kb" class="btn-upload" :class="{ active: isKnowledgeHub }" @click="handleNavClick">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="btn-icon">
           <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
         </svg>
-        知识库管理
+        知识库
       </router-link>
 
-      <!-- 知识收藏（普通用户/管理员可见，运维角色不可见） -->
-      <router-link v-if="!auth.isOps" to="/bookmarks" class="btn-upload" :class="{ active: isBookmarksPage }" @click="handleNavClick">
+      <router-link v-if="auth.isAuthenticated && !auth.canOps" to="/observability" class="btn-upload" :class="{ active: route.name === 'MyObservability' }" @click="handleNavClick">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="btn-icon">
-          <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/>
+          <path d="M3 3v18h18"/><path d="M7 14l4-4 4 3 6-8"/>
         </svg>
-        知识收藏
-      </router-link>
-
-      <!-- 知识百科（登录用户可见，运维角色不可见：llm-wiki 编译词条，含个人知识库词条） -->
-      <router-link v-if="!auth.isGuest && !auth.isOps" to="/wiki" class="btn-upload" :class="{ active: isWikiPage }" @click="handleNavClick">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="btn-icon">
-          <path d="M12 2l3 6 7 1-5 5 1 7-6-3-6 3 1-7-5-5 7-1z"/>
-        </svg>
-        知识百科
+        可观测性
       </router-link>
 
       <!-- 系统管理（管理员/运维可见）：进入独立管理控制台，收纳系统设置/用户管理/CI-CD/模型网关/回归评测/可观测性 -->
@@ -448,10 +430,7 @@ function toggleGroup(key) {
   collapsedGroups.value = next
 }
 
-const isUploadPage = computed(() => route.path === '/upload')
-const isKnowledgePage = computed(() => route.path === '/knowledge')
-const isBookmarksPage = computed(() => route.path === '/bookmarks')
-const isWikiPage = computed(() => route.path === '/wiki')
+const isKnowledgeHub = computed(() => route.path.startsWith('/kb'))
 // 系统管理控制台（/admin/*）入口高亮
 const isAdminConsole = computed(() => route.path.startsWith('/admin'))
 

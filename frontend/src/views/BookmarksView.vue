@@ -82,13 +82,17 @@
         <div class="card-body">
           <p class="card-content">{{ bookmark.content }}</p>
           <!-- 图片类来源：缩略图 -->
-          <div v-if="!isDocumentSource(bookmark) && bookmark.source_info?.source_image" class="card-thumb">
+          <div v-if="!isDocumentSource(bookmark) && !isUrlSource(bookmark) && bookmark.source_info?.source_image" class="card-thumb">
             <img
               :src="getImageUrl(bookmark.source_info.source_image)"
               class="thumb-img"
               alt="来源图片"
               @click.stop="openImage(bookmark.source_info.source_image)"
             />
+          </div>
+          <!-- URL 网页来源：原文链接 + 入库正文快照 -->
+          <div v-else-if="isUrlSource(bookmark)" class="card-thumb" @click.stop>
+            <UrlSource :source="bookmark.source_info" />
           </div>
           <!-- Word/PDF 来源：检索跳转链接 -->
           <div v-else-if="isDocumentSource(bookmark)" class="card-thumb">
@@ -190,6 +194,11 @@
                 <a :href="docPreviewUrl(detailBookmark)" target="_blank" class="detail-doc-link">{{ docLinkLabel(detailBookmark) }} ↗</a>
               </div>
             </div>
+            <!-- 来源：URL 网页 -->
+            <div v-else-if="detailBookmark.source_type === 'knowledge' && isUrlSource(detailBookmark)" class="detail-source">
+              <div class="detail-source-label">来源网页</div>
+              <UrlSource :source="detailBookmark.source_info" />
+            </div>
             <!-- 来源：原始图片 -->
             <div v-else-if="detailBookmark.source_type === 'knowledge' && detailBookmark.source_info?.source_image" class="detail-source">
               <div class="detail-source-label">来源图片</div>
@@ -226,11 +235,14 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import MarkdownIt from 'markdown-it'
+import UrlSource from '@/components/UrlSource.vue'
 import { listBookmarks, deleteBookmark, getImageUrl as buildImageUrl } from '@/api'
+import { useAssistantStore } from '@/stores/assistant'
 
 const md = new MarkdownIt({ html: false, linkify: true, breaks: true })
+const assistant = useAssistantStore()
 
 const PAGE_SIZE = 8
 
@@ -308,6 +320,48 @@ onMounted(async () => {
   await loadBookmarks()
 })
 
+onUnmounted(() => {
+  assistant.clearPageState()
+  assistant.clearOpenDoc()
+})
+
+// 我的收藏页的界面实时快照（当前页收藏清单 + 筛选/搜索），
+// 使助手在收藏页能直接“看到”用户屏幕上的收藏而无需用户粘贴标题
+const bookmarksPageState = computed(() => {
+  const items = pagedBookmarks.value.slice(0, 30).map((b) => ({
+    title: b.title || '未命名',
+    type: b.source_type === 'answer' ? 'AI回答' : '知识片段',
+    link: isDocumentSource(b) || isUrlSource(b) ? docPreviewUrl(b) : '',
+  }))
+  return {
+    view: '我的收藏' + (activeTag.value ? `（标签：${activeTag.value}）` : ''),
+    search: { mode: searchQuery.value.trim() ? 'title_filter' : 'none', query: searchQuery.value.trim() },
+    stats: { shown_count: totalFiltered.value, source_count: allBookmarks.value.length },
+    items,
+    items_truncated: pagedBookmarks.value.length > items.length,
+  }
+})
+
+// 列表/筛选/翻页变化时同步快照
+watch(bookmarksPageState, (state) => {
+  if (state) assistant.setPageState(state)
+  else assistant.clearPageState()
+})
+
+// 搜索防抖记一条行文动作（避免逐字刷屏）
+let searchActionTimer = null
+watch(searchQuery, (q) => {
+  const query = (q || '').trim()
+  if (searchActionTimer) clearTimeout(searchActionTimer)
+  if (!query) return
+  searchActionTimer = setTimeout(() => assistant.pushAction(`搜索收藏：${query.slice(0, 40)}`), 600)
+})
+
+// 翻页记一条行文动作
+watch(currentPage, (p, op) => {
+  if (p !== op) assistant.pushAction(`收藏列表翻到第 ${p} 页`)
+})
+
 async function loadBookmarks() {
   loading.value = true
   try {
@@ -323,11 +377,13 @@ async function loadBookmarks() {
 function toggleTag(tag) {
   activeTag.value = activeTag.value === tag ? '' : tag
   currentPage.value = 1
+  assistant.pushAction(`按标签筛选收藏：${activeTag.value || '全部'}`)
 }
 
 function clickTag(tag) {
   activeTag.value = tag
   currentPage.value = 1
+  assistant.pushAction(`按标签筛选收藏：${tag}`)
 }
 
 function formatDate(timestamp) {
@@ -356,10 +412,14 @@ const detailBookmark = ref(null)
 
 function openDetail(bookmark) {
   detailBookmark.value = bookmark
+  // 注入正在查看的收藏正文，助手无需重检即可结合内容作答
+  assistant.setOpenDoc({ title: bookmark.title || '', content: bookmark.content || '' })
+  assistant.pushAction(`打开收藏《${(bookmark.title || '').slice(0, 40)}》`)
 }
 
 function closeDetail() {
   detailBookmark.value = null
+  assistant.clearOpenDoc()
 }
 
 const renderedDetailContent = computed(() => {
@@ -380,6 +440,10 @@ function getSourceType(bookmark) {
 function isDocumentSource(bookmark) {
   const t = getSourceType(bookmark)
   return t === 'word' || t === 'pdf'
+}
+
+function isUrlSource(bookmark) {
+  return getSourceType(bookmark) === 'url'
 }
 
 // Word 文档跳转链接：已生成排版 PDF 则分页预览，否则下载原文
@@ -432,6 +496,7 @@ async function handleDelete() {
   try {
     await deleteBookmark(id)
     allBookmarks.value = allBookmarks.value.filter((b) => b.id !== id)
+    assistant.pushAction('删除了一条收藏')
     // 删除的是当前详情中的收藏时，同步关闭详情
     if (detailBookmark.value?.id === id) detailBookmark.value = null
     // 如果当前页没有数据了，回退一页

@@ -129,10 +129,10 @@ def wiki_priority_enabled() -> bool:
 async def _llm_complete(messages: List[dict], llm: "BaseLLM" = None) -> str:
     """调用 LLM 收集完整回复（内部走流式，失败自动降级非流式）。
 
-    llm 为空时使用系统主 LLM；知识助手会传入自己的专用模型实例。
+    llm 为空时走网关 wiki_compile 角色路由；知识助手会传入自己的专用模型实例。
     """
     if llm is None:
-        llm = LLMFactory.create()
+        llm = LLMFactory.create_for_role("wiki_compile")
     collected = []
     async for chunk in llm.chat(messages, stream=True):
         collected.append(chunk)
@@ -199,6 +199,7 @@ class WikiService:
         title: str = "",
         pdf_preview_path: Optional[str] = None,
         force: bool = False,
+        source_metadata: Optional[dict] = None,
     ) -> None:
         """资料入库成功后把编译任务写入持久化队列并唤醒 worker，不阻塞上传响应。"""
         if not wiki_compile_enabled():
@@ -227,6 +228,7 @@ class WikiService:
             "title": title or "",
             "pdf_preview_path": pdf_preview_path,
             "force": force,
+            "source_metadata": source_metadata or {},
         }
         self._enqueue(source_image, sha, payload)
         self._ensure_worker()
@@ -358,6 +360,7 @@ class WikiService:
         title: str = "",
         pdf_preview_path: Optional[str] = None,
         force: bool = True,
+        source_metadata: Optional[dict] = None,
     ) -> Optional[dict]:
         """手动/同步编译单个资料（API 直接调用）；失败静默返回 None。
 
@@ -374,6 +377,7 @@ class WikiService:
                 title=title,
                 pdf_preview_path=pdf_preview_path,
                 force=force,
+                source_metadata=source_metadata,
             )
         except Exception as e:
             logger.warning("[WIKI] 编译失败(%s): %s", title or Path(source_image).name, e)
@@ -391,6 +395,7 @@ class WikiService:
         title: str = "",
         pdf_preview_path: Optional[str] = None,
         force: bool = False,
+        source_metadata: Optional[dict] = None,
     ) -> Optional[dict]:
         """编译核心：两步思维链 + 增量跳过。跳过返回 None，LLM 失败抛 WikiCompileError。"""
         content = (full_text or "").strip()
@@ -442,7 +447,8 @@ class WikiService:
             )
             # 百科卡片以原始来源类型回写，使前端来源卡能跳回原文；打 is_wiki_page 标记
             page["doc_ids"] = self._index_page(
-                page, source_type=source_type, pdf_preview_path=pdf_preview_path
+                page, source_type=source_type, pdf_preview_path=pdf_preview_path,
+                source_metadata=source_metadata,
             )
             self._update_doc_ids(page["id"], page["doc_ids"])
 
@@ -661,7 +667,8 @@ class WikiService:
         )
         return page
 
-    def _index_page(self, page: dict, *, source_type: str, pdf_preview_path: Optional[str] = None) -> List[str]:
+    def _index_page(self, page: dict, *, source_type: str, pdf_preview_path: Optional[str] = None,
+                    source_metadata: Optional[dict] = None) -> List[str]:
         """把百科卡片向量化回写，供检索命中（同步 Embedding，放入调用线程执行）。"""
         try:
             chunks = vector_store.split_text(
@@ -675,6 +682,7 @@ class WikiService:
                 is_wiki_page=True,
                 wiki_page_id=page["id"],
                 wiki_title=page["title"],
+                **(source_metadata or {}),
             )
             if not chunks:
                 return []

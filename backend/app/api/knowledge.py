@@ -1002,6 +1002,14 @@ def _build_history_item(rec: dict) -> dict:
         "source_file_exists": bool(source_path) and os.path.exists(source_path),
         "entry_count": rec.get("chunk_count", 0),
         "has_parsed_content": bool(ocr_text or pages),
+        # 网页来源溯源字段（source_type=url；由 source_metadata 展开，供详情页显示原文跳转）
+        "source_url": rec.get("source_url") or "",
+        "final_url": rec.get("final_url") or "",
+        "source_site": rec.get("source_site") or "",
+        "fetched_at": rec.get("fetched_at") or "",
+        "extraction_method": rec.get("extraction_method") or "",
+        "content_origin": rec.get("content_origin") or "",
+        "url_import_id": rec.get("url_import_id") or "",
     }
 
 
@@ -1201,6 +1209,13 @@ async def list_knowledge_entries(
             pages=rec.get("pages") or None,
             kb_id=kb_id,
             kb_name=kb_names.get(kb_id, ""),
+            # 网页来源溯源字段（source_type=url；由 source_metadata 展开，供管理页显示原文跳转）
+            source_url=rec.get("source_url") or None,
+            final_url=rec.get("final_url") or None,
+            source_site=rec.get("source_site") or None,
+            fetched_at=rec.get("fetched_at") or None,
+            extraction_method=rec.get("extraction_method") or None,
+            content_origin=rec.get("content_origin") or None,
         ))
 
     # 按创建时间降序
@@ -1508,7 +1523,8 @@ async def polish_ocr(body: PolishOCRRequest):
         return {"success": False, "message": "文本为空", "polished_text": ""}
 
     try:
-        llm = LLMFactory.create()
+        # OCR 润色走网关业务路由（默认规则）
+        llm = LLMFactory.create_for_role("text_polish")
         system_prompt = {
             "role": "system",
             "content": (

@@ -229,18 +229,23 @@ class AssistantChatRequest(BaseModel):
     # 用户当前在页面中打开/预览的知识文档（模态预览，非词条详情页）
     open_doc_title: str = ""
     open_doc_content: str = ""
+    # 用户当前界面的实时快照（如知识库管理页展示的文档清单/筛选/统计），结构化 dict
+    page_state: Optional[dict] = None
     # 用户最近的行文/浏览动作轨迹（打开文档、检索、翻页等），提供前后文
     user_actions: Optional[List[str]] = None
     # 助手面板内的历史对话 [{role, content}]，用于多轮上下文
     history: Optional[List[dict]] = None
+    # 历史会话 id（空=后端自动新建会话，首个 session 事件回传）
+    session_id: Optional[str] = None
 
 
 @router.post("/assistant/chat")
 async def assistant_chat(body: AssistantChatRequest, current_user: dict = Depends(get_current_user)):
     """知识助手 Agent 问答（SSE 流式）。
 
-    事件：status / thought / tool / token / confirm / done / error。
-    Agent 自行判断调用检索类工具；提议修改文档时发 confirm 事件等待用户确认。
+    事件：session / status / thought / tool / token / confirm / done / error。
+    Agent 以纯 ReAct 循环自行判断调用检索类工具；提议修改文档时发 confirm 事件等待用户确认；
+    问答双方消息落库到历史会话（session 事件回传会话 id）。
     """
     if not body.message.strip():
         raise HTTPException(status_code=400, detail="请输入问题")
@@ -253,12 +258,15 @@ async def assistant_chat(body: AssistantChatRequest, current_user: dict = Depend
         route_label=body.route_label,
         open_doc_title=body.open_doc_title,
         open_doc_content=body.open_doc_content,
+        page_state=body.page_state if isinstance(body.page_state, dict) else None,
         user_actions=body.user_actions if isinstance(body.user_actions, list) else None,
     )
     history = body.history if isinstance(body.history, list) else []
 
     async def event_stream():
-        async for ev in wiki_assistant.run_assistant(body.message, ctx, history):
+        async for ev in wiki_assistant.run_assistant(
+            body.message, ctx, history, session_id=body.session_id or ""
+        ):
             yield ev
 
     return StreamingResponse(
@@ -270,6 +278,41 @@ async def assistant_chat(body: AssistantChatRequest, current_user: dict = Depend
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@router.get("/assistant/sessions")
+async def list_assistant_sessions(current_user: dict = Depends(get_current_user)):
+    """当前用户的历史助手会话列表（按最近更新倒序）"""
+    sessions = await asyncio.to_thread(
+        wiki_assistant.list_assistant_sessions, _user_id(current_user)
+    )
+    return {"success": True, "sessions": sessions}
+
+
+@router.get("/assistant/sessions/{session_id}/messages")
+async def get_assistant_session_messages(
+    session_id: str, current_user: dict = Depends(get_current_user)
+):
+    """历史会话消息（含 meta，供回放思考/工具/追问/编辑卡）"""
+    messages = await asyncio.to_thread(
+        wiki_assistant.get_session_messages, _user_id(current_user), session_id
+    )
+    if messages is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    return {"success": True, "session_id": session_id, "messages": messages}
+
+
+@router.delete("/assistant/sessions/{session_id}")
+async def delete_assistant_session(
+    session_id: str, current_user: dict = Depends(get_current_user)
+):
+    """删除历史会话（仅本人）"""
+    deleted = await asyncio.to_thread(
+        wiki_assistant.delete_assistant_session, _user_id(current_user), session_id
+    )
+    if not deleted:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    return {"success": True}
 
 
 @router.get("/assistant/edits")

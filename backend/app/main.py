@@ -1,6 +1,7 @@
 """
 见字如面 - FastAPI 主入口
 """
+import asyncio
 import logging
 import os
 import sys
@@ -12,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -22,9 +23,12 @@ from app.core.migrate_json_to_sqlite import run_migration
 from app.core.agent_runtime import runtime, readiness
 from app.core.trusted_proxy import TrustedProxyMiddleware
 
+from app.api.deps import require_admin
+from app.core.embeddings import embedding_error_message
 from app.api import chat as chat_api
 from app.api import config_api
 from app.api import knowledge as knowledge_api
+from app.api import url_imports as url_imports_api
 from app.api import auth_api
 from app.api import bookmark_api
 from app.api import wiki as wiki_api
@@ -91,6 +95,8 @@ async def lifespan(app: FastAPI):
     runtime.recover()
     # 只加载本地索引，不调用 Embedding；本地持久化损坏阻断启动。
     index_loaded = vector_store.initialize()
+    if settings.EMBEDDING_STARTUP_PROBE:
+        await asyncio.to_thread(vector_store.probe_embeddings)
     # 存量向量归入默认公共知识库（依赖向量库元数据，不依赖 Embedding 服务）
     from app.services import kb as kb_service
     kb_service.patch_legacy_metadata()
@@ -98,6 +104,8 @@ async def lifespan(app: FastAPI):
     try:
         from app.services.upload_pipeline import upload_pipeline
         upload_pipeline.recover()
+        from app.services.url_imports import url_imports
+        url_imports.recover()
     except Exception as e:
         logger.warning("上传流水线恢复失败: %s", e)
     # llm-wiki：初始化标准化知识库目录结构，并恢复重启前未完成的编译队列
@@ -128,14 +136,20 @@ async def lifespan(app: FastAPI):
     print(f"  - LLM: {runtime_config.llm_provider or settings.LLM_PROVIDER} (默认: {settings.LLM_PROVIDER})")
     print(f"  - OCR: {runtime_config.ocr_provider or settings.OCR_PROVIDER} (默认: {settings.OCR_PROVIDER})")
     print(f"  - 搜索: {runtime_config.search_provider or settings.SEARCH_PROVIDER} (默认: {settings.SEARCH_PROVIDER})")
-    print(f"  - Embedding: {settings.EMBEDDING_PROVIDER}")
-    print(f"  - 向量库: {'已加载本地索引' if index_loaded else '尚无索引，首次业务写入时创建'}（未探测 Embedding）")
+    embedding = vector_store.embedding_status()
+    mode = "本地服务" if embedding["mode"] == "local" else "远程 API"
+    print(f"  - Embedding: {mode} / {embedding['provider']} / {embedding['model']}")
+    print(f"  - Embedding 地址: {embedding['base_url']}")
+    print(f"  - Embedding 状态: {embedding['message']}")
+    print(f"  - 向量库: FAISS 本地存储，{'已加载索引' if index_loaded else '首次业务写入时创建'}（不代表本地 Embedding）")
     print(f"  - 上传目录: {settings.UPLOAD_DIR}")
     runtime.ready = True
     try:
         yield
     finally:
         runtime.stop()
+        from app.services.url_imports import url_imports
+        await url_imports.shutdown()
         print("[见字如面] 服务关闭")
 
 
@@ -172,6 +186,7 @@ app.add_middleware(RequestLogMiddleware)
 
 # 注册路由
 app.include_router(chat_api.router)
+app.include_router(url_imports_api.router)
 app.include_router(knowledge_api.router)
 app.include_router(config_api.router)
 app.include_router(auth_api.router)
@@ -259,13 +274,16 @@ app.add_middleware(TrustedProxyMiddleware, trusted_hosts=settings.TRUSTED_PROXY_
 @app.get("/api/health")
 async def health_check():
     """健康检查"""
-    embedding_ok = vector_store.is_available()
-    doc_count = vector_store.get_document_count() if embedding_ok else 0
+    embedding = vector_store.embedding_status()
+    doc_count = vector_store.get_document_count()
     from app.core.file_cache import file_cache
     return {
         "status": "ok",
         "version": "1.0.0",
-        "embedding": "available" if embedding_ok else "unavailable",
+        "embedding": {"ok": "available", "error": "unavailable"}.get(embedding["status"], "unknown"),
+        "embedding_model": embedding["model"],
+        "embedding_mode": embedding["mode"],
+        "embedding_dimension": embedding["dimension"],
         "knowledge_count": doc_count,
         "session_count": len(chat_api.chat_service.sessions) if hasattr(chat_api, 'chat_service') else 0,
         "file_cache": file_cache.status(),
@@ -289,17 +307,13 @@ async def ready():
 
 
 @app.post("/api/vector-store/retry")
-async def retry_vector_store():
-    """重新尝试连接 Embedding 服务并初始化向量库"""
+async def retry_vector_store(_admin: dict = Depends(require_admin)):
+    """重新探测当前业务模型；索引只读加载，不会清空或重建。"""
     try:
-        if vector_store.retry_init():
-            return {"message": "向量库初始化成功", "status": "ok"}
-        return {
-            "message": "Embedding 服务仍不可用，请检查 Ollama 是否已启动或 .env 配置",
-            "status": "error",
-        }
+        result = await asyncio.to_thread(vector_store.probe_embeddings)
+        return {"message": result["message"], "status": "ok" if result["available"] else "error"}
     except Exception as e:
-        return {"message": f"向量库初始化失败: {str(e)}", "status": "error"}
+        return {"message": embedding_error_message(e), "status": "error"}
 
 
 # 提供上传文件访问（替代原 StaticFiles 挂载，接入 Redis 文件缓存）

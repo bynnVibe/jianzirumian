@@ -29,6 +29,15 @@
         </div>
       </label>
       <span class="mode-hint" v-if="modeHint">{{ modeHint }}</span>
+      <label v-if="rules.length" class="channel-select" title="选择路由规则（留空走默认）">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+          <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
+        </svg>
+        <select v-model="ruleLocal" :disabled="disabled">
+          <option value="">默认规则</option>
+          <option v-for="r in rules" :key="r.id" :value="r.id">{{ r.model_pattern }}</option>
+        </select>
+      </label>
     </div>
 
     <!-- 附件 chips （拖入/选择但尚未发送） -->
@@ -99,8 +108,9 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, nextTick } from 'vue'
+import { ref, computed, watch, nextTick, onMounted } from 'vue'
 import { useChatStore } from '@/stores/chat'
+import { listMyGatewayRules } from '@/api'
 
 const store = useChatStore()
 const emit = defineEmits(['send'])
@@ -186,6 +196,21 @@ watch(useKnowledgeLocal, (val) => {
 
 watch(useSearchLocal, (val) => {
   store.useSearch = val
+})
+
+// 路由规则下拉（仅登录用户且启用网关时有数据；游客/未启用时隐藏）
+const rules = ref([])
+const ruleLocal = ref(store.selectedRuleId)
+watch(ruleLocal, (val) => {
+  store.selectedRuleId = val
+})
+onMounted(async () => {
+  try {
+    const res = await listMyGatewayRules()
+    rules.value = res.data.rules || []
+  } catch (e) {
+    rules.value = []
+  }
 })
 
 // 消费再编辑草稿：历史问题回填输入框并聚焦
@@ -293,6 +318,28 @@ defineExpose({ focus })
   opacity: 0.7;
   margin-left: auto;
 }
+
+.channel-select {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12.5px;
+  color: var(--color-text-secondary);
+}
+.channel-select svg { color: var(--color-primary); flex-shrink: 0; }
+.channel-select select {
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 3px 8px;
+  font-size: 12.5px;
+  background: #fff;
+  color: var(--color-text);
+  outline: none;
+  cursor: pointer;
+  max-width: 150px;
+}
+.channel-select select:focus { border-color: var(--color-primary); }
+.channel-select select:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .input-wrapper {
   display: flex;

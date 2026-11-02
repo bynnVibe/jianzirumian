@@ -14,7 +14,8 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 
 from app.config import settings
-from app.core.embeddings import EmbeddingFactory
+from app.core.embeddings import EmbeddingFactory, RuntimeEmbeddings
+from app.services.config_manager import effective_provider_config, runtime_config
 
 logger = logging.getLogger(__name__)
 
@@ -24,8 +25,8 @@ class VectorStore:
 
     def __init__(self):
         self.index_path = settings.VECTOR_STORE_PATH
-        self.embeddings = EmbeddingFactory.create()
         self._store: Optional[FAISS] = None
+        self.reload_embeddings()
 
         # 元数据文件 (存储原文与图片路径的映射)
         self.meta_path = str(Path(self.index_path).parent / "metadata.json")
@@ -34,51 +35,15 @@ class VectorStore:
         self._meta_cache: Optional[Dict[str, dict]] = None
         self._meta_mtime: float = 0.0
 
-    # 嵌入服务不可用的标记
-    _EMBEDDING_UNAVAILABLE: bool = False
-
     def _load_store(self) -> Optional[FAISS]:
-        """加载或创建向量库
-
-        注意：如果 Embedding 服务（Ollama/API）未运行，
-        会返回 None 而不是崩溃，后续操作会给出清晰提示。
-        """
-        if self._store is not None:
+        """业务加载或创建向量库；已有索引损坏时禁止静默创建空库。"""
+        if self.initialize():
             return self._store
-        if self._EMBEDDING_UNAVAILABLE:
-            return None
-
-        if os.path.exists(self.index_path):
-            try:
-                self._store = FAISS.load_local(
-                    self.index_path,
-                    self.embeddings,
-                    allow_dangerous_deserialization=True,
-                )
-                return self._store
-            except Exception as e:
-                print(f"[向量库] 加载已有索引失败: {e}")
-                self._store = None
-
-        if self._store is None:
-            try:
-                # 创建一个空库: 先加一个占位文档再删除
-                texts = ["初始化占位"]
-                self._store = FAISS.from_texts(texts, self.embeddings)
-                # 删除占位
-                self._store.delete([self._store.index_to_docstore_id[0]])
-            except Exception as e:
-                err_msg = str(e).lower()
-                if "connection refused" in err_msg or "connection error" in err_msg or "max retries exceeded" in err_msg:
-                    print(f"[向量库] ⚠ Embedding 服务连接失败 ({self.embeddings.__class__.__name__})，向量库不可用")
-                    print(f"[向量库]   请确保 Ollama 已启动（ollama serve）或 .env 中 EMBEDDING 配置正确")
-                    print(f"[向量库]   应用将继续运行，使用知识库功能时需要 Embedding 服务可用后再重试")
-                    self._EMBEDDING_UNAVAILABLE = True
-                    self._store = None
-                    return None
-                raise
-
-        return self._store
+        # 仅业务路径允许创建空库，配置读取和连接测试不会调用此分支。
+        store = FAISS.from_texts(["初始化占位"], self.embeddings)
+        store.delete([store.index_to_docstore_id[0]])
+        self._store = store
+        return store
 
     def _save(self):
         """保存向量库到磁盘"""
@@ -123,8 +88,45 @@ class VectorStore:
         return raw
 
     def is_available(self) -> bool:
-        """Embedding 服务与向量库是否可用"""
-        return not self._EMBEDDING_UNAVAILABLE
+        """仅真实请求成功且向量维度有效时判为可用。"""
+        return self.embeddings.status()["available"] is True
+
+    def reload_embeddings(self):
+        """绑定最新配置，不请求模型、不丢弃或改写已有索引。"""
+        provider = runtime_config.embedding_provider or settings.EMBEDDING_PROVIDER
+        self.embeddings = RuntimeEmbeddings(
+            provider, effective_provider_config("embedding", provider),
+            lambda: self._store.index.d if self._store is not None else None,
+        )
+        if self._store is not None:
+            self._store.embedding_function = self.embeddings
+
+    def embedding_status(self) -> dict:
+        """只读状态；索引存在不等于远程模型已验证。"""
+        return {
+            **self.embeddings.status(),
+            "index_loaded": self._store is not None,
+            "index_dimension": self._store.index.d if self._store is not None else None,
+            "knowledge_count": self._store.index.ntotal if self._store is not None else 0,
+        }
+
+    def probe_embeddings(self) -> dict:
+        """用业务客户端进行真实请求，仅加载本地索引，不新增文档或保存索引。"""
+        self.initialize()
+        embeddings = self.embeddings
+        failure = None
+        try:
+            embeddings.embed_query("向量连接测试")
+        except RuntimeError as error:
+            failure = str(error)
+        result = self.embedding_status()
+        if embeddings is not self.embeddings:
+            return {**result, "status": "unknown", "available": False,
+                    "message": "探测期间配置已变更，请测试当前配置"}
+        if failure:
+            # 并发业务请求的成功不能覆盖本次探测失败。
+            return {**result, "status": "error", "available": False, "message": failure}
+        return result
 
     def initialize(self) -> bool:
         """启动时只加载既有本地索引；空库延迟至业务请求创建，不探测模型。"""
@@ -139,22 +141,10 @@ class VectorStore:
         return True
 
     def retry_init(self, force: bool = False) -> bool:
-        """重置不可用标记并重新尝试初始化，返回是否成功
-
-        Args:
-            force: 强制重建 Embedding 实例（配置变更后使用）
-        """
-        if not force and not self._EMBEDDING_UNAVAILABLE and self._store is not None:
-            return True
-        self._EMBEDDING_UNAVAILABLE = False
-        self._store = None
-        # 重建 Embedding 实例，使页面保存的最新配置生效
-        self.embeddings = EmbeddingFactory.create()
-        try:
-            return self._load_store() is not None
-        except Exception:
-            self._EMBEDDING_UNAVAILABLE = True
-            raise
+        """兼容旧重试入口；每次均真实探测，不以本地索引加载代替连接验证。"""
+        if force:
+            self.reload_embeddings()
+        return self.probe_embeddings()["available"] is True
 
     def add_texts(
         self,
@@ -457,11 +447,8 @@ class VectorStore:
             os.remove(self.meta_path)
 
     def get_document_count(self) -> int:
-        """获取文档数量"""
-        store = self._load_store()
-        if store is None:
-            return 0
-        return store.index.ntotal
+        """只读统计，不为健康检查或配置页面创建占位文档。"""
+        return self._store.index.ntotal if self.initialize() else 0
 
     def get_all_entries(self) -> list[dict]:
         """获取所有知识库条目（按来源图片分组）

@@ -25,7 +25,7 @@ from app.core import db
 from app.core.request_budget import iterate, close_resources
 from app.core import observability as obs
 from app.core.evidence_checker import check_evidence_sufficiency, verify_citations
-from app.core.llm import LLMFactory
+from app.core.llm import FINAL_ANSWER_RULES, LLMFactory
 from app.core.intent_rewriter import rewrite_query
 from app.core.vector_store import vector_store
 from app.services.config_manager import runtime_config
@@ -269,6 +269,7 @@ class ChatService:
         user_id: str = "",
         attachments: Optional[List[dict]] = None,
         kb_id: str = "",
+        rule_id: str = "",
     ) -> AsyncGenerator[str, None]:
         """流式聊天（外层负责可观测性追踪：一次提问 = 一条 trace）
 
@@ -294,7 +295,7 @@ class ChatService:
         status = "error"
         iterator = iterate(self._chat_stream_inner(
             session_id, query, use_knowledge, use_search,
-            llm_provider, user_id, attachments, kb_id, tasks,
+            llm_provider, user_id, attachments, kb_id, tasks, rule_id,
         ), deadline)
         try:
             async for event in iterator:
@@ -352,6 +353,7 @@ class ChatService:
         attachments: Optional[List[dict]],
         kb_id: str,
         tasks: set,
+        rule_id: str = "",
     ) -> AsyncGenerator[str, None]:
         """流式聊天内层主流程（检索/搜索/工具/生成各环节记录 trace span）"""
         logger.info("开始处理聊天: session=%s, query=%.50s, knowledge=%s, search=%s",
@@ -406,8 +408,11 @@ class ChatService:
                 yield f"data: {self._json_event('status', {'phase': 'tool_done', 'message': '附件处理完成', 'tool_calls': executed})}\n\n"
 
         # 3. 构建 LLM 消息列表：系统 prompt + 用户跨会话记忆 + 历史消息（摘要压缩后）+ 工具结果
-        llm = LLMFactory.create(llm_provider)
+        # 统一走网关 chat_answer 业务路由（规则+模型由网关解析；llm_provider 参数已废弃）
+        llm = LLMFactory.create_for_role("chat_answer", user_id, rule_id)
         llm_messages = self._build_system_prompt()
+        # segment 级 token 度量：系统提示段
+        obs.note_segment("system", "\n".join(m.get("content", "") for m in llm_messages))
 
         relevant_memories = memory_service.retrieve_relevant(user_id, query)
         if relevant_memories:
@@ -416,15 +421,19 @@ class ChatService:
                 "role": "system",
                 "content": f"【关于该用户的长期记忆，供参考，不要逐字复述】\n{memory_text}",
             })
+            obs.note_segment("memory", memory_text)
 
         history_messages = session_summary.build_context_messages(
             session, settings.SESSION_MAX_HISTORY
         )
         # 历史消息不含本次刚保存的用户提问（最后一条）
-        llm_messages.extend(history_messages[:-1] if history_messages else [])
+        history_ctx = history_messages[:-1] if history_messages else []
+        llm_messages.extend(history_ctx)
+        obs.note_segment("history", "\n".join(m.get("content", "") for m in history_ctx))
 
         if tool_context_text:
             llm_messages.append({"role": "system", "content": tool_context_text})
+            obs.note_segment("tool", tool_context_text)
 
         # 4. 知识检索 + 5. 联网搜索
         # 两者同时启用时并行执行；同步检索（embedding/rerank）放入线程池，
@@ -503,9 +512,11 @@ class ChatService:
                         )
 
                 augmented_query = knowledge_service.build_knowledge_prompt(query, context_text, True)
+                # segment 级 token 度量：知识上下文段（含重检后的最终上下文）
+                obs.note_segment("knowledge", context_text)
 
                 # 发出检索完成信号
-                yield f"data: {self._json_event('status', {'phase': 'retrieved', 'message': f'检索到 {len(sources)} 条相关知识', 'sources': sources})}\n\n"
+                yield f"data: {self._json_event('status', {'phase': 'retrieved', 'message': f'检索到 {len(sources)} 份相关知识文档', 'sources': sources})}\n\n"
             else:
                 augmented_query = knowledge_service.build_knowledge_prompt(query, "", True)
                 yield f"data: {self._json_event('status', {'phase': 'not_found', 'message': '知识库中未检索到相关内容'})}\n\n"
@@ -519,6 +530,8 @@ class ChatService:
                 search_context = knowledge_service.build_search_context(web_results)
 
                 if search_context:
+                    # segment 级 token 度量：联网搜索上下文段
+                    obs.note_segment("search", search_context)
                     if use_knowledge:
                         # 同时启用知识库和搜索：知识库优先，搜索为辅
                         augmented_query += (
@@ -544,8 +557,7 @@ class ChatService:
         # 7. 流式 LLM 生成
         yield f"data: {self._json_event('status', {'phase': 'generating', 'message': '正在生成回答...'})}\n\n"
 
-        logger.info("开始 LLM 生成: provider=%s, history_messages=%d",
-                     llm_provider or runtime_config.llm_provider or settings.LLM_PROVIDER,
+        logger.info("开始 LLM 生成: 路由=网关业务路由(chat_answer), history_messages=%d",
                      len(llm_messages))
         full_response = ""
         llm_error = None
@@ -560,33 +572,17 @@ class ChatService:
             raise
         except Exception as e:
             llm_error = e
-
-        # OpenRouter 免费模型降级：尚无输出且当前模型不可用时，
-        # 重新拉取免费模型列表并随机切换一个免费模型重试
-        if llm_error is not None and not full_response:
-            from app.core.openrouter import try_openrouter_fallback
-            fallback_model = await try_openrouter_fallback(llm_provider)
-            if fallback_model:
-                yield f"data: {self._json_event('status', {'phase': 'fallback', 'message': f'当前模型不可用，已自动切换为免费模型 {fallback_model}'})}\n\n"
-                llm = LLMFactory.create(llm_provider)
-                try:
-                    async with aclosing(llm.chat(llm_messages, stream=True)) as stream:
-                        async for chunk in stream:
-                            full_response += chunk
-                            yield f"data: {self._json_event('token', {'content': chunk})}\n\n"
-                    llm_error = None
-                except (asyncio.CancelledError, GeneratorExit):
-                    obs.record_llm("answer", llm_messages, full_response, t0=t_gen, status="cancelled")
-                    raise
-                except Exception as e2:
-                    llm_error = e2
+        # 注：旧 OpenRouter 免费模型降级已移除——网关代理在多上游间自动故障切换，
+        # 全部上游失败时错误直接下传（日志含路由规则/模型/上游链路）
 
         # 追踪层：最终生成 LLM 调用（完整 prompt + 回答；失败即标记 trace 失败）
-        obs.record_llm(
+        answer_pt, _ = obs.record_llm(
             "answer", llm_messages, full_response, t0=t_gen,
             status="error" if llm_error is not None else "ok",
             error=str(llm_error) if llm_error is not None else "",
         )
+        # segment 级 token 度量：按最终生成调用的真实 prompt_tokens 分摊落库（与成本口径同源）
+        obs.flush_segments(llm_messages, answer_pt)
 
         if llm_error is not None:
             error_msg = str(llm_error)
@@ -596,22 +592,22 @@ class ChatService:
             # 判读具体错误类型，给出用户可理解的提示
             low_msg = error_msg.lower()
             if "openrouter" in low_msg or "rate limit" in low_msg or "rate-limited" in low_msg or "free-models" in low_msg:
-                hint = ("当前免费模型被限流（OpenRouter 免费额度暂时用完）。\n\n"
+                hint = ("当前模型被限流（上游免费额度暂时用完），网关已尝试全部候选上游仍失败。\n\n"
                         "解决方式：\n"
                         "1. 稍后重试（限流按分钟/每日重置）\n"
-                        "2. 或在系统设置中切换其他免费模型（系统也会自动降级切换）\n"
-                        "3. 或切换 LLM_PROVIDER 为 ollama（本地模型）/ 付费提供商")
+                        "2. 或在模型网关「上游管理/路由规则」中补充其他上游与免费模型\n"
+                        "3. 或在「业务路由」为本角色切换其他规则/模型")
             elif "insufficient_quota" in error_msg or "429" in error_msg:
-                hint = ("API 额度不足，请检查你的 ModelScope / 百炼账户余额。\n\n"
+                hint = ("API 额度不足或限流，请检查上游账户余额。\n\n"
                         "解决方式：\n"
-                        "1. 登录 https://modelscope.cn 充值\n"
-                        "2. 或切换 LLM_PROVIDER 为 ollama（本地模型）\n"
-                        "3. 或更换 API_KEY 使用其他提供商（DeepSeek / OpenAI）")
+                        "1. 登录上游控制台充值/查看配额\n"
+                        "2. 或在模型网关「上游管理」中启用其他上游（网关自动故障切换）\n"
+                        "3. 或在「业务路由」为本角色切换其他规则/模型")
             elif "connect" in error_msg.lower() or "connection" in error_msg.lower():
-                hint = ("无法连接到 LLM 服务，请检查：\n"
-                        "1. 如果使用 Ollama: 运行 `ollama serve` 启动服务\n"
-                        "2. 如果使用 API: 检查 API_BASE_URL 和 API_KEY 是否正确\n"
-                        "3. 检查网络连接")
+                hint = ("无法连接到模型网关上游，请检查：\n"
+                        "1. 模型网关「上游管理」中上游地址与密钥是否正确\n"
+                        "2. 上游服务是否可达（可用上游行「测试」按钮验证）\n"
+                        "3. 本机网络与代理设置")
             else:
                 hint = f"生成回答时出错: {error_msg}"
 
@@ -760,6 +756,7 @@ class ChatService:
                     "- 不确定的内容不要编造，明确告知用户\n"
                     "- 引用来源时，清晰标注原文出处\n"
                     "- 以温暖、关怀的语气与用户交流\n"
+                    + FINAL_ANSWER_RULES
                 ),
             }
         ]

@@ -36,7 +36,7 @@
         <option v-for="k in keyOptions" :key="k.id" :value="k.id">{{ k.name }}</option>
       </select>
       <select v-model="filters.channel_id" class="field-input">
-        <option value="">全部渠道</option>
+        <option value="">全部规则</option>
         <option v-for="c in channelOptions" :key="c.id" :value="c.id">{{ c.name }}</option>
       </select>
       <button class="btn btn-primary sm" @click="reload">搜索</button>
@@ -98,7 +98,7 @@
             <div class="detail-grid">
               <div class="detail-block">
                 <h4 class="detail-title">上游路由</h4>
-                <div class="kv"><span>渠道</span><strong>{{ detail.channel_name || '-' }}</strong></div>
+                <div class="kv"><span>规则</span><strong>{{ detail.channel_name || '-' }}</strong></div>
                 <div class="kv"><span>URL</span><code class="mono">{{ detail.upstream_url || '-' }}</code></div>
                 <div class="kv"><span>流式</span><strong>{{ detail.stream ? '是' : '否' }}</strong></div>
                 <div class="kv"><span>客户端 IP</span><strong>{{ detail.client_ip || '-' }}</strong></div>
@@ -142,7 +142,7 @@
 import { ref, reactive, computed, onMounted } from 'vue'
 import {
   queryGatewayLogs, getGatewayLog, purgeGatewayLogs,
-  listGatewayKeys, listGatewayChannels,
+  listGatewayKeys, listGatewayRoutingRules,
 } from '@/api'
 import TraceFlow from './TraceFlow.vue'
 
@@ -231,9 +231,9 @@ async function onPurge() {
 
 async function loadOptions() {
   try {
-    const [kRes, cRes] = await Promise.all([listGatewayKeys(), listGatewayChannels()])
+    const [kRes, cRes] = await Promise.all([listGatewayKeys(), listGatewayRoutingRules()])
     keyOptions.value = kRes.data.keys || []
-    channelOptions.value = cRes.data.channels || []
+    channelOptions.value = (cRes.data.rules || []).map((r) => ({ id: r.id, name: r.model_pattern }))
   } catch (e) { /* 选项加载失败不阻断日志展示 */ }
 }
 

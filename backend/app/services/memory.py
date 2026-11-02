@@ -134,7 +134,8 @@ class MemoryService:
         try:
             from app.core.llm import LLMFactory
 
-            llm = LLMFactory.create()
+            # 记忆抽取为后台辅助生成，走网关默认规则（role 仅用于日志显性化）
+            llm = LLMFactory.create_for_role("memory_extract")
             prompt = (
                 "从下面这一轮对话中，提取用户值得长期记住的、明确的个人事实/偏好/目标（如饮食禁忌、"
                 "健康状况、学习目标等）。仅输出 JSON 数组，每项 {\"content\": str, \"importance\": 0~1}；"

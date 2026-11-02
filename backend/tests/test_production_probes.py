@@ -14,7 +14,7 @@ from langchain_core.embeddings import Embeddings
 
 from app import config
 from app.core import db, metrics_export, observability
-from app.services.gateway import keys, channels, proxy, settings as gateway_settings
+from app.services.gateway import keys, rules, proxy, upstreams, settings as gateway_settings
 
 
 @pytest.fixture(autouse=True)
@@ -37,9 +37,15 @@ def call_proxy(method, path, **kwargs):
     return asyncio.run(request())
 
 
-def add_channel(name="demo", priority=0, models=None):
-    return channels.create_channel({"name": name, "base_url": f"https://{name}.invalid/v1",
-                                    "models": models or ["test-model"], "priority": priority})
+def add_upstream(name="demo", models=None, weight=100):
+    return upstreams.create_upstream({"name": name, "base_url": f"https://{name}.invalid/v1",
+                                      "models": models or ["test-model"], "tier": "paid",
+                                      "weight": weight})
+
+
+def add_rule(up_ids, model_pattern="test-model", strategy="priority", priority=0):
+    return rules.create_rule({"model_pattern": model_pattern, "upstreams": up_ids,
+                              "lb_strategy": strategy, "priority": priority})
 
 
 def body(stream=False):
@@ -57,7 +63,7 @@ def test_proxy_http_input_rejection(payload, status):
 
 
 def test_proxy_models_filtered_by_key():
-    add_channel(models=["allowed", "denied"])
+    add_upstream(models=["allowed", "denied"])
     key = keys.create_key("test", allowed_models=["allowed"])
     response = call_proxy("GET", "/v1/models", headers={"Authorization": f"Bearer {key['key']}"})
     assert response.status_code == 200
@@ -95,21 +101,25 @@ def test_gateway_audit_block_without_upstream():
     assert db.query_one("SELECT status FROM gateway_logs")["status"] == "blocked"
 
 
-def test_gateway_priority_and_health():
-    high = add_channel("high", 10)
-    add_channel("low", 0)
-    assert channels.select_candidates("test-model")[0]["id"] == high["id"]
+def test_gateway_health_and_failover_order():
+    high = add_upstream("high")
+    low = add_upstream("low")
+    add_rule([high["id"], low["id"]])
+    assert [u["id"] for u in rules.select_upstreams("test-model")[1]] == [high["id"], low["id"]]
     for _ in range(3):
-        channels.mark_failure(high["id"], "合成失败")
-    assert channels.get_channel(high["id"])["health"] == "down"
-    channels.mark_success(high["id"])
-    assert channels.get_channel(high["id"])["health"] == "healthy"
-    assert len(channels.select_candidates("test-model")) == 2
+        upstreams.mark_failure(high["id"], "合成失败")
+    assert upstreams.get_upstream(high["id"])["health"] == "down"
+    # 熔断上游排到最后，但仍是候选（保留兜底切换）
+    assert [u["id"] for u in rules.select_upstreams("test-model")[1]] == [low["id"], high["id"]]
+    upstreams.mark_success(high["id"])
+    assert upstreams.get_upstream(high["id"])["health"] == "healthy"
+    assert len(rules.select_upstreams("test-model")[1]) == 2
 
 
 def test_gateway_json_failover_and_usage(monkeypatch):
-    add_channel("bad", 10)
-    add_channel("good", 0)
+    bad = add_upstream("bad")
+    good = add_upstream("good")
+    add_rule([bad["id"], good["id"]])
     key = keys.create_key("failover")
     ctx, seen, client_class = proxy.prepare(body(), key["key"]), [], httpx.AsyncClient
     def handler(request):
@@ -192,9 +202,9 @@ def test_proxy_metrics_must_not_duplicate_agent_trace():
 
 
 def test_gateway_higher_weight_receives_more_traffic(monkeypatch):
-    monkeypatch.setattr(channels.random, "random", random.Random(20261026).random)
+    monkeypatch.setattr(rules.random, "random", random.Random(20261026).random)
     rows = [{"id": "small", "weight": 1}, {"id": "large", "weight": 9}]
-    wins = sum(channels._weighted_order(rows)[0]["id"] == "large" for _ in range(2000))
+    wins = sum(rules._weighted_order(rows)[0]["id"] == "large" for _ in range(2000))
     assert wins > 1400
 
 
@@ -346,7 +356,8 @@ def test_self_rag_provider_failure_is_nonfatal(monkeypatch):
 
 @pytest.mark.parametrize("check", ["resource_closed", "terminal_status"])
 def test_gateway_stream_cancel_contract(monkeypatch, check):
-    add_channel()
+    up = add_upstream()
+    add_rule([up["id"]])
     ctx = proxy.prepare(body(stream=True), keys.create_key("cancel")["key"])
     state, client_class = {"response_closed": False}, httpx.AsyncClient
     class Stream(httpx.AsyncByteStream):

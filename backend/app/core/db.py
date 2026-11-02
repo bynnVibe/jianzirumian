@@ -297,6 +297,28 @@ def init_db(conn: sqlite3.Connection):
         CREATE INDEX IF NOT EXISTS idx_wiki_pending_status ON wiki_pending_edits(status, created_at);
         CREATE INDEX IF NOT EXISTS idx_wiki_pending_page ON wiki_pending_edits(page_id);
 
+        -- 知识助手历史会话：按用户持久化问答，供面板回看与多轮上下文。
+        CREATE TABLE IF NOT EXISTS assistant_sessions (
+            id          TEXT PRIMARY KEY,
+            user_id     TEXT NOT NULL DEFAULT '',
+            title       TEXT NOT NULL DEFAULT '',
+            created_at  TEXT NOT NULL,
+            updated_at  TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_assistant_sessions_user ON assistant_sessions(user_id, updated_at);
+
+        -- 知识助手消息：role(user/assistant) + meta(JSON: thoughts/tools/clarify/edit/error/stopped)。
+        CREATE TABLE IF NOT EXISTS assistant_messages (
+            id          TEXT PRIMARY KEY,
+            session_id  TEXT NOT NULL,
+            seq         INTEGER NOT NULL,
+            role        TEXT NOT NULL,
+            content     TEXT NOT NULL DEFAULT '',
+            meta        TEXT NOT NULL DEFAULT '{}',
+            created_at  TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_assistant_messages_session ON assistant_messages(session_id, seq);
+
         -- 知识库上传流水线：文件上传后先后台解析，用户确认后再入库。
         -- status: pending(排队中) | parsing(解析中) | done(解析完成待入库) | error(解析失败)
         CREATE TABLE IF NOT EXISTS pending_uploads (
@@ -315,6 +337,28 @@ def init_db(conn: sqlite3.Connection):
             updated_at       TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_pending_owner ON pending_uploads(owner_id, created_at);
+
+        CREATE TABLE IF NOT EXISTS url_imports (
+            id TEXT PRIMARY KEY,
+            owner_id TEXT NOT NULL,
+            source_url TEXT NOT NULL,
+            title TEXT NOT NULL DEFAULT '',
+            parsed_text TEXT NOT NULL DEFAULT '',
+            original_title TEXT NOT NULL DEFAULT '',
+            original_text TEXT NOT NULL DEFAULT '',
+            metadata TEXT NOT NULL DEFAULT '{}',
+            status TEXT NOT NULL DEFAULT 'pending',
+            phase TEXT NOT NULL DEFAULT 'parse',
+            revision INTEGER NOT NULL DEFAULT 1,
+            kb_id TEXT NOT NULL DEFAULT '',
+            file_path TEXT NOT NULL DEFAULT '',
+            result TEXT NOT NULL DEFAULT '{}',
+            error TEXT NOT NULL DEFAULT '',
+            error_code TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_url_import_owner ON url_imports(owner_id, created_at);
 
         -- Agent 回归评测模块：评测集 → 用例 → 运行 → 逐用例结果
         CREATE TABLE IF NOT EXISTS eval_datasets (
@@ -409,6 +453,22 @@ def init_db(conn: sqlite3.Connection):
         );
         CREATE INDEX IF NOT EXISTS idx_agent_spans_trace ON agent_spans(trace_id, seq);
         CREATE INDEX IF NOT EXISTS idx_agent_spans_started ON agent_spans(started_at);
+
+        -- Agent 可观测性（segment 级 Token 度量）：一次请求组装 LLM 上下文时，按语义段
+        -- （system/memory/history/knowledge/search/tool）分别估算并沉淀 token 占用，
+        -- 供管理员定位“Token 大户”与量化优化效果（GET /api/observability/metrics 的 segment_breakdown）。
+        -- 与 agent_spans 分开存储：span 的 token 仅计 LLM 调用真实/估算用量，segment 只作上下文构成分析，避免重复计入 trace 总量。
+        CREATE TABLE IF NOT EXISTS agent_token_segments (
+            id          TEXT PRIMARY KEY,
+            trace_id    TEXT NOT NULL DEFAULT '',
+            agent       TEXT NOT NULL DEFAULT '',
+            segment     TEXT NOT NULL DEFAULT '',
+            tokens      INTEGER NOT NULL DEFAULT 0,
+            chars       INTEGER NOT NULL DEFAULT 0,
+            created_at  TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_token_segments_started ON agent_token_segments(created_at);
+        CREATE INDEX IF NOT EXISTS idx_token_segments_seg ON agent_token_segments(segment, created_at);
 
         -- CI/CD 流水线（运维角色）：一次流水线运行 = 一条 pipeline_run，每个阶段 = 一条 pipeline_stage。
         -- 阶段固定六段：commit(代码提交) → unit_test(单元测试) → eval_regression(评估回归/EDD)
@@ -556,6 +616,47 @@ def init_db(conn: sqlite3.Connection):
             log_retention_days INTEGER NOT NULL DEFAULT 30,
             updated_at         TEXT NOT NULL
         );
+
+        -- 模型注册表：网关“最终调用的模型”清单（渠道 models 字段引用本表 key）。
+        -- source: standard(手动配置的固定上游模型) | openrouter_free(OpenRouter 免费模型，运行时拉取列表)
+        CREATE TABLE IF NOT EXISTS gateway_models (
+            id           TEXT PRIMARY KEY,
+            key          TEXT NOT NULL,
+            display_name TEXT NOT NULL DEFAULT '',
+            protocol     TEXT NOT NULL DEFAULT 'openai',
+            base_url     TEXT NOT NULL DEFAULT '',
+            api_key      TEXT NOT NULL DEFAULT '',
+            model_id     TEXT NOT NULL DEFAULT '',
+            source       TEXT NOT NULL DEFAULT 'standard',
+            enabled      INTEGER NOT NULL DEFAULT 1,
+            created_at   TEXT NOT NULL,
+            updated_at   TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_gateway_models_key ON gateway_models(key);
+
+        -- 业务流→模型路由：为不同业务角色(chat_answer/assistant/intent_rewrite/...)指定渠道+模型。
+        -- 未配置的 role 回退到默认渠道 + 注册表默认模型。
+        CREATE TABLE IF NOT EXISTS gateway_role_routes (
+            id         TEXT PRIMARY KEY,
+            role       TEXT NOT NULL,
+            channel_id TEXT NOT NULL DEFAULT '',
+            model_key  TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_gateway_role_routes_role ON gateway_role_routes(role);
+
+        -- 上游端点（厂商地址 + 密钥）：一处维护、模型下拉复用；网关出网连接配置的唯一归属。
+        -- 渠道不再保存连接配置（存量行仅作兼容回退），密钥·配额页管的是下游访问密钥。
+        CREATE TABLE IF NOT EXISTS gateway_upstreams (
+            id         TEXT PRIMARY KEY,
+            name       TEXT NOT NULL,
+            protocol   TEXT NOT NULL DEFAULT 'openai',
+            base_url   TEXT NOT NULL DEFAULT '',
+            api_key    TEXT NOT NULL DEFAULT '',
+            remark     TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
         """
     )
     version = 'production_ab_v1'
@@ -570,6 +671,190 @@ def init_db(conn: sqlite3.Connection):
         if "interrupted" not in columns:
             conn.execute("ALTER TABLE chat_messages ADD COLUMN interrupted INTEGER NOT NULL DEFAULT 0")
         conn.execute("INSERT INTO schema_migrations VALUES ('production_ab_v2',?)", (datetime.now().isoformat(),))
+    if not conn.execute("SELECT 1 FROM schema_migrations WHERE version='url_import_v1'").fetchone():
+        columns = {r[1] for r in conn.execute("PRAGMA table_info(upload_records)")}
+        if "source_metadata" not in columns:
+            conn.execute("ALTER TABLE upload_records ADD COLUMN source_metadata TEXT NOT NULL DEFAULT '{}'")
+        if "url_import_id" not in columns:
+            conn.execute("ALTER TABLE upload_records ADD COLUMN url_import_id TEXT")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_record_url_import ON upload_records(url_import_id)")
+        conn.execute("INSERT INTO schema_migrations VALUES ('url_import_v1',?)", (datetime.now().isoformat(),))
+    if not conn.execute("SELECT 1 FROM schema_migrations WHERE version='gateway_routing_v1'").fetchone():
+        columns = {r[1] for r in conn.execute("PRAGMA table_info(gateway_channels)")}
+        # lb_strategy: round_robin|weighted|random|priority（默认 weighted，保留存量 A-Res 行为）
+        if "lb_strategy" not in columns:
+            conn.execute("ALTER TABLE gateway_channels ADD COLUMN lb_strategy TEXT NOT NULL DEFAULT 'weighted'")
+        # is_default: 全局唯一默认渠道（用户未指定渠道时绑定）
+        if "is_default" not in columns:
+            conn.execute("ALTER TABLE gateway_channels ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0")
+        # allowed_users: JSON 用户 id 列表（空=全员可用）
+        if "allowed_users" not in columns:
+            conn.execute("ALTER TABLE gateway_channels ADD COLUMN allowed_users TEXT NOT NULL DEFAULT '[]'")
+        conn.execute("INSERT INTO schema_migrations VALUES ('gateway_routing_v1',?)", (datetime.now().isoformat(),))
+    if not conn.execute("SELECT 1 FROM schema_migrations WHERE version='gateway_upstreams_v1'").fetchone():
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS gateway_upstreams ("
+            "id TEXT PRIMARY KEY, name TEXT NOT NULL, protocol TEXT NOT NULL DEFAULT 'openai',"
+            "base_url TEXT NOT NULL DEFAULT '', api_key TEXT NOT NULL DEFAULT '',"
+            "remark TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
+        )
+        mcols = {r[1] for r in conn.execute("PRAGMA table_info(gateway_models)")}
+        if "upstream_id" not in mcols:
+            conn.execute("ALTER TABLE gateway_models ADD COLUMN upstream_id TEXT NOT NULL DEFAULT ''")
+        # 存量回填：模型行旧内联连接配置按 (protocol+base_url+api_key) 归并为上游端点，行内联配置清零
+        import uuid as _uuid
+        seen: dict = {}
+        legacy = conn.execute(
+            "SELECT id, protocol, base_url, api_key FROM gateway_models WHERE base_url <> ''").fetchall()
+        for r in legacy:
+            sig = ((r[1] or "openai"), (r[2] or "").rstrip("/"), r[3] or "")
+            if sig not in seen:
+                uid = str(_uuid.uuid4())
+                host = sig[1].split("//")[-1].split("/")[0] or "upstream"
+                conn.execute(
+                    "INSERT INTO gateway_upstreams (id, name, protocol, base_url, api_key, remark,"
+                    " created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
+                    (uid, host, sig[0], sig[1], sig[2], "存量模型配置自动归并",
+                     datetime.now().isoformat(), datetime.now().isoformat()),
+                )
+                seen[sig] = uid
+            conn.execute(
+                "UPDATE gateway_models SET upstream_id=?, protocol='openai', base_url='', api_key=''"
+                " WHERE id=?",
+                (seen[sig], r[0]),
+            )
+        conn.execute("INSERT INTO schema_migrations VALUES ('gateway_upstreams_v1',?)",
+                     (datetime.now().isoformat(),))
+    if not conn.execute("SELECT 1 FROM schema_migrations WHERE version='gateway_upstreams_v2'").fetchone():
+        # 归并遗留内联 Key：未绑端点但自带内联 Key 的 openrouter_free 模型归并为上游端点（官方地址），
+        # 连接配置完全收敛到上游端点，模型界面仅下拉绑定（否则遗留 Key 可见但无处修改）
+        import uuid as _uuid2
+        seen2: dict = {}
+        legacy2 = conn.execute(
+            "SELECT id, api_key FROM gateway_models WHERE upstream_id='' AND api_key <> ''"
+            " AND source='openrouter_free'").fetchall()
+        for r in legacy2:
+            key = r[1] or ""
+            if key not in seen2:
+                uid = str(_uuid2.uuid4())
+                conn.execute(
+                    "INSERT INTO gateway_upstreams (id, name, protocol, base_url, api_key, remark,"
+                    " created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
+                    (uid, f"openrouter.ai（legacy 密钥 {key[-4:]}）", "openai",
+                     "https://openrouter.ai/api/v1", key, "遗留模型内联 Key 自动归并",
+                     datetime.now().isoformat(), datetime.now().isoformat()),
+                )
+                seen2[key] = uid
+            conn.execute("UPDATE gateway_models SET upstream_id=?, api_key='' WHERE id=?",
+                         (seen2[key], r[0]))
+        conn.execute("INSERT INTO schema_migrations VALUES ('gateway_upstreams_v2',?)",
+                     (datetime.now().isoformat(),))
+    if not conn.execute("SELECT 1 FROM schema_migrations WHERE version='gateway_rules_v1'").fetchone():
+        # ---- 上游管理（璇玑式）：上游自身持有模型清单/成本层级/权重/健康度/延迟 ----
+        import json as _json
+        import uuid as _uuid3
+        now = datetime.now().isoformat()
+        ucols = {r[1] for r in conn.execute("PRAGMA table_info(gateway_upstreams)")}
+        for col, ddl in (
+                ("tier", "TEXT NOT NULL DEFAULT 'paid'"),
+                ("models", "TEXT NOT NULL DEFAULT '[]'"),
+                ("weight", "INTEGER NOT NULL DEFAULT 100"),
+                ("enabled", "INTEGER NOT NULL DEFAULT 1"),
+                ("health", "TEXT NOT NULL DEFAULT 'healthy'"),
+                ("fail_count", "INTEGER NOT NULL DEFAULT 0"),
+                ("success_count", "INTEGER NOT NULL DEFAULT 0"),
+                ("last_error", "TEXT NOT NULL DEFAULT ''"),
+                ("latency_ms", "INTEGER NOT NULL DEFAULT 0"),
+        ):
+            if col not in ucols:
+                conn.execute(f"ALTER TABLE gateway_upstreams ADD COLUMN {col} {ddl}")
+        # 存量回填：注册表模型并入其上游（模型清单/成本层级），注册表随后退役
+        for u in conn.execute("SELECT id FROM gateway_upstreams").fetchall():
+            rows = conn.execute(
+                "SELECT model_id, key, source FROM gateway_models WHERE upstream_id=?",
+                (u[0],)).fetchall()
+            if rows:
+                names = [r[0] or r[1] for r in rows]
+                tier = "free" if any(r[2] == "openrouter_free" for r in rows) else "paid"
+                conn.execute("UPDATE gateway_upstreams SET models=?, tier=? WHERE id=?",
+                             (_json.dumps(names, ensure_ascii=False), tier, u[0]))
+        orphans = conn.execute(
+            "SELECT model_id, key FROM gateway_models WHERE upstream_id=''").fetchall()
+        if orphans:
+            conn.execute(
+                "INSERT INTO gateway_upstreams (id, name, protocol, base_url, api_key, remark,"
+                " tier, models, weight, enabled, health, fail_count, success_count, last_error,"
+                " latency_ms, created_at, updated_at)"
+                " VALUES (?,?,?,?,?,'注册表未绑模型自动归并','free',?,100,1,'healthy',0,0,'',0,?,?)",
+                (str(_uuid3.uuid4()), "openrouter-free（系统回退）", "openai", "", "",
+                 _json.dumps([r[0] or r[1] for r in orphans], ensure_ascii=False), now, now))
+        # ---- 路由规则：模型模式（支持通配符）→ 上游列表 + 负载均衡策略 ----
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS gateway_rules ("
+            "id TEXT PRIMARY KEY, model_pattern TEXT NOT NULL,"
+            " upstreams TEXT NOT NULL DEFAULT '[]', lb_strategy TEXT NOT NULL DEFAULT 'weighted',"
+            " priority INTEGER NOT NULL DEFAULT 0, is_default INTEGER NOT NULL DEFAULT 0,"
+            " allowed_users TEXT NOT NULL DEFAULT '[]', enabled INTEGER NOT NULL DEFAULT 1,"
+            " created_at TEXT NOT NULL, updated_at TEXT NOT NULL)")
+        all_ups = [r[0] for r in conn.execute("SELECT id FROM gateway_upstreams").fetchall()]
+        up_by_model = {}
+        for r in conn.execute("SELECT key, model_id, upstream_id FROM gateway_models").fetchall():
+            up_by_model[r[0]] = r[2]
+            if r[1]:
+                up_by_model[r[1]] = r[2]
+        ch_map = {}
+        for ch in conn.execute(
+                "SELECT id, models, model_mapping, lb_strategy, priority, is_default,"
+                " allowed_users, enabled FROM gateway_channels").fetchall():
+            patterns = [str(m) for m in (_json.loads(ch[1] or "[]") or [])]
+            patterns += [str(k) for k in (_json.loads(ch[2] or "{}") or {})]
+            patterns = list(dict.fromkeys(patterns))
+            if not patterns:
+                patterns = ["*"]
+            first = ""
+            for p in patterns:
+                ups = [up_by_model[p]] if (p != "*" and up_by_model.get(p)) else list(all_ups)
+                if not ups:
+                    continue
+                rid = str(_uuid3.uuid4())
+                conn.execute(
+                    "INSERT INTO gateway_rules (id, model_pattern, upstreams, lb_strategy,"
+                    " priority, is_default, allowed_users, enabled, created_at, updated_at)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (rid, p, _json.dumps(ups, ensure_ascii=False), ch[3] or "weighted",
+                     int(ch[4] or 0), int(ch[5] or 0), ch[6] or "[]", int(ch[7] or 0), now, now))
+                first = first or rid
+            if ch[0]:
+                ch_map[ch[0]] = first
+        if not conn.execute("SELECT COUNT(*) FROM gateway_rules").fetchone()[0] and all_ups:
+            # 无存量渠道时种子默认兜底规则，保证迁移后网关即可用
+            conn.execute(
+                "INSERT INTO gateway_rules (id, model_pattern, upstreams, lb_strategy, priority,"
+                " is_default, allowed_users, enabled, created_at, updated_at)"
+                " VALUES (?,'*',?,'weighted',0,1,'[]',1,?,?)",
+                (str(_uuid3.uuid4()), _json.dumps(all_ups, ensure_ascii=False), now, now))
+        # ---- 业务路由：channel_id→rule_id、model_key→model_name（值同步映射） ----
+        rcols = {r[1] for r in conn.execute("PRAGMA table_info(gateway_role_routes)")}
+        if "channel_id" in rcols:
+            conn.execute("ALTER TABLE gateway_role_routes RENAME COLUMN channel_id TO rule_id")
+        if "model_key" in rcols:
+            conn.execute("ALTER TABLE gateway_role_routes RENAME COLUMN model_key TO model_name")
+        for rt in conn.execute("SELECT role, rule_id, model_name FROM gateway_role_routes").fetchall():
+            mrow = conn.execute("SELECT model_id FROM gateway_models WHERE key=?", (rt[2],)).fetchone() \
+                if rt[2] else None
+            conn.execute("UPDATE gateway_role_routes SET rule_id=?, model_name=? WHERE role=?",
+                         (ch_map.get(rt[1], ""), (mrow[0] if mrow else rt[2]), rt[0]))
+        conn.execute("INSERT INTO schema_migrations VALUES ('gateway_rules_v1',?)", (now,))
+    if not conn.execute("SELECT 1 FROM schema_migrations WHERE version='gateway_settings_v2'").fetchone():
+        # 网关默认模型（业务路由未指定模型名时的兜底模型）+ 系统内部出网密钥明文
+        # （系统各模块经网关 /v1 出网所用，本地信任边界内保存，与上游 api_key 同级）
+        scols = {r[1] for r in conn.execute("PRAGMA table_info(gateway_settings)")}
+        if "default_model" not in scols:
+            conn.execute("ALTER TABLE gateway_settings ADD COLUMN default_model TEXT NOT NULL DEFAULT ''")
+        if "internal_key" not in scols:
+            conn.execute("ALTER TABLE gateway_settings ADD COLUMN internal_key TEXT NOT NULL DEFAULT ''")
+        conn.execute("INSERT INTO schema_migrations VALUES ('gateway_settings_v2',?)",
+                     (datetime.now().isoformat(),))
     conn.commit()
 
 

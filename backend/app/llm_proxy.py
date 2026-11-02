@@ -28,7 +28,6 @@ from app.config import settings
 from app.core import metrics_export
 from app.core.log_setup import setup_logging
 from app.core.trusted_proxy import TrustedProxyMiddleware
-from app.services.gateway.diagnostics import router as diagnostic_router
 
 setup_logging(debug=settings.DEBUG)
 logger = logging.getLogger("jianziruyang.llm_proxy")
@@ -41,7 +40,6 @@ app = FastAPI(
 
 # OpenAI 兼容代理入口（/v1/chat/completions、/v1/models），凭网关本地密钥自鉴权
 app.include_router(gateway_proxy_api.router)
-app.include_router(diagnostic_router)
 app.add_middleware(TrustedProxyMiddleware, trusted_hosts=settings.TRUSTED_PROXY_CIDRS)
 
 

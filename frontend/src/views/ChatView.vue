@@ -48,7 +48,9 @@
     <div v-else ref="messagesRef" class="messages-container">
       <div class="messages-list">
         <!-- 历史消息 -->
-        <template v-for="(msg, idx) in messages" :key="idx">
+        <div v-for="(msg, idx) in messages" :key="messageAnchor(store.currentSessionId, msg, idx)"
+                  :id="messageAnchor(store.currentSessionId, msg, idx)" class="message-anchor"
+                  :class="{ 'located-turn': active === messageAnchor(store.currentSessionId, msg, idx) && !following }">
           <ChatMessage
             :role="msg.role"
             :content="msg.content"
@@ -62,7 +64,7 @@
             @feedback="(fb) => handleFeedback(msg, fb)"
           />
           <ChatActionCard v-for="action in msg.actions || []" :key="action.id" :action="action" @update="store.updateAction" />
-        </template>
+        </div>
         <!-- 正在生成的流式响应 -->
         <ChatMessage
           v-if="store.isGenerating && currentResponse"
@@ -99,8 +101,11 @@
       </div>
     </div>
 
+    <ConversationNavigator :entries="entries" :active="active" :session-id="store.currentSessionId || ''" @navigate="navigate" />
+
     <!-- 输入区域 -->
     <div class="input-section">
+      <button v-if="messages.length && !following" class="back-to-latest" @click="scrollToBottom">↓ 回到最新</button>
       <!-- 游客提示 -->
       <div v-if="auth.isGuest" class="guest-query-banner">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="16" height="16">
@@ -120,7 +125,7 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useChatStore } from '@/stores/chat'
 import { useAuthStore } from '@/stores/auth'
@@ -128,6 +133,9 @@ import { submitFeedback, getPublicConfig } from '@/api'
 import ChatMessage from '@/components/ChatMessage.vue'
 import ChatInput from '@/components/ChatInput.vue'
 import ChatActionCard from '@/components/ChatActionCard.vue'
+import ConversationNavigator from '@/components/ConversationNavigator.vue'
+import { messageAnchor } from '@/utils/conversationNavigation'
+import { useConversationNavigation } from '@/utils/useConversationNavigation'
 
 const route = useRoute()
 const router = useRouter()
@@ -142,6 +150,9 @@ const guestQueryLimit = ref(3)
 
 const messages = computed(() => store.messages)
 const currentResponse = computed(() => store.currentResponse)
+const { entries, active, following, navigate, scrollToBottom } = useConversationNavigation(
+  messagesRef, messages, computed(() => store.currentSessionId), currentResponse,
+)
 
 const phaseMessage = computed(() => {
   switch (store.generationPhase) {
@@ -219,26 +230,14 @@ watch(() => route.params.sessionId, async (newId) => {
   }
 }, { immediate: true })
 
-// 自动滚动到底部
-watch([messages, currentResponse], async () => {
-  await nextTick()
-  scrollToBottom()
-})
-
-function scrollToBottom() {
-  if (messagesRef.value) {
-    messagesRef.value.scrollTop = messagesRef.value.scrollHeight
-  }
-}
-
+// 新提问恢复跟随；流式结束后不强行覆盖用户的历史定位。
 async function handleSend(text, files) {
-  await store.sendMessage(text, files)
-  await nextTick()
   scrollToBottom()
+  await store.sendMessage(text, files)
 }
 
 function askSuggestion(text) {
-  store.sendMessage(text)
+  handleSend(text)
 }
 
 /** 历史问题再编辑：填入输入框聚焦，发送即新一轮提问 */
@@ -283,7 +282,12 @@ onMounted(() => {
 
 <style scoped>
 .stop-generation { display: block; margin: 0 auto 10px; padding: 8px 20px; border: 1px solid #8b7355; border-radius: 8px; background: transparent; color: inherit; cursor: pointer; }
+.back-to-latest { display: block; margin: 0 auto 8px; background: #fffdf9; border: 1px solid var(--color-border); border-radius: 18px; padding: 6px 16px; font-size: 12px; color: var(--color-primary); cursor: pointer; }
+.message-anchor { border-radius: 10px; }
+.located-turn { box-shadow: inset 3px 0 var(--color-primary); }
 .chat-view {
+  position: relative;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   height: 100vh;
@@ -354,7 +358,9 @@ onMounted(() => {
 .messages-container {
   flex: 1;
   overflow-y: auto;
-  padding-bottom: 8px;
+  overflow-anchor: none;
+  min-height: 0;
+  padding: 0 40px 8px 0;
 }
 
 .messages-list {
@@ -531,6 +537,7 @@ onMounted(() => {
     font-size: 13px;
   }
 
+  .messages-container { padding: 40px 0 8px; }
   .messages-list {
     padding: 0 12px;
   }

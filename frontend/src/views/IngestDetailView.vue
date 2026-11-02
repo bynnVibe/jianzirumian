@@ -51,12 +51,13 @@
           </div>
         </div>
         <button
-          v-if="record.source_file_exists"
+          v-if="record.source_type !== 'url' && record.source_file_exists"
           class="btn btn-outline btn-sm"
           @click="previewSource"
         >
           查看知识来源
         </button>
+        <UrlSource v-else-if="record.source_type === 'url'" :source="record" />
         <span v-else class="source-missing">源文件已删除</span>
       </div>
 
@@ -110,6 +111,7 @@
 import { ref, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { getIngestHistoryContent, getImageUrl as buildImageUrl } from '@/api'
+import UrlSource from '@/components/UrlSource.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -134,10 +136,10 @@ let sourcePath = ''
 let pdfPreviewPath = ''
 
 function typeIcon(type) {
-  return type === 'image' ? '图' : type === 'word' ? 'W' : type === 'pdf' ? 'P' : '文'
+  return type === 'image' ? '图' : type === 'word' ? 'W' : type === 'pdf' ? 'P' : type === 'url' ? '链' : '文'
 }
 function typeLabel(type) {
-  return type === 'image' ? '图片' : type === 'word' ? 'Word 文档' : type === 'pdf' ? 'PDF 文档' : type
+  return type === 'image' ? '图片' : type === 'word' ? 'Word 文档' : type === 'pdf' ? 'PDF 文档' : type === 'url' ? '网页链接' : type
 }
 function formatDateTime(iso) {
   if (!iso) return ''
@@ -153,6 +155,7 @@ function goBack() {
 
 function previewSource() {
   if (!record.value || !record.value.source_file_exists) return
+  if (record.value.source_type === 'url') return
   if (record.value.source_type === 'image') {
     previewImageSrc.value = buildImageUrl(sourcePath)
     return

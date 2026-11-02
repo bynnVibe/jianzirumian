@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from app.api.deps import require_admin
 from app.config import settings
 from app.core.file_cache import effective_file_cache_enabled, effective_redis_url, file_cache
+from app.core.embeddings import embedding_error_message
 from app.core.llm import LLMFactory
 from app.core.vector_store import vector_store
 from app.models.schemas import SystemConfig
@@ -45,6 +46,11 @@ class TestConnectionResult(BaseModel):
     success: bool
     message: str
     elapsed: float = 0
+
+
+class EmbeddingConnectionResult(TestConnectionResult):
+    """返回业务客户端的真实状态，供页面同步显示。"""
+    embedding: dict | None = None
 
 
 class ProviderSettingsBody(BaseModel):
@@ -156,9 +162,9 @@ async def get_full_config():
     current_embedding = runtime_config.embedding_provider or settings.EMBEDDING_PROVIDER
     current_rerank = runtime_config.rerank_provider or settings.RERANKER_PROVIDER
 
-    # 检查向量库状态
-    embedding_ok = vector_store.is_available()
-    doc_count = vector_store.get_document_count() if embedding_ok else 0
+    # 读取本地统计与最近一次真实请求结果，不在配置读取时请求模型。
+    doc_count = vector_store.get_document_count()
+    embedding_status = vector_store.embedding_status()
 
     return {
         "llm_provider": current_llm,
@@ -186,10 +192,9 @@ async def get_full_config():
             "anysearch": _public_config("search", "anysearch"),
         },
         "embedding": {
-            "provider": current_embedding,
-            "available": embedding_ok,
-            "knowledge_count": doc_count,
             **_public_config("embedding", current_embedding),
+            **embedding_status,
+            "knowledge_count": doc_count,
         },
         "embedding_config": {p: _public_config("embedding", p) for p in AVAILABLE_EMBEDDING_PROVIDERS},
         "rerank_config": {p: _public_config("rerank", p) for p in AVAILABLE_RERANK_PROVIDERS},
@@ -240,12 +245,9 @@ async def switch_provider(body: ProviderSwitch, _admin: dict = Depends(require_a
     setattr(runtime_config, key_map[body.provider_type], body.value)
     logger.info("切换 %s 提供商为: %s", body.provider_type, body.value)
 
-    # Embedding 切换后需重建实例（失败不阻断切换，后续可通过测试重试）
+    # 配置应用与模型验证分离；后续业务和测试均使用新客户端。
     if body.provider_type == "embedding":
-        try:
-            vector_store.retry_init(force=True)
-        except Exception as e:
-            logger.warning("Embedding 切换后初始化失败: %s", e)
+        vector_store.reload_embeddings()
 
     return {"success": True, "message": f"{body.provider_type} 提供商已切换为 {body.value}"}
 
@@ -276,12 +278,12 @@ async def save_provider_settings(body: ProviderSettingsBody, _admin: dict = Depe
     runtime_config.set_provider_settings(body.category, body.provider, values)
     logger.info("保存 %s/%s 参数: %s", body.category, body.provider, sorted(values.keys()))
 
-    # Embedding 参数变更后重建实例，使新配置立即生效
-    if body.category == "embedding":
-        try:
-            vector_store.retry_init(force=True)
-        except Exception as e:
-            logger.warning("Embedding 配置保存后初始化失败: %s", e)
+    # 仅重绑当前启用的模型，保留已有索引和其他提供商的运行状态。
+    if body.category == "embedding" and body.provider == (
+        runtime_config.embedding_provider or settings.EMBEDDING_PROVIDER
+    ):
+        vector_store.reload_embeddings()
+        return {"success": True, "message": "配置已保存并应用到后续检索/入库；请测试连接验证服务"}
 
     return {"success": True, "message": "配置已保存，并已同步为系统默认配置"}
 
@@ -599,30 +601,23 @@ async def test_ocr_connection(body: TestConnectionRequest, _admin: dict = Depend
         )
 
 
-@router.post("/test-embedding", response_model=TestConnectionResult)
+@router.post("/test-embedding", response_model=EmbeddingConnectionResult)
 async def test_embedding_connection(_admin: dict = Depends(require_admin)):
-    """测试 Embedding 连接（使用当前生效配置重建并初始化）"""
-    start = time.time()
+    """实际请求当前业务使用的 Embedding，不创建或写入索引。"""
+    start = time.monotonic()
     try:
-        ok = vector_store.retry_init(force=True)
-        elapsed = time.time() - start
-        if not ok:
-            return TestConnectionResult(
-                success=False,
-                message="Embedding 服务不可用，请检查配置",
-                elapsed=round(elapsed, 2),
-            )
-        return TestConnectionResult(
-            success=True,
-            message="Embedding 服务连接正常",
-            elapsed=round(elapsed, 2),
+        result = await asyncio.to_thread(vector_store.probe_embeddings)
+        return EmbeddingConnectionResult(
+            success=result["available"] is True,
+            message=result["message"],
+            elapsed=round(time.monotonic() - start, 2),
+            embedding=result,
         )
     except Exception as e:
-        elapsed = time.time() - start
-        return TestConnectionResult(
+        return EmbeddingConnectionResult(
             success=False,
-            message=str(e)[:100],
-            elapsed=round(elapsed, 2),
+            message=embedding_error_message(e),
+            elapsed=round(time.monotonic() - start, 2),
         )
 
 

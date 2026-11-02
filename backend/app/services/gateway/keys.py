@@ -147,6 +147,33 @@ def reset_usage(key_id: str) -> Optional[dict]:
 
 
 # ---------------------------------------------------------------------------
+# 系统内部出网密钥（各业务模块经网关 /v1 出网自动携带）
+# ---------------------------------------------------------------------------
+
+_INTERNAL_KEY_NAME = "系统内部调用"
+
+
+def ensure_internal_key() -> str:
+    """返回系统内部出网密钥明文（无限配额、不限模型）。
+
+    明文持久化在 gateway_settings.internal_key（本地信任边界，与上游 api_key 同级）；
+    对应密钥行被删除时自动重建，保证系统模块始终可经网关出网。
+    """
+    from app.services.gateway import settings as settings_svc
+    cur = (settings_svc.get_settings().get("internal_key") or "").strip()
+    if cur:
+        row = db.query_one("SELECT id, enabled FROM gateway_keys WHERE key_hash=?", (_hash(cur),))
+        if row and int(row["enabled"] or 0) == 1:
+            return cur
+    info = create_key(_INTERNAL_KEY_NAME, created_by="system",
+                      token_quota=0, request_quota=0, allowed_models=[])
+    plain = info["key"]
+    settings_svc.save_settings({"internal_key": plain})
+    logger.info("已创建系统内部出网密钥（%s…）", plain[:len(_KEY_PREFIX) + 6])
+    return plain
+
+
+# ---------------------------------------------------------------------------
 # 运行时校验与配额消费（代理链路调用）
 # ---------------------------------------------------------------------------
 

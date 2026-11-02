@@ -170,7 +170,8 @@
           <ol class="step-list">
             <li>点击左侧「新对话」，或直接进入对话页面</li>
             <li>在底部输入框输入问题，回车或点击发送</li>
-            <li>回答会以打字机效果逐字显示，无需等待完整生成</li>
+            <li>收到模型正文后，回答会逐步显示；主聊天会对较大的响应块做平滑展示。检索、工具执行和模型首块返回仍可能需要等待。</li>
+            <li>生成中可点「停止生成」；切换会话会清理旧回答的待展示队列，避免内容串入新会话。中断的回答不视为完整成功。</li>
           </ol>
         </div>
         <div class="card">
@@ -194,8 +195,10 @@
         <div class="card">
           <h3 class="card-title">回答下方可以做什么</h3>
           <ul class="bullet-list">
-            <li><b>查看来源</b>：展开知识来源，能看到回答依据的原文片段和笔记原图</li>
-            <li><b>跳转原文</b>：来源是 Word / PDF 时，可点击「在线预览（第 N 页）」直接跳转到原文档对应页面，对照上下文核验</li>
+            <li><b>查看来源</b>：回答下方默认收起「知识来源 · N 份文档」，同时显示命中片段总数。点击展开文档列表，再点某份文档查看各片段全文、页码和原图。</li>
+            <li><b>理解排序</b>：同一知识库内同一文档的片段合并为一个来源，按文档最高检索相关度从高到低排序；百分比<b>不是答案正确率</b>。同名但不同文件不会仅因标题相同而合并。</li>
+            <li><b>历史引用</b>：旧会话保留原正文编号，合并后的文档卡会列出对应引用；不会改写历史回答。</li>
+            <li><b>跳转原文</b>：Word / PDF 来源可点击「在线预览 Word」「在线查看 PDF」或页码链接，对照原文核验；Word 未生成预览版本时显示「下载原文」。</li>
             <li><b>收藏</b>：觉得回答有用，点击收藏按钮存到「知识收藏」，还可以加标签</li>
             <li><b>点赞 / 点踩</b>：对回答质量给出反馈，帮助系统改进</li>
           </ul>
@@ -208,6 +211,17 @@
             每个人只能看到自己的对话记录。
             较长的会话系统会自动压缩成摘要，重新打开时上下文不会丢失，还能加快响应速度。
           </p>
+        </div>
+        <div class="card">
+          <h3 class="card-title">知识助手与回答正文</h3>
+          <p class="card-text">
+            在知识百科、知识库管理、上传、入库详情和收藏页面，登录用户可点右侧「✦ 知识助手」提问。
+            助手保留独立的计划、思考与工具进度区域；提议修改词条时，仍需你确认后才写入。
+            主问答和助手的最终答案不展示模型专用推理字段，并过滤正文开头明确的推理标签块；普通正文中的过程自述仍可能出现。
+          </p>
+          <div class="callout callout-info">
+            最终回答流失败时会明确提示，不再静默转成非流式整段补答。前端平滑显示不代表上游逐字返回，也不能消除模型首块等待或代理缓冲；历史回答不会自动清洗。
+          </div>
         </div>
       </section>
 
@@ -299,7 +313,7 @@
           <p class="card-text">
             笔记保存成功后，系统会在后台自动把资料「编译」成结构化的百科词条，
             包含<b>概述、关键要点、相关概念、原文精选</b>等部分。之后提问时，
-            检索会优先命中这些百科卡片，让回答更完整、更有条理。
+            百科卡片和原文一起参与检索。来源文档按最高相关度排序；启用百科优先时，同一文档内部先展示百科片段，再保留原文片段供核验。
           </p>
           <ul class="bullet-list">
             <li><b>自动生效</b>：编译默认开启、全程后台进行，无需任何操作；内容过短的笔记会跳过编译，仍参与普通检索</li>
@@ -394,8 +408,10 @@
             模型网关是一个<b>独立的本地 LLM 入口</b>：对下游工具/应用统一暴露 OpenAI 兼容协议（<code>/v1/chat/completions</code>），
             下游只需持有一个<b>本地密钥</b>（<code>sk-jzrm-...</code>）即可调用，无需知道、也不会拿到真实上游 Key。
             网关在中间完成鉴权、配额、安全审计、负载均衡与故障切换，并把每次调用<b>全量记录</b>下来便于排查与运维。
-            入口在「系统管理」控制台 →「模型网关」（仅管理员/运维可见）。五层架构下，<code>/v1</code> 代理运行时独立部署为<b>层3 LLM Proxy</b> 服务（端口 8001）；
-            Agent 自身也可选经网关出网（<code>LLM_PROVIDER=gateway</code>），问答/工具的全部 LLM 调用统一走代理选路、配额与审计。
+            入口在「系统管理」控制台 →「模型网关」（仅管理员/运维可见）。<b>系统各模块的模型调用已统一经网关「业务路由」出网</b>：
+            问答/知识助手/意图改写/证据校验/百科编译与摘要、记忆、润色等按<b>角色</b>绑定路由规则与模型，未填模型时用「网关默认模型」；
+            原系统设置中的「LLM 语言模型/知识助手模型/OpenRouter 免费模型」三个区块已整体合并至此。五层架构下，<code>/v1</code> 代理运行时可独立部署为<b>层3 LLM Proxy</b> 服务（端口 8001）；
+            同进程默认走回环地址（<code>GATEWAY_INTERNAL_URL</code>），网关未初始化（无启用上游/规则）时自动降级直连 <code>.env</code> 配置的提供商。
           </p>
         </div>
         <div class="card">
@@ -457,7 +473,7 @@
             <li><b>层5 监控层</b>：Prometheus（端口 9090）抓取两个服务的 <code>/metrics</code>，Grafana（端口 3000）自动装配数据源与「系统总览」大盘；调用级 Trace 见应用内「Agent 可观测性」页。</li>
           </ol>
           <div class="callout callout-info">
-            功能架构不变：五层是<b>部署拓扑</b>拆解，全部业务功能与页面和此前一致；仅 LLM 出网可选走层3 网关（控制台设 <code>LLM_PROVIDER=gateway</code>）。
+            功能架构不变：五层是<b>部署拓扑</b>拆解，全部业务功能与页面和此前一致；LLM 出网<b>统一走层3 网关的「业务路由」</b>（角色 → 规则 → 模型 → 上游），网关未初始化时降级直连提供商。
           </div>
           <div class="callout callout-tip">
             默认所有宿主端口仅回环监听，监控经 SSH 隧道访问。Grafana 无默认密码；存活使用 Prometheus 即时 up，readiness 只检查本地资源。Agent/Gateway 分别使用持久 counter，窗口成功率/延迟为 gauge；抓取或 readiness 失败持续1分钟触发规则，不等同于已配置外部通知。
@@ -465,13 +481,76 @@
         </div>
       </section>
 
-      <!-- 常见问题 -->
       <section class="guide-section">
         <h2 class="section-title">
           <span class="section-num">13</span>
+          系统设置与远程 Embedding（管理员）
+        </h2>
+        <div class="card">
+          <h3 class="card-title">连接阿里云 text-embedding-v4</h3>
+          <ol class="step-list">
+            <li><b>展开设置</b>：进入「系统管理 → 系统设置」。各设置区块默认折叠，点击「Embedding 向量模型」标题展开，配置和操作按钮在区块内显示。</li>
+            <li><b>选择提供商</b>：选择「自定义 API」（<code>custom</code>）；「OpenAI 兼容 API」（<code>openai</code>）也支持兼容协议，不代表只能使用 OpenAI 官方服务。切换会立即应用，请避开正在入库的任务。</li>
+            <li><b>填写参数</b>：模型名填 <code>text-embedding-v4</code>，地址使用阿里云控制台提供的对应地域/工作空间兼容接口根地址，通常以 <code>/compatible-mode/v1</code> 结尾，不要追加 <code>/embeddings</code>。Key 必须与该地域、工作空间和模型权限匹配；已有 Key 留空保持不变。</li>
+            <li><b>先保存再测试</b>：点击「保存配置」，再点「测试连接」。测试使用当前已保存配置，未保存输入不能用于验证；测试会发送一条固定短文本，可能消耗少量额度。</li>
+            <li><b>核对结果</b>：检查当前生效模型、远程 API 模式、生效地址、最近请求结果与时间，以及本地 FAISS 的维度和片段数。模型测试成功后，再通过正常入库和提问验证业务效果。</li>
+          </ol>
+          <div class="callout callout-info">
+            <b>远程 Embedding + 本地 FAISS 是正常组合。</b>前者生成向量，后者保存和检索向量；加载本地索引不表示降级为本地模型。连接测试不新增文档、不保存或重建索引。
+          </div>
+        </div>
+        <div class="card">
+          <h3 class="card-title">状态与配置生效规则</h3>
+          <ul class="bullet-list">
+            <li><b>待验证</b>：当前配置实例尚未验证；保存当前模型参数或切换提供商后会重置。<b>验证中</b>：正在发起测试。</li>
+            <li><b>已验证</b>：最近一次有效请求成功，若已有索引则向量维度一致。<b>异常</b>：请求失败、向量无效或索引维度不匹配；请按结果提示处理。</li>
+            <li><b>配置优先级</b>：页面保存的提供商与非空参数覆盖优先，其次是进程环境变量，再是固定加载的 <code>backend/.env</code> 默认值。只改环境文件不会覆盖已有页面设置。</li>
+            <li><b>启动验证</b>：管理员可在环境配置中设置 <code>EMBEDDING_STARTUP_PROBE=true</code>；模板默认关闭，开启后每次启动会真实调用模型。<code>EMBEDDING_REQUEST_TIMEOUT=20</code> 是 OpenAI 兼容客户端请求超时（秒），不是整条业务的总预算。</li>
+            <li><b>生效时机</b>：页面保存应用到后续检索和入库；环境项修改需重启后端，容器环境需重新应用 Compose。最近请求状态仅属于当前进程，不是永久健康承诺，readiness 也不验证远程模型。</li>
+          </ul>
+          <div class="callout callout-tip">
+            更换模型不会自动转换历史向量。维度相同也不保证向量空间相同；维度不匹配时先核对原入库模型，恢复原模型或安排备份后重建，不能靠清空索引解决连接问题。
+          </div>
+        </div>
+      </section>
+
+      <section class="guide-section">
+        <h2 class="section-title">
+          <span class="section-num">14</span>
+          Agent 可观测性：查看本次请求日志（管理员/运维）
+        </h2>
+        <div class="card">
+          <ol class="step-list">
+            <li>进入「系统管理 → Agent 可观测性」，在「请求追踪」列表找到目标请求，打开详情查看步骤、输入/输出与错误。</li>
+            <li>点击「查看详细日志」，查看与该 trace ID 精确关联的已落盘日志，包括多行异常堆栈。</li>
+            <li>点击「刷新日志」重新读取；有后续页时点「继续加载日志」，支持跨日记录。点「返回步骤追踪」回到步骤详情。</li>
+            <li>排查回答慢或成段出现时，结合检索耗时与 OpenAI 兼容流的首正文耗时、正文 chunk 数、最大 chunk 长度，区分模型等待、上游大块响应和代理缓冲。</li>
+          </ol>
+          <div class="callout callout-info">
+            日志响应中的常见凭据会脱敏，原始文件不会被改写。旧日志缺少 trace ID、未落盘、已清理或独立进程未关联的内容无法补齐；日志为空不代表请求未执行，可返回步骤追踪查看已保存信息（有长度上限）。
+          </div>
+        </div>
+      </section>
+
+      <!-- 常见问题 -->
+      <section class="guide-section">
+        <h2 class="section-title">
+          <span class="section-num">15</span>
           常见问题
         </h2>
         <div class="faq-list">
+          <details class="faq-item">
+            <summary>Embedding 已保存，为什么还是「待验证」或提示异常？</summary>
+            <p>保存只应用参数，需点击「测试连接」发起真实请求。401 检查 Key/地域/工作空间，403 检查权限与额度，额度不足检查计费，429 检查限流，400/404 检查地址和模型名，超时检查网络。模型连接成功但维度不符也会标为异常，现有索引不会被测试修改。</p>
+          </details>
+          <details class="faq-item">
+            <summary>知识来源变少了，是不是丢了检索片段？</summary>
+            <p>同一知识库内同一文档的片段聚合为一个来源，列表默认折叠。展开文档后可查看本次命中的各个片段；文档百分比取最高检索相关度，不是答案正确率，也不表示整份文档已完整召回。</p>
+          </details>
+          <details class="faq-item">
+            <summary>回答为什么仍会等一会儿，或看起来成段出现？</summary>
+            <p>检索、工具执行和模型首块返回需要时间，上游或反向代理也可能缓冲。主聊天会平滑显示已收到的正文，但不能提前显示尚未返回的内容；可请管理员/运维按第 14 节查看本次请求日志。</p>
+          </details>
           <details class="faq-item" open>
             <summary>OCR 识别的文字有错别字怎么办？</summary>
             <p>识别结果在保存前可以自由编辑，直接修改后再保存即可；也可以点击「一键润色」让 AI 帮忙整理语句。保存进知识库的就是你最终确认的文字。</p>
@@ -716,13 +795,16 @@
 }
 
 .card-text code,
-.step-list code {
+.step-list code,
+.bullet-list code,
+.callout code {
   background: #f4ece0;
   color: #a5703a;
   padding: 1px 5px;
   border-radius: 4px;
   font-family: 'SFMono-Regular', Consolas, monospace;
   font-size: 12px;
+  overflow-wrap: anywhere;
 }
 
 .step-list {

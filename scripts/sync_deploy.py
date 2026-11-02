@@ -14,6 +14,9 @@ def files():
         "scripts/deploy-aliyun.sh": "deploy-aliyun.sh",
         "scripts/deploy_runtime.py": "deploy_runtime.py",
         "scripts/nginx-https.conf": "nginx-https.conf",
+        # 隔离浏览器渲染兜底的镜像定义（离线包不得遗漏 renderer 与其安全配置）
+        "renderer/Dockerfile": "renderer/Dockerfile",
+        "renderer/requirements.txt": "renderer/requirements.txt",
     }
     for source in sorted((ROOT / "monitoring").rglob("*")):
         if source.is_file() and source.suffix in (".yml", ".yaml", ".json"):

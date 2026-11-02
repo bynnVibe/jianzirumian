@@ -28,6 +28,12 @@ langchain-openai==0.2.1
 # ---- HTTP 请求 ----
 httpx==0.27.2
 requests==2.32.3
+aiohttp==3.14.1
+
+# ---- 公开网页正文提取（浏览器依赖独立在 renderer 镜像） ----
+beautifulsoup4==4.13.4
+markdownify==1.1.0
+trafilatura==2.0.0
 
 # ---- OCR (本地) ----
 # PaddleOCR: pip install paddlepaddle paddleocr

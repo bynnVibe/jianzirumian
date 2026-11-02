@@ -71,6 +71,8 @@ def _row_to_record(row: dict) -> dict:
         "pdf_preview_path": row["pdf_preview_path"],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
+        **json.loads(row.get("source_metadata") or "{}"),
+        "url_import_id": row.get("url_import_id"),
     }
 
 
@@ -91,10 +93,16 @@ class UploadRecordService:
         pages: Optional[list[dict]] = None,
         pdf_preview_path: Optional[str] = None,
         title: str = "",
+        source_metadata: Optional[dict] = None,
+        url_import_id: Optional[str] = None,
     ) -> dict:
         """添加上传记录"""
         now = datetime.now().isoformat()
+        source_metadata = {key: str(value) for key, value in (source_metadata or {}).items()
+                           if key in {"source_url", "final_url", "source_site", "fetched_at", "extraction_method", "content_origin"}}
         record = {
+            **source_metadata,
+            "url_import_id": url_import_id,
             "id": str(uuid.uuid4()),
             "filename": filename,
             "title": title,
@@ -114,14 +122,14 @@ class UploadRecordService:
         db.execute(
             "INSERT INTO upload_records (id, filename, title, image_path, ocr_text, ocr_provider,"
             " chunk_count, doc_ids, visibility, owner_id, source_type, pages,"
-            " pdf_preview_path, created_at, updated_at)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " pdf_preview_path, created_at, updated_at, source_metadata, url_import_id)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 record["id"], filename, title, image_path, ocr_text, ocr_provider,
                 chunk_count, json.dumps(doc_ids or [], ensure_ascii=False),
                 visibility, owner_id, source_type,
                 json.dumps(pages or [], ensure_ascii=False), pdf_preview_path,
-                now, now,
+                now, now, json.dumps(source_metadata, ensure_ascii=False), url_import_id,
             ),
         )
         # 原始素材按类别归档到 wiki/raw/{category}/（幂等，失败不阻断上传）
@@ -214,7 +222,7 @@ class UploadRecordService:
             if not isinstance(src, dict):
                 continue
             img = (src.get("source_image") or "").strip()
-            if not img or (src.get("pdf_preview_path") and src.get("source_type")):
+            if not img or (src.get("pdf_preview_path") and src.get("source_type") and src.get("document_title")):
                 continue
             rec = self.get_record_by_source(img)
             if not rec:
@@ -226,6 +234,11 @@ class UploadRecordService:
                 rec = _row_to_record(row) if row else None
             if not rec:
                 continue
+            for key in ("source_url", "final_url", "source_site", "fetched_at", "extraction_method", "content_origin"):
+                if rec.get(key):
+                    src.setdefault(key, rec[key])
+            if not src.get("document_title"):
+                src["document_title"] = rec.get("title") or rec.get("filename") or ""
             if not src.get("pdf_preview_path") and rec.get("pdf_preview_path"):
                 src["pdf_preview_path"] = rec["pdf_preview_path"]
             if not src.get("source_type"):

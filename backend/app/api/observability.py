@@ -7,15 +7,30 @@
 - GET /api/observability/traces/{id}：trace 全链路详情（含每次 LLM 调用的完整 prompt/response）
 """
 import logging
+from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
-from app.api.deps import require_ops
+from app.api.deps import get_current_user, require_ops
 from app.core import observability as obs
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/observability", tags=["observability"])
+
+
+@router.get("/my-metrics")
+def get_my_metrics(
+    response: Response,
+    days: int = Query(7, ge=1, le=30),
+    user: dict = Depends(get_current_user),
+):
+    """登录用户的个人业务概览；身份只取服务端会话，不接受查询目标用户。"""
+    user_id = user.get("id")
+    if user.get("role") not in ("user", "admin", "ops") or not user_id or user_id in ("guest", "system", "-"):
+        raise HTTPException(status_code=403, detail="请使用正式账号查看个人使用概览")
+    response.headers["Cache-Control"] = "no-store"
+    return {"success": True, **obs.personal_metrics(user_id, days)}
 
 
 @router.get("/metrics")
@@ -43,3 +58,22 @@ async def get_trace(trace_id: str, _admin: dict = Depends(require_ops)):
     if not trace:
         return {"success": False, "detail": "trace 不存在"}
     return {"success": True, "trace": trace}
+
+
+@router.get("/traces/{trace_id}/logs")
+def get_trace_logs(
+    trace_id: UUID,
+    response: Response,
+    cursor: str = Query("", max_length=40),
+    limit: int = Query(100, ge=1, le=200),
+    _admin: dict = Depends(require_ops),
+):
+    """分页读取请求日志；同步端点在线程池中执行，避免文件扫描阻塞事件循环。"""
+    try:
+        result = obs.get_trace_logs(str(trace_id), cursor, limit)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if result is None:
+        raise HTTPException(status_code=404, detail="trace 不存在或已清理")
+    response.headers["Cache-Control"] = "no-store"
+    return {"success": True, **result}

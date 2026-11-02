@@ -58,10 +58,11 @@ function handleResize() {
 
 // 登录/注册/找回密码/使用指南页不显示侧边栏（指南页免登录，不能有触发 401 的请求）
 // 独立新页打开的预览页（文档/附件）同样不显示侧边栏，保证沉浸式阅读
-// 系统管理控制台（/admin/*）拥有专属左侧导航，不再叠加正常使用侧边栏
+// 系统管理控制台（/admin/*）与知识库控制台（/kb/*）拥有专属左侧导航，不再叠加正常使用侧边栏
 const showSidebar = computed(() => {
   return !['Login', 'Register', 'ForgotPassword', 'Guide', 'DocPreview', 'AttachmentPreview'].includes(route.name)
     && !route.path.startsWith('/admin')
+    && !route.path.startsWith('/kb')
 })
 
 // ---- 5 分钟无操作自动登出 ----

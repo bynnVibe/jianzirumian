@@ -1,6 +1,7 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import AdminConsoleLayout from '@/components/AdminConsoleLayout.vue'
+import KnowledgeHubLayout from '@/components/KnowledgeHubLayout.vue'
 
 const routes = [
   {
@@ -43,12 +44,6 @@ const routes = [
     meta: { requiresAuth: true, allowGuest: true },
   },
   {
-    path: '/upload',
-    name: 'KnowledgeUpload',
-    component: () => import('@/views/KnowledgeUpload.vue'),
-    meta: { requiresAuth: true },
-  },
-  {
     path: '/ingest-detail/:recordId',
     name: 'IngestDetail',
     component: () => import('@/views/IngestDetailView.vue'),
@@ -63,12 +58,45 @@ const routes = [
     path: '/management',
     redirect: '/admin/settings',
   },
+  // ============ 知识库控制台（独立布局 + 专属左侧导航，参考系统管理控制台逻辑） ============
+  // 收纳知识库管理/知识收藏/知识百科三个功能界面；进入后只展示知识库相关功能。
   {
-    path: '/knowledge',
-    name: 'KnowledgeBase',
-    component: () => import('@/views/ManagementView.vue'),
+    path: '/kb',
+    component: KnowledgeHubLayout,
     meta: { requiresAuth: true, allowGuest: true },
+    redirect: { name: 'KnowledgeBase' },
+    children: [
+      {
+        path: 'management',
+        name: 'KnowledgeBase',
+        component: () => import('@/views/ManagementView.vue'),
+        meta: { requiresAuth: true, allowGuest: true },
+      },
+      {
+        path: 'bookmarks',
+        name: 'Bookmarks',
+        component: () => import('@/views/BookmarksView.vue'),
+        meta: { requiresAuth: true, allowGuest: true },
+      },
+      {
+        path: 'wiki',
+        name: 'Wiki',
+        component: () => import('@/views/WikiView.vue'),
+        meta: { requiresAuth: true, allowGuest: false },
+      },
+      {
+        path: 'upload',
+        name: 'KnowledgeUpload',
+        component: () => import('@/views/KnowledgeUpload.vue'),
+        meta: { requiresAuth: true, allowGuest: false },
+      },
+    ],
   },
+  // 旧扁平路径兼容重定向到知识库控制台
+  { path: '/knowledge', redirect: '/kb/management' },
+  { path: '/bookmarks', redirect: '/kb/bookmarks' },
+  { path: '/wiki', redirect: '/kb/wiki' },
+  { path: '/upload', redirect: '/kb/upload' },
   {
     path: '/doc-preview',
     name: 'DocPreview',
@@ -81,18 +109,7 @@ const routes = [
     component: () => import('@/views/AttachmentPreviewView.vue'),
     meta: { requiresAuth: true, allowGuest: true },
   },
-  {
-    path: '/bookmarks',
-    name: 'Bookmarks',
-    component: () => import('@/views/BookmarksView.vue'),
-    meta: { requiresAuth: true, allowGuest: true },
-  },
-  {
-    path: '/wiki',
-    name: 'Wiki',
-    component: () => import('@/views/WikiView.vue'),
-    meta: { requiresAuth: true },
-  },
+  // （/bookmarks 与 /wiki 已并入 /kb 控制台，见上方重定向）
   // ============ 系统管理控制台（独立布局 + 专属左侧导航） ============
   // 收纳所有管理/运维模块；admin 与 ops 均可进（requiresConsole=canOps），
   // 各子页再按 requiresAdmin / requiresOps / requiresOpsOnly 细分权限。
@@ -144,7 +161,12 @@ const routes = [
   { path: '/pipeline', redirect: '/admin/pipeline' },
   { path: '/gateway', redirect: '/admin/gateway' },
   { path: '/eval', redirect: '/admin/eval' },
-  { path: '/observability', redirect: '/admin/observability' },
+  {
+    path: '/observability',
+    name: 'MyObservability',
+    component: () => import('@/views/ObservabilityView.vue'),
+    meta: { requiresAuth: true },
+  },
 ]
 
 const router = createRouter({
@@ -183,6 +205,12 @@ router.beforeEach(async (to, from, next) => {
       next({ name: 'Login', query: { redirect: to.fullPath } })
       return
     }
+  }
+
+  // 普通用户使用独立业务视图，管理员/运维仍进入技术控制台。
+  if (to.name === 'MyObservability' && auth.canOps) {
+    next({ name: 'Observability' })
+    return
   }
 
   // 需要进入系统管理控制台（管理员或运维角色）

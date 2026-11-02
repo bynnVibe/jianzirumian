@@ -1,9 +1,10 @@
 <template>
   <div v-if="visible" class="assistant-root">
-    <!-- 折叠态：右侧悬浮入口 -->
+    <!-- 折叠态：右侧悬浮入口（生成中显示“进行中”徽标，切回即见实时流） -->
     <button v-if="!store.isOpen" class="assistant-fab" @click="store.open()" title="知识助手">
       <span class="fab-icon">✦</span>
       <span class="fab-text">知识助手</span>
+      <span v-if="store.isGenerating" class="fab-badge">进行中</span>
     </button>
 
     <!-- 展开态：问答面板 -->
@@ -14,23 +15,63 @@
             <span class="head-dot"></span>
             <span>知识助手</span>
             <span class="head-sub">Agent</span>
+            <span v-if="store.isGenerating" class="head-live">● 进行中</span>
           </div>
           <div class="head-actions">
-            <button class="icon-btn" @click="store.reset()" title="清空对话" :disabled="store.isGenerating">⟳</button>
+            <button class="icon-btn" @click="store.toggleHistoryDrawer()" title="历史记录">🕘</button>
+            <button class="icon-btn" @click="store.newSession()" title="新建对话" :disabled="store.isGenerating">⟳</button>
             <button class="icon-btn" @click="store.toggle()" title="收起">✕</button>
           </div>
         </header>
 
+        <!-- 历史记录抽屉 -->
+        <div v-if="store.historyDrawerOpen" class="history-drawer">
+          <div class="history-head">
+            <span class="history-title">历史记录</span>
+            <button class="icon-btn" @click="store.historyDrawerOpen = false" title="关闭">✕</button>
+          </div>
+          <div class="history-actions">
+            <button class="hist-new" @click="store.newSession()" :disabled="store.isGenerating">＋ 新建对话</button>
+          </div>
+          <div class="history-list">
+            <p v-if="store.historyLoading" class="history-empty">加载中…</p>
+            <p v-else-if="!store.sessions.length" class="history-empty">暂无历史会话</p>
+            <div
+              v-for="s in store.sessions"
+              :key="s.id"
+              class="history-item"
+              :class="{ active: s.id === store.viewingSessionId || (!store.isViewingHistory && s.id === store.currentSessionId) }"
+              @click="store.openSession(s.id)"
+            >
+              <div class="hist-main">
+                <span class="hist-item-title">{{ s.title || '未命名会话' }}</span>
+                <span class="hist-time">{{ formatTime(s.updated_at) }}</span>
+              </div>
+              <button
+                class="hist-del"
+                title="删除会话"
+                @click.stop="onDeleteSession(s.id)"
+              >🗑</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 只读历史回放横幅 -->
+        <div v-if="store.isViewingHistory" class="history-banner">
+          <span class="hb-text">📖 正在查看历史会话（只读）</span>
+          <button class="hb-back" @click="store.backToLive()">返回当前对话</button>
+        </div>
+
         <!-- 当前上下文提示 -->
-        <div class="panel-context" v-if="store.context.open_doc_title">
+        <div class="panel-context" v-if="!store.isViewingHistory && store.context.open_doc_title">
           <span class="ctx-tag">正在阅读</span>
           《{{ store.context.open_doc_title }}》
         </div>
-        <div class="panel-context" v-else-if="store.context.page_title">
+        <div class="panel-context" v-else-if="!store.isViewingHistory && store.context.page_title">
           <span class="ctx-tag">当前词条</span>
           《{{ store.context.page_title }}》
         </div>
-        <div class="panel-context" v-else-if="store.context.route_label">
+        <div class="panel-context" v-else-if="!store.isViewingHistory && store.context.route_label">
           <span class="ctx-tag">当前页面</span>
           {{ store.context.route_label }}
         </div>
@@ -38,7 +79,7 @@
         <!-- 消息区 -->
         <div class="panel-body" ref="bodyRef">
           <!-- 欢迎态 -->
-          <div v-if="store.messages.length === 0" class="welcome">
+          <div v-if="displayMessages.length === 0" class="welcome">
             <p class="welcome-title">你好，我是知识助手 👋</p>
             <p class="welcome-desc">
               我可以基于当前知识页面做主题分析、解释你的疑惑、总结整体知识文档，
@@ -50,26 +91,9 @@
           </div>
 
           <!-- 消息列表 -->
-          <div v-for="(m, i) in store.messages" :key="i" class="msg" :class="m.role">
+          <div v-for="(m, i) in displayMessages" :key="i" class="msg" :class="m.role">
             <div v-if="m.role === 'assistant'" class="msg-avatar">✦</div>
             <div class="msg-bubble">
-              <!-- 执行计划（复杂任务的规划与逐步状态，显性化展示） -->
-              <div v-if="m.plan && m.plan.length" class="msg-plan">
-                <div class="plan-head">
-                  <span class="plan-icon">🗂</span>
-                  <span>执行计划（{{ planDoneCount(m) }}/{{ m.plan.length }}）</span>
-                </div>
-                <ol class="plan-list">
-                  <li v-for="(s, si) in m.plan" :key="si" class="plan-step" :class="s.state">
-                    <span v-if="s.state === 'running'" class="tool-spinner"></span>
-                    <span v-else-if="s.state === 'done'" class="plan-check">✓</span>
-                    <span v-else class="plan-dot"></span>
-                    <span class="plan-text">{{ s.text }}</span>
-                    <span v-if="s.note" class="plan-note">{{ s.note }}</span>
-                  </li>
-                </ol>
-              </div>
-
               <!-- 思考过程（累积展示 Agent 每一步推理） -->
               <div v-if="m.thoughts && m.thoughts.length" class="msg-thoughts">
                 <div class="thoughts-head" @click="m._collapse = !m._collapse">
@@ -115,7 +139,7 @@
                     v-for="(opt, oi) in m.clarify.options"
                     :key="oi"
                     class="chip chip-sm"
-                    :disabled="store.isGenerating"
+                    :disabled="store.isGenerating || store.isViewingHistory"
                     @click="sendQuick(opt)"
                   >{{ opt }}</button>
                 </div>
@@ -154,44 +178,50 @@
 
         <!-- 输入区 -->
         <div class="panel-input">
-          <div class="chips chips-inline" v-if="store.messages.length">
-            <button
-              v-for="c in quickChips"
-              :key="c"
-              class="chip chip-sm"
-              :disabled="store.isGenerating"
-              @click="sendQuick(c)"
-            >{{ c }}</button>
+          <!-- 只读历史回放：隐藏输入，提示返回当前对话 -->
+          <div v-if="store.isViewingHistory" class="readonly-hint">
+            历史会话为只读回放。点击右上“返回当前对话”或“新建对话”继续提问。
           </div>
-          <div class="input-row">
-            <textarea
-              v-model="draft"
-              ref="inputRef"
-              class="input-box"
-              rows="1"
-              placeholder="向知识助手提问…"
-              :disabled="store.isGenerating"
-              @keydown.enter.exact.prevent="onSend"
-              @input="autoGrow"
-            ></textarea>
-            <!-- 生成中：停止按钮；否则：发送按钮 -->
-            <button
-              v-if="store.isGenerating"
-              class="send-btn stop"
-              @click="store.stop()"
-              title="停止生成"
-            >
-              <span class="stop-square"></span>
-            </button>
-            <button
-              v-else
-              class="send-btn"
-              :disabled="!draft.trim()"
-              @click="onSend"
-              title="发送"
-            >➤</button>
-          </div>
-          <div class="status-line" v-if="store.statusText">{{ store.statusText }}</div>
+          <template v-else>
+            <div class="chips chips-inline" v-if="store.messages.length">
+              <button
+                v-for="c in quickChips"
+                :key="c"
+                class="chip chip-sm"
+                :disabled="store.isGenerating"
+                @click="sendQuick(c)"
+              >{{ c }}</button>
+            </div>
+            <div class="input-row">
+              <textarea
+                v-model="draft"
+                ref="inputRef"
+                class="input-box"
+                rows="1"
+                placeholder="向知识助手提问…"
+                :disabled="store.isGenerating"
+                @keydown.enter.exact.prevent="onSend"
+                @input="autoGrow"
+              ></textarea>
+              <!-- 生成中：停止按钮；否则：发送按钮 -->
+              <button
+                v-if="store.isGenerating"
+                class="send-btn stop"
+                @click="store.stop()"
+                title="停止生成"
+              >
+                <span class="stop-square"></span>
+              </button>
+              <button
+                v-else
+                class="send-btn"
+                :disabled="!draft.trim()"
+                @click="onSend"
+                title="发送"
+              >➤</button>
+            </div>
+            <div class="status-line" v-if="store.statusText">{{ store.statusText }}</div>
+          </template>
         </div>
       </section>
     </transition>
@@ -217,7 +247,7 @@ const editBusy = ref('')
 
 // 对话/登录/指南/独立预览页不显示助手（与侧边栏隐藏规则一致，且助手需登录）
 // 系统管理控制台（/admin/*）为管理/运维场景，同样不浮出知识助手
-const HIDDEN_ROUTES = ['Login', 'Register', 'Guide', 'Chat', 'ChatWithSession', 'DocPreview', 'AttachmentPreview', 'AdminSettings', 'UserManagement', 'Pipeline', 'Gateway', 'Eval', 'Observability']
+const HIDDEN_ROUTES = ['Login', 'Register', 'Guide', 'Chat', 'ChatWithSession', 'DocPreview', 'AttachmentPreview', 'AdminSettings', 'UserManagement', 'Pipeline', 'Gateway', 'Eval', 'Observability', 'MyObservability']
 const ROUTE_LABELS = {
   Wiki: '知识百科',
   KnowledgeBase: '知识库管理',
@@ -255,8 +285,32 @@ function toolLabel(name) {
   return TOOL_LABELS[name] || name || '工具'
 }
 
-function planDoneCount(m) {
-  return (m.plan || []).filter((s) => s.state === 'done').length
+// 当前展示的消息：回看只读历史时用 historyMessages，否则用活动 messages（保留在途流）
+const displayMessages = computed(() =>
+  store.isViewingHistory ? store.historyMessages : store.messages,
+)
+
+// 会话时间格式化（仅月-日 时:分）
+function formatTime(iso) {
+  if (!iso) return ''
+  try {
+    const d = new Date(iso)
+    if (Number.isNaN(d.getTime())) return ''
+    const p = (n) => String(n).padStart(2, '0')
+    return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+  } catch (e) {
+    return ''
+  }
+}
+
+async function onDeleteSession(id) {
+  if (!window.confirm('确定删除该历史会话？此操作不可恢复。')) return
+  try {
+    await store.removeSession(id)
+  } catch (e) {
+    console.error('删除会话失败:', e)
+    alert(e?.response?.data?.detail || e?.message || '删除会话失败')
+  }
 }
 
 function render(text) {
@@ -325,6 +379,8 @@ watch(
   (name, oldName) => {
     store.setContext({ route_name: name || '', route_label: ROUTE_LABELS[name] || '' })
     if (name !== 'Wiki') store.clearPageContext()
+    // 离开知识库管理页时清除界面实时快照（视图未及清理时的兜底）
+    if (name !== 'KnowledgeBase') store.clearPageState()
     // 切换页面时清除文档预览上下文，并记录一条行文动作
     if (name !== oldName) {
       if (store.context.open_doc_title) store.clearOpenDoc()
@@ -343,6 +399,8 @@ watch(
   },
   () => { if (store.isOpen) scrollToBottom() },
 )
+// 打开只读历史会话时滚动到底部
+watch(() => store.historyMessages.length, () => { if (store.isViewingHistory) scrollToBottom() })
 
 // 首次打开面板时聚焦输入框
 watch(() => store.isOpen, (open) => {
@@ -733,78 +791,205 @@ onMounted(() => {
   to { transform: rotate(360deg); }
 }
 
-/* ---- 执行计划 stepper ---- */
-.msg-plan {
-  margin-bottom: 8px;
-  border: 1px solid #e6dccb;
-  border-radius: 8px;
-  background: #fdfaf4;
-  overflow: hidden;
+/* ---- 历史抽屉 / 徒标 / 只读横幅 ---- */
+.fab-badge {
+  margin-top: 4px;
+  font-size: 9.5px;
+  font-weight: 700;
+  color: #fff;
+  background: #c0563f;
+  border-radius: 999px;
+  padding: 1px 5px;
+  letter-spacing: 0.5px;
+  animation: assistant-pulse 1.4s ease-in-out infinite;
 }
 
-.plan-head {
+@keyframes assistant-pulse {
+  0%, 100% { opacity: 0.7; }
+  50% { opacity: 1; }
+}
+
+.head-live {
+  font-size: 10px;
+  font-weight: 700;
+  color: #c0563f;
+  letter-spacing: 0.3px;
+}
+
+.history-drawer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 100%;
+  height: 100%;
+  background: #fdfbf7;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+}
+
+.history-head {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 5px 9px;
-  font-size: 11.5px;
+  justify-content: space-between;
+  padding: 12px 14px;
+  border-bottom: 1px solid #ede6dc;
+  background: linear-gradient(135deg, #faf3e8, #fdfbf7);
+  flex-shrink: 0;
+}
+
+.history-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: #4a3f35;
+}
+
+.history-actions {
+  padding: 10px 14px;
+  flex-shrink: 0;
+}
+
+.hist-new {
+  width: 100%;
+  border: 1px solid #e0c9a6;
+  background: #fff;
+  color: #b5793c;
+  font-size: 12.5px;
   font-weight: 600;
-  color: #a08a6d;
-  background: #f7f0e4;
+  padding: 8px 12px;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: all 0.15s;
 }
 
-.plan-icon {
-  font-size: 12px;
+.hist-new:hover:not(:disabled) {
+  background: #faf3e8;
+  border-color: #c98a4b;
 }
 
-.plan-list {
-  margin: 0;
-  padding: 6px 10px;
-  list-style: none;
+.hist-new:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
-.plan-step {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 11.5px;
+.history-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0 10px 14px;
+}
+
+.history-empty {
+  text-align: center;
   color: #a89a89;
-  padding: 3px 0;
+  font-size: 12.5px;
+  padding: 24px 0;
 }
 
-.plan-step.running {
-  color: #8d6a3f;
-  font-weight: 600;
+.history-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 10px;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: background 0.15s;
+  border: 1px solid transparent;
 }
 
-.plan-step.done {
-  color: #6b7f6b;
+.history-item:hover {
+  background: #f6f1e8;
 }
 
-.plan-check {
-  color: #6f9a6f;
-  font-size: 11px;
-  flex-shrink: 0;
+.history-item.active {
+  background: #faf3e8;
+  border-color: #eed9bb;
 }
 
-.plan-dot {
-  width: 7px;
-  height: 7px;
-  margin: 0 2px;
-  border-radius: 50%;
-  border: 1.5px solid #d8cbb4;
-  flex-shrink: 0;
-}
-
-.plan-text {
+.hist-main {
   flex: 1;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
-.plan-note {
-  font-size: 10px;
-  color: #c0a882;
+.hist-item-title {
+  font-size: 12.5px;
+  color: #4a3f35;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.hist-time {
+  font-size: 10.5px;
+  color: #b3a695;
+}
+
+.hist-del {
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: #b3a695;
+  font-size: 13px;
+  cursor: pointer;
+  opacity: 0;
+  transition: all 0.15s;
+}
+
+.history-item:hover .hist-del {
+  opacity: 1;
+}
+
+.hist-del:hover {
+  background: #f7ecec;
+  color: #b05555;
+}
+
+.history-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 14px;
+  font-size: 11.5px;
+  color: #8d6a3f;
+  background: #f6e7d2;
+  border-bottom: 1px solid #eed9bb;
+  flex-shrink: 0;
+}
+
+.hb-text {
+  font-weight: 600;
+}
+
+.hb-back {
+  border: 1px solid #d8b98c;
+  background: #fff;
+  color: #b5793c;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 999px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s;
+}
+
+.hb-back:hover {
+  background: #faf3e8;
+  border-color: #c98a4b;
+}
+
+.readonly-hint {
+  font-size: 11.5px;
+  color: #a89a89;
+  text-align: center;
+  line-height: 1.6;
+  padding: 6px 4px;
 }
 
 /* ---- 追问卡片 ---- */

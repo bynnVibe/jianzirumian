@@ -206,6 +206,9 @@ def _compute_retrieval_hit(expected_keywords: List[str], expected_source: str,
     if exp_src:
         for s in sources or []:
             title_fields = [
+                s.get("document_title") or "",
+                *[chunk.get("wiki_title") or "" for chunk in s.get("chunks") or []],
+                *[chunk.get("text") or "" for chunk in s.get("chunks") or []],
                 s.get("wiki_title") or "",
                 s.get("kb_name") or "",
                 str(s.get("source_image") or "").split("/")[-1],
@@ -449,7 +452,11 @@ async def _run_single_case(case: dict, user_id: str, llm_provider: str = None) -
         retrieval_hit = _compute_retrieval_hit(
             expected_keywords, expected_source, context_text, sources
         )
-        contexts = [s.get("text") or "" for s in (sources or [])]
+        contexts = [
+            chunk.get("text") or ""
+            for source in (sources or [])
+            for chunk in (source.get("chunks") or [source])
+        ]
         metric_out = await asyncio.gather(
             _statement_metric(answer, context_text, llm_provider),            # Faithfulness
             _compute_answer_relevance(question, answer, llm_provider),       # Answer Relevance
@@ -487,6 +494,8 @@ async def _run_single_case(case: dict, user_id: str, llm_provider: str = None) -
                 "relevance": s.get("relevance"),
                 "kb_name": s.get("kb_name"),
                 "wiki_title": s.get("wiki_title"),
+                "document_title": s.get("document_title"),
+                "chunk_count": s.get("chunk_count"),
                 "source_image": str(s.get("source_image") or "").split("/")[-1],
             }
             for s in (sources or [])

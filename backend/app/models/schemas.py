@@ -40,6 +40,8 @@ class ChatRequest(BaseModel):
     use_knowledge: bool = True
     use_search: bool = False
     llm_provider: Optional[str] = None
+    # 用户在聊天页选择的路由规则（仅启用网关时生效，为空走默认/角色路由）
+    rule_id: Optional[str] = None
 
 
 class ConfirmChatActionRequest(BaseModel):
@@ -48,9 +50,18 @@ class ConfirmChatActionRequest(BaseModel):
     kb_id: Optional[str] = Field(default=None, max_length=100)
 
 
-class SourceItem(BaseModel):
-    """来源信息"""
-    index: int
+class UrlSourceMetadata(BaseModel):
+    """网页来源附加字段；本地快照路径与原始 URL 分开保存。"""
+    source_url: Optional[str] = None
+    final_url: Optional[str] = None
+    source_site: Optional[str] = None
+    fetched_at: Optional[str] = None
+    extraction_method: Optional[str] = None
+    content_origin: Optional[str] = None
+
+
+class SourceChunk(UrlSourceMetadata):
+    """命中的知识片段，保留完整文本和原文定位信息。"""
     text: str
     source_image: Optional[str] = None
     score: float = 0.0
@@ -64,6 +75,19 @@ class SourceItem(BaseModel):
     # llm-wiki 百科卡片标记（来源为预编译知识时前端可差异化展示）
     is_wiki_page: bool = False
     wiki_title: Optional[str] = None
+    retrieval_mode: Optional[str] = None
+    dense_score: Optional[float] = None
+    sparse_score: Optional[float] = None
+    rrf_score: Optional[float] = None
+
+
+class SourceItem(SourceChunk):
+    """文档级来源，兼容未聚合的历史片段。"""
+    index: int
+    document_id: Optional[str] = None
+    document_title: Optional[str] = None
+    chunk_count: Optional[int] = None
+    chunks: List[SourceChunk] = Field(default_factory=list)
 
 
 class SearchResultItem(BaseModel):
@@ -106,7 +130,7 @@ class ChatHistoryResponse(BaseModel):
 # ============================================
 # 知识上传相关
 # ============================================
-class UploadResponse(BaseModel):
+class UploadResponse(UrlSourceMetadata):
     """上传响应"""
     filename: str
     title: str = ""  # 用户自定义标题
@@ -160,7 +184,7 @@ class SaveDocumentPagesRequest(BaseModel):
     pages: List[SaveDocumentPageItem]
 
 
-class UploadRecord(BaseModel):
+class UploadRecord(UrlSourceMetadata):
     """上传记录"""
     id: str
     filename: str
@@ -196,7 +220,7 @@ class KnowledgeStats(BaseModel):
     total_entries: int
 
 
-class KnowledgeEntryInfo(BaseModel):
+class KnowledgeEntryInfo(UrlSourceMetadata):
     """知识库条目信息（按来源图片分组）"""
     source_image: str
     filename: str

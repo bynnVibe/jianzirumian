@@ -108,6 +108,7 @@ async def send_message(
         async with aclosing(chat_service.chat_stream(
             session_id=session_id, query=body.query, use_knowledge=body.use_knowledge,
             use_search=body.use_search, llm_provider=body.llm_provider, user_id=user_id,
+            rule_id=body.rule_id or "",
         )) as stream:
             async for event in stream:
                 yield f"{event}\n"
@@ -138,6 +139,7 @@ async def send_message_with_files(
     use_search: bool = Form(False),
     llm_provider: str = Form(""),
     kb_id: str = Form(""),
+    rule_id: str = Form(""),
     files: list[UploadFile] = File(default=[]),
     user: dict | None = Depends(get_optional_user),
 ):
@@ -177,7 +179,7 @@ async def send_message_with_files(
         async with aclosing(chat_service.chat_stream(
             session_id=session_id, query=message, use_knowledge=use_knowledge,
             use_search=use_search, llm_provider=llm_provider or None,
-            user_id=user_id, attachments=attachments, kb_id=kb_id,
+            user_id=user_id, attachments=attachments, kb_id=kb_id, rule_id=rule_id,
         )) as stream:
             async for event in stream:
                 yield f"{event}\n"

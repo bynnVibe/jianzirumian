@@ -985,29 +985,32 @@ class KnowledgeService:
             for r in sqlite_db.query("SELECT id, name FROM knowledge_bases")
         }
 
-        context_parts = []
-        sources = []
-        seen_images = set()
-
-        for i, (text, metadata, score) in enumerate(filtered):
-            # 相关性分数归一化为百分比
-            relevance_pct = normalize_score(score)
-
-            # 上下文
-            context_parts.append(f"[来源 {i + 1}]:\n{text}\n")
-
-            # 来源信息
-            source_image = metadata.get("source_image", "")
-            kb_id_val = metadata.get("kb_id", "")
+        # 以原始路径和知识库标识区分文档，不按标题合并；无路径时只信任文档/词条标识。
+        documents = {}
+        for pos, (text, metadata, score) in enumerate(filtered):
+            source_image = metadata.get("source_image") or ""
+            kb_id_val = metadata.get("kb_id") or ""
+            identity = ("path", source_image) if source_image else (
+                ("document", metadata["document_id"]) if metadata.get("document_id") else
+                ("wiki", metadata["wiki_page_id"]) if metadata.get("wiki_page_id") else
+                ("unknown", pos)
+            )
+            key = (kb_id_val, *identity)
             source_info = {
-                "index": i + 1,
-                "text": text[:200] + "..." if len(text) > 200 else text,
+                "text": text,
                 "source_image": source_image,
                 "score": round(score, 4),
-                "relevance": relevance_pct,
+                "relevance": normalize_score(score),
                 "page_number": metadata.get("page_number"),
                 "pdf_preview_path": metadata.get("pdf_preview_path"),
-                "source_type": metadata.get("source_type", "image"),
+                "source_type": metadata.get("source_type"),
+                # 网页来源溯源字段（source_type=url 时由向量元数据透传，供前端显示原文跳转）
+                "source_url": metadata.get("source_url"),
+                "final_url": metadata.get("final_url"),
+                "source_site": metadata.get("source_site"),
+                "fetched_at": metadata.get("fetched_at"),
+                "extraction_method": metadata.get("extraction_method"),
+                "content_origin": metadata.get("content_origin"),
                 "kb_id": kb_id_val,
                 "kb_name": kb_names.get(kb_id_val, ""),
                 "retrieval_mode": metadata.get("retrieval_mode"),
@@ -1017,13 +1020,49 @@ class KnowledgeService:
                 "sparse_score": metadata.get("sparse_score"),
                 "rrf_score": metadata.get("rrf_score"),
             }
-            sources.append(source_info)
+            if key not in documents:
+                documents[key] = {
+                    "document_id": f"{identity[0]}:{identity[1]}",
+                    "document_title": metadata.get("document_title") or "",
+                    "chunks": [],
+                }
+            documents[key]["chunks"].append(source_info)
 
-            if source_image:
-                seen_images.add(source_image)
+        paths = list({key[2] for key in documents if key[1] == "path"})
+        titles = {}
+        if paths:
+            placeholders = ",".join("?" for _ in paths)
+            titles = {
+                row["image_path"]: row["title"] or row["filename"]
+                for row in sqlite_db.query(
+                    f"SELECT image_path, title, filename FROM upload_records WHERE image_path IN ({placeholders})",
+                    tuple(paths),
+                )
+            }
 
-        context_text = "\n---\n".join(context_parts)
-        return context_text, sources
+        # 百科优先仅影响同一文档内部的片段顺序；文档始终按最高命中相关度排序。
+        sources = []
+        for document in documents.values():
+            best = max(document["chunks"], key=lambda item: (item["relevance"], item["score"]))
+            sources.append({
+                **best,
+                **document,
+                "document_title": titles.get(best["source_image"]) or document["document_title"]
+                    or Path(best["source_image"]).name or best["wiki_title"] or "未知文档",
+                "chunk_count": len(document["chunks"]),
+            })
+        sources.sort(key=lambda item: (item["relevance"], item["score"]), reverse=True)
+
+        context_parts = []
+        for index, source in enumerate(sources, 1):
+            source["index"] = index
+            excerpts = []
+            for number, chunk in enumerate(source["chunks"], 1):
+                page = f"，第 {chunk['page_number']} 页" if chunk.get("page_number") else ""
+                excerpts.append(f"片段 {number}{page}：\n{chunk['text']}")
+            context_parts.append(f"[来源 {index}]（{source['document_title']}）：\n" + "\n\n".join(excerpts))
+        logger.info("知识来源聚合: %d 个片段 → %d 份文档，按最高相关度降序", len(filtered), len(sources))
+        return "\n---\n".join(context_parts), sources
 
     @staticmethod
     def build_knowledge_prompt(query: str, context_text: str, use_knowledge: bool) -> str:
@@ -1057,7 +1096,7 @@ class KnowledgeService:
             f"【用户问题】\n{query}\n\n"
             f"要求：\n"
             f"1. 优先使用知识库内容作答\n"
-            f"2. 回答中必须引用原文，标注来源编号 [来源 X]\n"
+            f"2. 回答中必须引用原文，标注来源编号 [来源 X]；同一文档的多个片段共用一个来源编号\n"
             f"3. 如果知识库内容不足以回答问题，请明确指出知识库中未覆盖的部分\n"
             f"4. 不要编造知识库中没有的内容"
         )

@@ -10,253 +10,40 @@
         <p>加载配置中...</p>
       </div>
       <div v-else class="config-sections">
-        <!-- LLM 配置 -->
-        <section class="config-section">
-          <div class="section-header">
+        <!-- 模型配置已合并至模型网关：此处仅保留迁移指引（LLM/知识助手/OpenRouter 免费模型均在网关配置） -->
+        <div class="config-section gateway-migrate-card">
+          <div class="migrate-head">
             <h2 class="section-title">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="20" height="20">
-                <circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/>
+                <circle cx="12" cy="12" r="10"/><path d="M8 12h8"/><path d="M12 8l4 4-4 4"/>
               </svg>
-              LLM 语言模型
+              模型配置已合并至「模型网关」
             </h2>
-            <span class="section-badge" :class="llmTestStatus">{{ llmTestStatus === 'ok' ? '正常' : llmTestStatus === 'fail' ? '异常' : '' }}</span>
-          </div>
-          <p class="section-desc">选择用于回答用户问题的 AI 模型</p>
-          <div class="provider-options">
-            <label
-              v-for="opt in config.available_llm_providers"
-              :key="opt"
-              class="provider-option"
-              :class="{ selected: activeConfig.llm === opt }"
-            >
-              <input type="radio" name="llm" :value="opt" v-model="activeConfig.llm" @change="handleProviderChange('llm', opt)" />
-              <div class="option-content">
-                <span class="option-name">{{ llmLabels[opt] || opt }}</span>
-                <span class="option-desc">{{ llmDescs[opt] }}</span>
-              </div>
-              <div class="option-config">
-                <template v-if="opt === 'ollama'">
-                  地址: {{ config.llm_config?.ollama?.base_url }}
-                </template>
-                <template v-else>
-                  模型: {{ config.llm_config?.[opt]?.model }}
-                  <span v-if="!config.llm_config?.[opt]?.has_key" class="no-key">未配置 API Key</span>
-                </template>
-              </div>
-            </label>
-          </div>
-          <!-- 参数在线配置 -->
-          <div v-if="currentParamFields('llm').length" class="param-panel">
-            <div class="param-row" v-for="f in currentParamFields('llm')" :key="f.key">
-              <label class="param-label">{{ f.label }}</label>
-              <input
-                class="param-input"
-                :type="f.secret ? 'password' : 'text'"
-                v-model="paramForms.llm[f.key]"
-                :placeholder="paramPlaceholder('llm', f)"
-                autocomplete="off"
-              />
-            </div>
-          </div>
-          <div class="section-actions">
-            <button
-              v-if="currentParamFields('llm').length"
-              class="btn btn-primary"
-              @click="saveParams('llm')"
-              :disabled="savingCategory === 'llm'"
-            >
-              {{ savingCategory === 'llm' ? '保存中...' : '保存配置' }}
-            </button>
-            <button class="btn btn-outline" @click="testConnection('llm', activeConfig.llm)" :disabled="llmTesting">
-              <span v-if="llmTesting" class="spinner-xs"></span>
-              {{ llmTesting ? '测试中...' : '测试连接' }}
-            </button>
-            <span v-if="saveResults.llm" class="test-result" :class="saveResults.llm.success ? 'success' : 'error'">
-              {{ saveResults.llm.message }}
-            </span>
-            <span v-if="llmTestResult" class="test-result" :class="llmTestResult.success ? 'success' : 'error'">
-              {{ llmTestResult.message }}
-              <span v-if="llmTestResult.elapsed" class="test-elapsed">{{ llmTestResult.elapsed }}s</span>
-            </span>
-          </div>
-        </section>
-
-        <!-- 知识助手专用模型（与问答界面模型分离） -->
-        <section class="config-section">
-          <div class="section-header">
-            <h2 class="section-title">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="20" height="20">
-                <path d="M12 2a7 7 0 0 1 7 7c0 2.4-1.2 4.5-3 5.7V17a2 2 0 0 1-2 2h-4a2 2 0 0 1-2-2v-2.3C6.2 13.5 5 11.4 5 9a7 7 0 0 1 7-7z"/><line x1="9" y1="21" x2="15" y2="21"/>
-              </svg>
-              知识助手模型
-            </h2>
-            <span class="section-badge" :class="config.assistant_llm?.effective ? 'ok' : ''">
-              {{ config.assistant_llm?.effective ? '独立模型' : '跟随主模型' }}
-            </span>
+            <button class="btn btn-primary" @click="$router.push('/admin/gateway')">前往模型网关</button>
           </div>
           <p class="section-desc">
-            为右侧「知识助手」单独指定模型，与问答界面（上方 LLM）互不影响。关闭时助手自动使用系统主模型。
-            建议为助手选择推理能力更强的模型以提升分析与工具调用效果。
+            原「LLM 语言模型」「知识助手模型」「OpenRouter 免费模型」三个配置区块已整体合并到模型网关（/admin/gateway），系统各模块的模型调用统一按网关「业务路由」解析：
           </p>
+          <ul class="migrate-list">
+            <li><b>LLM 语言模型</b> → 网关「业务路由」chat_answer 角色 + 「网关默认模型」；上游地址与密钥在「上游管理」配置</li>
+            <li><b>知识助手模型</b> → 网关「业务路由」assistant 角色（可单独绑定规则与模型）</li>
+            <li><b>OpenRouter 免费模型</b> → 网关「上游管理」→「导入免费模型」（勾选后并入免费层级上游）</li>
+          </ul>
+          <p class="section-desc">每次调用的「路由规则 → 模型 → 上游」全链路可在网关「日志·审计」中查看。</p>
+        </div>
 
-          <div class="toggle-row">
-            <div class="toggle-info">
-              <span class="toggle-label">{{ assistantForm.enabled ? '已启用独立模型' : '未启用（使用系统主模型）' }}</span>
-              <span class="toggle-hint">开启后知识助手的思考与回答都将走下方配置的模型</span>
-            </div>
-            <button class="toggle-switch" :class="{ active: assistantForm.enabled }" @click="assistantForm.enabled = !assistantForm.enabled">
-              <span class="toggle-knob"></span>
-            </button>
-          </div>
 
-          <template v-if="assistantForm.enabled">
-            <div class="provider-options">
-              <label
-                v-for="opt in config.available_llm_providers"
-                :key="opt"
-                class="provider-option"
-                :class="{ selected: assistantForm.provider === opt }"
-              >
-                <input type="radio" name="assistant_llm" :value="opt" v-model="assistantForm.provider" />
-                <div class="option-content">
-                  <span class="option-name">{{ llmLabels[opt] || opt }}</span>
-                  <span class="option-desc">{{ llmDescs[opt] }}</span>
-                </div>
-              </label>
-            </div>
-            <div class="param-panel">
-              <div class="param-row" v-if="assistantForm.provider !== 'ollama'">
-                <label class="param-label">API 地址</label>
-                <input class="param-input" type="text" v-model="assistantForm.base_url"
-                       placeholder="留空则复用所选提供商的默认地址" autocomplete="off" />
-              </div>
-              <div class="param-row" v-else>
-                <label class="param-label">Ollama 地址</label>
-                <input class="param-input" type="text" v-model="assistantForm.base_url"
-                       placeholder="留空则复用默认地址" autocomplete="off" />
-              </div>
-              <div class="param-row">
-                <label class="param-label">模型名称</label>
-                <input class="param-input" type="text" v-model="assistantForm.model"
-                       placeholder="如 deepseek-chat / qwen-plus / llama3" autocomplete="off" />
-              </div>
-              <div class="param-row" v-if="assistantForm.provider !== 'ollama'">
-                <label class="param-label">API Key</label>
-                <input class="param-input" type="password" v-model="assistantForm.api_key"
-                       :placeholder="config.assistant_llm?.has_key ? '已配置，留空保持不变' : '未配置，请输入 API Key'"
-                       autocomplete="off" />
-              </div>
-            </div>
-          </template>
-
-          <div class="section-actions">
-            <button class="btn btn-primary" @click="saveAssistant" :disabled="assistantSaving">
-              {{ assistantSaving ? '保存中...' : '保存配置' }}
-            </button>
-            <button
-              class="btn btn-outline"
-              @click="testAssistant"
-              :disabled="assistantTesting || !assistantForm.enabled"
-              :title="assistantForm.enabled ? '' : '请先启用并保存独立模型'"
-            >
-              <span v-if="assistantTesting" class="spinner-xs"></span>
-              {{ assistantTesting ? '测试中...' : '测试连接' }}
-            </button>
-            <span v-if="assistantResult" class="test-result" :class="assistantResult.success ? 'success' : 'error'">
-              {{ assistantResult.message }}
-              <span v-if="assistantResult.elapsed" class="test-elapsed">{{ assistantResult.elapsed }}s</span>
-            </span>
-          </div>
-        </section>
-
-        <!-- OpenRouter 免费模型选择 -->
-        <section class="config-section">
-          <div class="section-header">
-            <h2 class="section-title">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="20" height="20">
-                <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
-              </svg>
-              OpenRouter 免费模型
-            </h2>
-            <span v-if="openrouterModels.length" class="section-badge ok">{{ openrouterTotal }} 个免费模型</span>
-          </div>
-          <p class="section-desc">实时搜索 OpenRouter 平台的免费模型，一键设为系统 LLM（免费模型仍需在 openrouter.ai 注册获取 API Key）</p>
-
-          <div class="openrouter-toolbar">
-            <input
-              class="param-input openrouter-search"
-              type="text"
-              v-model="openrouterSearch"
-              placeholder="输入关键词实时搜索，如 deepseek、qwen、gpt..."
-              autocomplete="off"
-            />
-            <button class="btn btn-outline" @click="loadOpenRouterModels(true)" :disabled="openrouterLoading">
-              <span v-if="openrouterLoading" class="spinner-xs"></span>
-              {{ openrouterLoading ? '搜索中...' : '刷新列表' }}
-            </button>
-          </div>
-
-          <!-- API Key 输入（可选：不填则沿用已保存的 Key） -->
-          <div class="param-row openrouter-key-row">
-            <label class="param-label">OpenRouter API Key</label>
-            <input
-              class="param-input"
-              type="password"
-              v-model="openrouterApiKey"
-              placeholder="留空则沿用当前已配置的 Key"
-              autocomplete="off"
-            />
-          </div>
-
-          <!-- 模型列表 -->
-          <div class="openrouter-list" v-if="openrouterModels.length">
-            <div
-              v-for="m in openrouterModels"
-              :key="m.id"
-              class="openrouter-item"
-              :class="{ active: currentCustomModel === m.id }"
-            >
-              <div class="openrouter-item-main">
-                <div class="openrouter-item-name">
-                  {{ m.name || m.id }}
-                  <span v-if="currentCustomModel === m.id" class="openrouter-current">当前使用中</span>
-                </div>
-                <div class="openrouter-item-id">{{ m.id }}</div>
-                <div v-if="m.description" class="openrouter-item-desc" :title="m.description">{{ m.description }}</div>
-              </div>
-              <div class="openrouter-item-side">
-                <span class="openrouter-ctx">上下文 {{ formatCtx(m.context_length) }}</span>
-                <button
-                  class="btn btn-primary openrouter-apply-btn"
-                  @click="applyOpenRouter(m)"
-                  :disabled="applyingModel === m.id"
-                >
-                  {{ applyingModel === m.id ? '应用中...' : '设为 LLM' }}
-                </button>
-              </div>
-            </div>
-          </div>
-          <div v-else-if="openrouterLoaded && !openrouterLoading" class="openrouter-empty">
-            {{ openrouterError || '未找到匹配的免费模型' }}
-          </div>
-
-          <div v-if="openrouterResult" class="section-actions">
-            <span class="test-result" :class="openrouterResult.success ? 'success' : 'error'">
-              {{ openrouterResult.message }}
-            </span>
-          </div>
-        </section>
 
         <!-- OCR 配置 -->
-        <section class="config-section">
-          <div class="section-header">
+        <details class="config-section">
+          <summary class="section-header">
             <h2 class="section-title">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="20" height="20">
                 <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/>
               </svg>
               OCR 文字识别
             </h2>
-          </div>
+          </summary>
           <p class="section-desc">选择图片文字识别引擎</p>
           <div class="provider-options">
             <label
@@ -310,11 +97,11 @@
               <span v-if="ocrTestResult.elapsed" class="test-elapsed">{{ ocrTestResult.elapsed }}s</span>
             </span>
           </div>
-        </section>
+        </details>
 
         <!-- 搜索配置 -->
-        <section class="config-section">
-          <div class="section-header">
+        <details class="config-section">
+          <summary class="section-header">
             <h2 class="section-title">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="20" height="20">
                 <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
@@ -322,7 +109,7 @@
               联网搜索
             </h2>
             <span class="section-badge" :class="searchTestStatus">{{ searchTestStatus === 'ok' ? '正常' : searchTestStatus === 'fail' ? '异常' : '' }}</span>
-          </div>
+          </summary>
           <p class="section-desc">选择联网搜索引擎。DuckDuckGo 免费但可能不稳定；Bing/SerpAPI 需要 API Key</p>
           <div class="provider-options">
             <label
@@ -377,20 +164,20 @@
               <span v-if="searchTestResult.elapsed" class="test-elapsed">{{ searchTestResult.elapsed }}s</span>
             </span>
           </div>
-        </section>
+        </details>
 
         <!-- Embedding 配置 -->
-        <section class="config-section">
-          <div class="section-header">
+        <details class="config-section">
+          <summary class="section-header">
             <h2 class="section-title">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="20" height="20">
                 <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
               </svg>
               Embedding 向量模型
             </h2>
-            <span class="section-badge" :class="config.embedding?.available ? 'ok' : 'fail'">{{ config.embedding?.available ? '正常' : '异常' }}</span>
-          </div>
-          <p class="section-desc">向量嵌入模型，将文本转换为向量用于知识检索。注意：更换模型后已有知识库需重新上传构建</p>
+            <span class="section-badge" :class="embeddingBadgeClass">{{ embeddingBadgeText }}</span>
+          </summary>
+          <p class="section-desc">检索与入库使用以下已保存的模型。远程 Embedding 与本地 FAISS 索引可同时使用，不会自动切换为本地模型。更换模型可能需要重建索引，维度相同也不代表向量空间相同。</p>
           <div class="provider-options">
             <label
               v-for="opt in config.available_embedding_providers || []"
@@ -398,7 +185,7 @@
               class="provider-option"
               :class="{ selected: activeConfig.embedding === opt }"
             >
-              <input type="radio" name="embedding" :value="opt" v-model="activeConfig.embedding" @change="handleProviderChange('embedding', opt)" />
+              <input type="radio" name="embedding" :value="opt" v-model="activeConfig.embedding" :disabled="embeddingTesting || savingCategory === 'embedding'" @change="handleProviderChange('embedding', opt)" />
               <div class="option-content">
                 <span class="option-name">{{ embeddingLabels[opt] || opt }}</span>
                 <span class="option-desc">{{ embeddingDescs[opt] }}</span>
@@ -424,8 +211,24 @@
           </div>
           <div class="embedding-info">
             <div class="info-row">
-              <span class="info-label">知识库条目</span>
-              <span class="info-value">{{ config.embedding?.knowledge_count }}</span>
+              <span class="info-label">当前生效模型</span>
+              <span class="info-value">{{ config.embedding?.model }} · {{ config.embedding?.mode === 'remote' ? '远程 API' : '本地服务' }}</span>
+            </div>
+            <div class="info-row">
+              <span class="info-label">生效地址</span>
+              <span class="info-value">{{ config.embedding?.base_url }}</span>
+            </div>
+            <div class="info-row">
+              <span class="info-label">最近请求状态</span>
+              <span class="info-value">{{ config.embedding?.message || '待验证' }}</span>
+            </div>
+            <div v-if="config.embedding?.checked_at" class="info-row">
+              <span class="info-label">验证时间</span>
+              <span class="info-value">{{ new Date(config.embedding.checked_at).toLocaleString() }}</span>
+            </div>
+            <div class="info-row">
+              <span class="info-label">本地 FAISS</span>
+              <span class="info-value">{{ config.embedding?.index_loaded ? '已加载' : '尚未创建' }}<template v-if="config.embedding?.index_dimension"> · {{ config.embedding.index_dimension }} 维</template> · {{ config.embedding?.knowledge_count ?? 0 }} 个片段</span>
             </div>
           </div>
           <div class="section-actions">
@@ -433,11 +236,11 @@
               v-if="currentParamFields('embedding').length"
               class="btn btn-primary"
               @click="saveParams('embedding')"
-              :disabled="savingCategory === 'embedding'"
+              :disabled="savingCategory === 'embedding' || embeddingTesting"
             >
               {{ savingCategory === 'embedding' ? '保存中...' : '保存配置' }}
             </button>
-            <button class="btn btn-outline" @click="testEmbedding" :disabled="embeddingTesting">
+            <button class="btn btn-outline" @click="testEmbedding" :disabled="embeddingTesting || savingCategory === 'embedding'">
               <span v-if="embeddingTesting" class="spinner-xs"></span>
               {{ embeddingTesting ? '测试中...' : '测试连接' }}
             </button>
@@ -449,18 +252,18 @@
               <span v-if="embeddingTestResult.elapsed" class="test-elapsed">{{ embeddingTestResult.elapsed }}s</span>
             </span>
           </div>
-        </section>
+        </details>
 
         <!-- Rerank 配置 -->
-        <section class="config-section">
-          <div class="section-header">
+        <details class="config-section">
+          <summary class="section-header">
             <h2 class="section-title">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="20" height="20">
                 <line x1="21" y1="6" x2="3" y2="6"/><line x1="17" y1="12" x2="3" y2="12"/><line x1="13" y1="18" x2="3" y2="18"/>
               </svg>
               Rerank 重排序模型
             </h2>
-          </div>
+          </summary>
           <p class="section-desc">对知识检索结果按相关度重排序，提升引用质量。本地模型离线可用但首次加载较慢；DashScope API 响应快，需要 API Key</p>
           <div class="provider-options">
             <label
@@ -514,11 +317,11 @@
               <span v-if="rerankTestResult.elapsed" class="test-elapsed">{{ rerankTestResult.elapsed }}s</span>
             </span>
           </div>
-        </section>
+        </details>
 
         <!-- Redis 文件缓存 -->
-        <section class="config-section">
-          <div class="section-header">
+        <details class="config-section">
+          <summary class="section-header">
             <h2 class="section-title">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="20" height="20">
                 <ellipse cx="12" cy="5" rx="9" ry="3"/>
@@ -528,7 +331,7 @@
               Redis 文件缓存
             </h2>
             <span class="section-badge" :class="redisBadgeClass">{{ redisBadgeText }}</span>
-          </div>
+          </summary>
           <p class="section-desc">
             缓存知识库原始文件（图片 / Word / PDF），加快检索来源跳转与原文预览。公共知识库文件所有用户共享缓存，个人知识库文件按属主隔离。本页保存立即生效；修改 .env 需重启后端。
           </p>
@@ -573,11 +376,11 @@
               <span v-if="redisTestResult.elapsed" class="test-elapsed">{{ redisTestResult.elapsed }}s</span>
             </span>
           </div>
-        </section>
+        </details>
 
         <!-- llm-wiki 知识编译 -->
-        <section class="config-section">
-          <div class="section-header">
+        <details class="config-section">
+          <summary class="section-header">
             <h2 class="section-title">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="20" height="20">
                 <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/>
@@ -586,7 +389,7 @@
             </h2>
             <span class="section-badge" :class="wikiEnabled ? 'ok' : ''">{{ wikiEnabled ? '编译已开启' : '编译已关闭' }}</span>
             <span class="section-badge" :class="wikiPages.length ? 'ok' : ''">{{ wikiPages.length }} 则百科</span>
-          </div>
+          </summary>
           <p class="section-desc">
             借鉴 llm-wiki 思想：LLM 作为「知识编译器」，资料入库后先被编译成结构化百科卡片并回写向量库，检索时优先命中高质量卡片，原始碎片兜底；还可对主题跨素材生成持久化 digest 综合词条。编译完全异步、失败静默降级，不影响现有问答链路。
           </p>
@@ -665,18 +468,18 @@
               <button v-if="canDeleteWikiPage(p)" class="btn btn-danger btn-sm" @click="wikiPageDeleteTarget = p">删除</button>
             </li>
           </ul>
-        </section>
+        </details>
 
         <!-- 用户注册开关（自原「用户管理」标签页迁入：属系统级配置，随系统设置统一管理） -->
-        <section class="config-section registration-section">
-          <div class="section-header">
+        <details class="config-section registration-section">
+          <summary class="section-header">
             <h2 class="section-title">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="20" height="20">
                 <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
               </svg>
               用户注册
             </h2>
-          </div>
+          </summary>
           <p class="section-desc">控制是否允许新用户自行注册账号。关闭后注册页面不可用，已有用户不受影响。</p>
           <div class="toggle-row">
             <div class="toggle-info">
@@ -692,18 +495,18 @@
               <span class="toggle-knob"></span>
             </button>
           </div>
-        </section>
+        </details>
 
         <!-- 游客免费访问次数（自原「用户管理」标签页迁入系统设置） -->
-        <section class="config-section registration-section">
-          <div class="section-header">
+        <details class="config-section registration-section">
+          <summary class="section-header">
             <h2 class="section-title">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="20" height="20">
                 <path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><line x1="20" y1="8" x2="20" y2="14"/><line x1="23" y1="11" x2="17" y2="11"/>
               </svg>
               游客访问
             </h2>
-          </div>
+          </summary>
           <p class="section-desc">设定未登录用户（游客）可免费提问的次数，按 IP 计数；用完后需登录才能继续使用。设为 0 表示禁止游客提问。</p>
           <div class="toggle-row">
             <div class="guest-limit-input-wrap">
@@ -724,7 +527,7 @@
               {{ savingGuestLimit ? '保存中...' : '保存' }}
             </button>
           </div>
-        </section>
+        </details>
 
       </div>
     </div>
@@ -897,6 +700,10 @@
                     <img :src="getImageUrl(chunk.source_image)" class="chunk-image" alt="原始图片" @click="openImageFromChunk(chunk)" />
                     <a :href="getImageUrl(chunk.source_image)" target="_blank" class="chunk-link">查看原图</a>
                   </div>
+                  <!-- URL 网页来源：原文链接 + 入库正文快照 -->
+                  <div v-else-if="chunk.source_type === 'url'" class="chunk-image-box">
+                    <UrlSource :source="chunk" />
+                  </div>
                   <!-- 文档类来源：跳转预览 -->
                   <template v-else-if="chunk.source_type === 'pdf' || chunk.source_type === 'word'">
                     <a :href="getChunkSourceUrl(chunk)" target="_blank" class="chunk-link">
@@ -947,6 +754,13 @@
                 </svg>
                 <span class="doc-type-label">{{ entry.source_type === 'word' ? 'Word' : 'PDF' }}</span>
               </div>
+              <div v-else-if="entry.source_type === 'url'" class="entry-thumb entry-thumb-doc">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="32" height="32">
+                  <circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/>
+                  <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+                </svg>
+                <span class="doc-type-label">网页</span>
+              </div>
               <div v-else-if="entry.source_image" class="entry-thumb">
                 <img :src="getImageUrl(entry.source_image)" alt="" @error="onThumbError" />
               </div>
@@ -978,7 +792,7 @@
         </svg>
         <p class="empty-title">知识库为空</p>
         <p class="empty-desc">尚未上传任何内容，请先到「知识库上传」页面上传图片 / Word / PDF</p>
-        <router-link to="/upload" class="btn btn-primary">前往上传</router-link>
+        <router-link to="/kb/upload" class="btn btn-primary">前往上传</router-link>
       </div>
 
       <!-- 条目列表 -->
@@ -1034,6 +848,13 @@
               <polyline points="10 9 9 9 8 9"/>
             </svg>
             <span class="doc-type-label">{{ entry.source_type === 'word' ? 'Word' : 'PDF' }}</span>
+          </div>
+          <div v-else-if="entry.source_type === 'url'" class="entry-thumb entry-thumb-doc" @click.stop="openPreview(entry)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="32" height="32">
+              <circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/>
+              <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+            </svg>
+            <span class="doc-type-label">网页</span>
           </div>
           <div v-else-if="entry.source_image" class="entry-thumb" @click.stop="openPreview(entry)">
             <img :src="getImageUrl(entry.source_image)" alt="" @error="onThumbError" />
@@ -1243,6 +1064,13 @@
             <h4 class="preview-text-title">OCR 识别文本</h4>
             <div class="preview-text-content">{{ previewFullText }}</div>
           </div>
+          <!-- URL 网页类型：原文链接 + 已确认入库正文 -->
+          <div class="preview-text-section" v-if="previewSourceType === 'url'">
+            <h4 class="preview-text-title">网页入库正文
+              <a v-if="previewSourceUrl" :href="previewSourceUrl" target="_blank" rel="noopener noreferrer" class="chunk-link">打开原网页 ↗</a>
+            </h4>
+            <div class="preview-text-content">{{ previewFullText }}</div>
+          </div>
         </div>
       </div>
     </div>
@@ -1289,9 +1117,11 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, nextTick, watch } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import MarkdownIt from 'markdown-it'
+import UrlSource from '@/components/UrlSource.vue'
+import { safeArticleUrl } from '@/utils/urlArticles'
 import { useAuthStore } from '@/stores/auth'
 import { useAssistantStore } from '@/stores/assistant'
 import {
@@ -1300,7 +1130,6 @@ import {
   saveProviderSettings,
   toggleRegistration,
   setGuestLimit,
-  testLLMConnection,
   testSearchConnection,
   testOCRConnection,
   testEmbeddingConnection,
@@ -1314,10 +1143,6 @@ import {
   deleteWikiPage,
   generateWikiDigest,
   recompileWikiAll,
-  getOpenRouterModels,
-  applyOpenRouterModel,
-  saveAssistantLLM,
-  testAssistantLLMConnection,
   getKnowledgeEntries,
   deleteKnowledgeEntriesBySource,
   moveSourceToKb,
@@ -1362,6 +1187,11 @@ onMounted(() => {
   loadFullTexts()
 })
 
+// 离开管理/知识库页时清除注入助手的界面实时快照，避免陈旧上下文泄露到其他页面
+onUnmounted(() => {
+  assistant.clearPageState()
+})
+
 // ---- 路由切换同步 ----
 // /admin/settings（AdminSettings）与 /knowledge（KnowledgeBase）复用同一组件实例，切换路由时 onMounted 不会重新执行，
 // 需在此按目标路由重置标签页并实时刷新对应数据，避免页面内容停留在上一个路由
@@ -1402,11 +1232,6 @@ const activeConfig = reactive({
   rerank: '',
 })
 
-// LLM test state
-const llmTesting = ref(false)
-const llmTestResult = ref(null)
-const llmTestStatus = ref('')
-
 // Search test state
 const searchTesting = ref(false)
 const searchTestResult = ref(null)
@@ -1425,20 +1250,6 @@ const rerankTesting = ref(false)
 const rerankTestResult = ref(null)
 
 // Labels and descriptions
-const llmLabels = {
-  ollama: 'Ollama 本地',
-  openai: 'OpenAI 兼容 API',
-  custom: '自定义 API',
-  gateway: 'LLM Proxy 网关',
-}
-
-const llmDescs = {
-  ollama: '本地运行，无需网络',
-  openai: '通义千问 / DeepSeek / OpenAI',
-  custom: '兼容 OpenAI 接口的任意服务',
-  gateway: '经层3自建网关出网（多模型路由/Key轮换/降级/成本统计）',
-}
-
 const ocrLabels = {
   local: '本地 OCR (EasyOCR)',
   aliyun: '阿里云百炼 OCR',
@@ -1464,6 +1275,15 @@ const searchDescs = {
   serpapi: '需要 SerpAPI Key',
   anysearch: '统一实时搜索，Key 可选（匿名可用，限额较低）',
 }
+
+const embeddingBadgeClass = computed(() => {
+  if (embeddingTesting.value) return ''
+  return { ok: 'ok', error: 'fail' }[config.value.embedding?.status] || ''
+})
+const embeddingBadgeText = computed(() => {
+  if (embeddingTesting.value) return '验证中'
+  return { ok: '已验证', error: '异常' }[config.value.embedding?.status] || '待验证'
+})
 
 const embeddingLabels = {
   ollama: 'Ollama 本地',
@@ -1566,12 +1386,6 @@ const redisSaving = ref(false)
 const redisTesting = ref(false)
 const redisTestResult = ref(null)
 
-// ---- 知识助手专用模型（与问答界面模型分离） ----
-const assistantForm = reactive({ enabled: false, provider: 'custom', base_url: '', model: '', api_key: '' })
-const assistantSaving = ref(false)
-const assistantTesting = ref(false)
-const assistantResult = ref(null)
-
 const redisBadgeClass = computed(() => {
   if (!redisForm.enabled) return ''
   return config.value.redis_config?.connected ? 'ok' : 'fail'
@@ -1666,6 +1480,7 @@ async function saveParams(category) {
   if (!provider) return
   savingCategory.value = category
   saveResults[category] = null
+  if (category === 'embedding') embeddingTestResult.value = null
   try {
     const values = {}
     for (const f of currentParamFields(category)) {
@@ -1706,7 +1521,6 @@ async function loadConfig() {
     const res = await getSystemConfig()
     config.value = res.data
     guestLimitInput.value = res.data.guest_query_limit ?? 3
-    activeConfig.llm = res.data.llm_provider
     activeConfig.ocr = res.data.ocr_provider
     activeConfig.search = res.data.search_provider
     activeConfig.embedding = res.data.embedding_provider
@@ -1714,68 +1528,11 @@ async function loadConfig() {
     // 回填 Redis 配置（页面保存过的覆盖值优先，否则显示 .env 默认）
     redisForm.url = res.data.redis_config?.url || ''
     redisForm.enabled = res.data.redis_config?.enabled !== false
-    // 回填知识助手专用模型（api_key 不回显明文，仅用 has_key 提示）
-    const a = res.data.assistant_llm || {}
-    assistantForm.enabled = !!a.enabled
-    assistantForm.provider = a.provider || 'custom'
-    assistantForm.base_url = a.base_url || ''
-    assistantForm.model = a.model || ''
-    assistantForm.api_key = ''
     fillAllParamForms()
-    loadOpenRouterModels()
   } catch (err) {
     console.error('加载配置失败:', err)
   } finally {
     loading.value = false
-  }
-}
-
-async function saveAssistant() {
-  assistantSaving.value = true
-  assistantResult.value = null
-  try {
-    const res = await saveAssistantLLM({
-      enabled: assistantForm.enabled,
-      provider: assistantForm.enabled ? assistantForm.provider : '',
-      base_url: assistantForm.base_url.trim(),
-      model: assistantForm.model.trim(),
-      api_key: assistantForm.api_key.trim(),
-    })
-    assistantResult.value = res.data
-    if (res.data.success) {
-      // 静默刷新配置，同步 effective/has_key 状态；api_key 输入框清空
-      const cfgRes = await getSystemConfig()
-      config.value = cfgRes.data
-      const a = cfgRes.data.assistant_llm || {}
-      assistantForm.enabled = !!a.enabled
-      assistantForm.provider = a.provider || assistantForm.provider
-      assistantForm.base_url = a.base_url || ''
-      assistantForm.model = a.model || ''
-      assistantForm.api_key = ''
-    }
-  } catch (err) {
-    assistantResult.value = {
-      success: false,
-      message: '保存失败: ' + (err.response?.data?.detail || err.message),
-    }
-  } finally {
-    assistantSaving.value = false
-  }
-}
-
-async function testAssistant() {
-  assistantTesting.value = true
-  assistantResult.value = null
-  try {
-    const res = await testAssistantLLMConnection()
-    assistantResult.value = res.data
-  } catch (err) {
-    assistantResult.value = {
-      success: false,
-      message: '请求失败: ' + (err.response?.data?.detail || err.message),
-    }
-  } finally {
-    assistantTesting.value = false
   }
 }
 
@@ -1933,77 +1690,16 @@ async function doDeleteWikiPage() {
   }
 }
 
-// ============================================
-// OpenRouter 免费模型
-// ============================================
-const openrouterSearch = ref('')
-const openrouterModels = ref([])
-const openrouterTotal = ref(0)
-const openrouterLoading = ref(false)
-const openrouterLoaded = ref(false)
-const openrouterError = ref('')
-const openrouterApiKey = ref('')
-const openrouterResult = ref(null)
-const applyingModel = ref('')
-let openrouterDebounce = null
-
-// 当前 custom 提供商已配置的模型（用于高亮“当前使用中”）
-const currentCustomModel = computed(() => config.value?.llm_config?.custom?.model || '')
-
-function formatCtx(len) {
-  if (!len) return '-'
-  if (len >= 1000) return `${(len / 1000).toFixed(len % 1000 === 0 ? 0 : 1)}K`
-  return String(len)
-}
-
-async function loadOpenRouterModels(refresh = false) {
-  openrouterLoading.value = true
-  openrouterError.value = ''
-  try {
-    const res = await getOpenRouterModels(openrouterSearch.value.trim(), refresh)
-    openrouterModels.value = res.data.models || []
-    openrouterTotal.value = res.data.total || 0
-    openrouterLoaded.value = true
-    if (!res.data.success && res.data.message) {
-      openrouterError.value = res.data.message
-    }
-  } catch (err) {
-    openrouterError.value = err.response?.data?.message || '加载模型列表失败'
-    openrouterModels.value = []
-    openrouterLoaded.value = true
-  } finally {
-    openrouterLoading.value = false
-  }
-}
-
-// 实时搜索：输入防抖 400ms 后自动拉取
-watch(openrouterSearch, () => {
-  if (openrouterDebounce) clearTimeout(openrouterDebounce)
-  openrouterDebounce = setTimeout(() => loadOpenRouterModels(), 400)
-})
-
-async function applyOpenRouter(model) {
-  applyingModel.value = model.id
-  openrouterResult.value = null
-  try {
-    const res = await applyOpenRouterModel(model.id, openrouterApiKey.value)
-    openrouterResult.value = res.data
-    if (res.data.success) {
-      // 同步刷新当前配置展示
-      activeConfig.llm = 'custom'
-      await loadConfig()
-    }
-  } catch (err) {
-    openrouterResult.value = { success: false, message: err.response?.data?.message || '应用模型失败' }
-  } finally {
-    applyingModel.value = ''
-  }
-}
-
 async function handleProviderChange(type, value) {
   try {
-    await switchProvider(type, value)
+    const switched = await switchProvider(type, value)
+    if (!switched.data.success) throw new Error(switched.data.message)
     activeConfig[type] = value
+    if (type === 'embedding') {
+      embeddingTestResult.value = null
+      const res = await getSystemConfig()
+      config.value = res.data
+    }
     // 切换提供商后重填对应参数表单，并清空上次保存/测试提示
     fillParamForm(type)
     saveResults[type] = null
@@ -2016,20 +1712,7 @@ async function handleProviderChange(type, value) {
 }
 
 async function testConnection(type, provider) {
-  if (type === 'llm') {
-    llmTesting.value = true
-    llmTestResult.value = null
-    try {
-      const res = await testLLMConnection(provider)
-      llmTestResult.value = res.data
-      llmTestStatus.value = res.data.success ? 'ok' : 'fail'
-    } catch (err) {
-      llmTestResult.value = { success: false, message: '请求失败: ' + err.message }
-      llmTestStatus.value = 'fail'
-    } finally {
-      llmTesting.value = false
-    }
-  } else if (type === 'search') {
+  if (type === 'search') {
     searchTesting.value = true
     searchTestResult.value = null
     try {
@@ -2046,11 +1729,21 @@ async function testConnection(type, provider) {
 }
 
 async function testEmbedding() {
+  const saved = currentProviderConfig('embedding')
+  const dirty = currentParamFields('embedding').some(f => {
+    const value = (paramForms.embedding[f.key] || '').trim()
+    return f.secret ? !!value : value !== (saved[f.key] || '')
+  })
+  if (dirty) {
+    embeddingTestResult.value = { success: false, message: '请先保存修改，再测试当前生效的模型配置' }
+    return
+  }
   embeddingTesting.value = true
   embeddingTestResult.value = null
   try {
     const res = await testEmbeddingConnection()
     embeddingTestResult.value = res.data
+    if (res.data.embedding) config.value.embedding = res.data.embedding
   } catch (err) {
     embeddingTestResult.value = { success: false, message: '请求失败: ' + err.message }
   } finally {
@@ -2197,6 +1890,7 @@ async function doSearch() {
   if (!q) return
   isSearchMode.value = true
   isSearching.value = true
+  assistant.pushAction(`在知识库检索：${q.slice(0, 40)}`)
   searchResults.value = []
   chunkResults.value = []
   titleSearchResults.value = []
@@ -2285,10 +1979,58 @@ const filteredFilterKbList = computed(() =>
 )
 
 // 切换来源筛选：当前选中知识库不在结果中时重置为全部
-watch(kbFilterVisibility, () => {
+watch(kbFilterVisibility, (val) => {
   if (filterKbId.value && !filteredFilterKbList.value.some((kb) => kb.id === filterKbId.value)) {
     filterKbId.value = ''
   }
+  assistant.pushAction(`筛选知识库来源：${VISIBILITY_LABELS[val] || '全部来源'}`)
+})
+
+// ---- 知识助手：同步"当前界面实时快照"（page_state）----
+// 用户在知识库管理页看到的文档清单/筛选/搜索/统计随请求注入助手上下文，
+// 使助手回答"当前界面展示的文档"这类问题时无需重新全量检索百科目录。
+const VISIBILITY_LABELS = { '': '全部来源', public: '公共知识库', private: '个人知识库' }
+
+const knowledgePageState = computed(() => {
+  if (activeTab.value !== 'knowledge') return null
+  const kbName = filterKbId.value
+    ? (kbList.value.find((kb) => kb.id === filterKbId.value)?.name || '指定知识库')
+    : '全部知识库'
+  const docs = displayEntries.value.slice(0, 30).map((e) => {
+    const d = {
+      title: e.title || e.filename || '未命名',
+      kb_name: e.kb_name || '',
+      chunk_count: e.chunk_count || 0,
+      created_at: e.created_at || '',
+    }
+    if (e.relevance) d.relevance = e.relevance
+    return d
+  })
+  let searchMode = 'none'
+  if (isSearchMode.value) searchMode = 'semantic'
+  else if (searchQuery.value.trim()) searchMode = 'title_filter'
+  return {
+    view: '知识库管理',
+    visibility_filter: VISIBILITY_LABELS[kbFilterVisibility.value] || '全部来源',
+    kb_filter: kbName,
+    sort: sortOrder.value === 'asc' ? '最旧在前' : '最新在前',
+    search: { mode: searchMode, query: searchQuery.value.trim() },
+    stats: {
+      source_count: entries.value.length,
+      shown_count: displayEntries.value.length,
+      total_chunks: totalChunks.value,
+      chunk_results: chunkResults.value.length,
+      title_results: titleSearchResults.value.length,
+    },
+    documents: docs,
+    documents_truncated: displayEntries.value.length > docs.length,
+  }
+})
+
+// 展示内容/筛选/搜索变化时同步快照；离开知识库标签（computed 返回 null）时清除
+watch(knowledgePageState, (state) => {
+  if (state) assistant.setPageState(state)
+  else assistant.clearPageState()
 })
 const showKbPanel = ref(false)
 const kbDeleteTarget = ref(null)
@@ -2472,6 +2214,7 @@ const previewDate = ref('')
 const previewRelevance = ref(null)
 const previewPdfUrl = ref('')
 const previewSourceType = ref('image')
+const previewSourceUrl = ref('')
 const previewDocPages = ref([])  // Word/PDF 分页内容
 const wordHtmlLoading = ref(false)
 const wordHtmlError = ref('')
@@ -2541,6 +2284,7 @@ function openPreview(entry) {
   previewChunkCount.value = entry.chunk_count || ''
   previewRelevance.value = entry.relevance !== undefined ? entry.relevance : null
   previewSourceType.value = entry.source_type || 'image'
+  previewSourceUrl.value = entry.source_type === 'url' ? safeArticleUrl(entry.source_url || entry.final_url) : ''
 
   const dateStr = entry.created_at || ''
   previewDate.value = dateStr ? formatDate(dateStr) : ''
@@ -2581,7 +2325,7 @@ function openPreview(entry) {
     previewImageUrl.value = ''
   } else {
     previewPdfUrl.value = ''
-    previewImageUrl.value = isDocument ? '' : getImageUrl(entry.source_image)
+    previewImageUrl.value = (isDocument || entry.source_type === 'url') ? '' : getImageUrl(entry.source_image)
   }
   showPreview.value = true
   // 同步到知识助手：注入用户正在阅读的文档标题与正文，供其结合上下文分析
@@ -2806,8 +2550,11 @@ function formatUserDate(ts) {
 
 /* Settings tab */
 .tab-settings {
-  padding: 32px 40px;
-  max-width: 900px;
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  padding: 28px 40px;
+  max-width: 1180px;
   margin: 0 auto;
 }
 
@@ -3298,17 +3045,85 @@ function formatUserDate(ts) {
 }
 
 .config-section {
+  min-width: 0;
   background: white;
   border: 1px solid var(--color-border);
   border-radius: 16px;
-  padding: 24px;
+  padding: 0 24px;
+}
+
+.config-section[open] {
+  padding-bottom: 24px;
+}
+
+.config-sections > .registration-section {
+  margin-bottom: 0;
 }
 
 .section-header {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto 24px;
   align-items: center;
-  gap: 10px;
-  margin-bottom: 6px;
+  gap: 16px;
+  min-height: 76px;
+  padding: 18px 24px;
+  margin: 0 -24px;
+  box-sizing: border-box;
+  cursor: pointer;
+  list-style: none;
+  border-radius: 16px;
+}
+
+.section-header > .section-title {
+  min-width: 0;
+  margin: 0;
+}
+
+.section-header .section-title svg {
+  flex-shrink: 0;
+}
+
+.section-header > .section-badge {
+  grid-column: 2;
+  white-space: nowrap;
+}
+
+.section-header > .section-badge:empty {
+  display: none;
+}
+
+.section-header::-webkit-details-marker {
+  display: none;
+}
+
+.section-header::after {
+  content: '›';
+  grid-column: 3;
+  grid-row: 1;
+  text-align: center;
+  font-size: 24px;
+  line-height: 1;
+  color: var(--color-text-secondary);
+  transition: transform 0.2s;
+}
+
+.config-section[open] > .section-header {
+  margin-bottom: 20px;
+  border-bottom: 1px solid var(--color-border);
+  border-radius: 16px 16px 0 0;
+}
+
+.config-section[open] > .section-header::after {
+  transform: rotate(90deg);
+}
+
+.section-header:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 6px;
+}
+
+.section-header:hover .section-title {
+  color: var(--color-primary);
 }
 
 .section-title {
@@ -3504,121 +3319,27 @@ function formatUserDate(ts) {
   align-items: center;
   gap: 12px;
   flex-wrap: wrap;
+  padding-top: 16px;
+  margin-top: 8px;
+  border-top: 1px solid var(--color-border);
 }
 
-/* ============================================
-   OpenRouter 免费模型模块
-   ============================================ */
-.openrouter-toolbar {
-  display: flex;
-  gap: 10px;
-  align-items: center;
-  margin-bottom: 12px;
+.section-actions > .btn {
+  min-height: 40px;
+  min-width: 112px;
+  justify-content: center;
 }
 
-.openrouter-search {
-  flex: 1;
+.section-actions > .test-result {
+  flex-basis: 100%;
+  overflow-wrap: anywhere;
 }
 
-.openrouter-key-row {
-  margin-bottom: 14px;
-}
-
-.openrouter-list {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  max-height: 420px;
-  overflow-y: auto;
-  padding-right: 4px;
-}
-
-.openrouter-item {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 12px 14px;
-  background: #faf8f5;
-  border: 1px solid var(--color-border);
-  border-radius: 10px;
-  transition: border-color 0.2s, background 0.2s;
-}
-
-.openrouter-item.active {
-  border-color: var(--color-primary);
-  background: #fdf6ee;
-}
-
-.openrouter-item-main {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-}
-
-.openrouter-item-name {
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--color-text);
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.openrouter-current {
-  font-size: 11px;
-  font-weight: 500;
-  color: var(--color-primary);
-  background: rgba(193, 139, 78, 0.12);
-  padding: 1px 8px;
-  border-radius: 10px;
-}
-
-.openrouter-item-id {
-  font-size: 12px;
-  color: var(--color-text-secondary);
-  font-family: 'SF Mono', Menlo, monospace;
-}
-
-.openrouter-item-desc {
-  font-size: 12px;
-  color: var(--color-text-secondary);
-  line-height: 1.5;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-
-.openrouter-item-side {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 8px;
-  flex-shrink: 0;
-}
-
-.openrouter-ctx {
-  font-size: 11px;
-  color: var(--color-text-secondary);
-  white-space: nowrap;
-}
-
-.openrouter-apply-btn {
-  white-space: nowrap;
-}
-
-.openrouter-empty {
-  padding: 24px;
-  text-align: center;
-  font-size: 13px;
-  color: var(--color-text-secondary);
-  background: #faf8f5;
-  border-radius: 10px;
-  border: 1px dashed var(--color-border);
-}
+/* 模型配置迁移指引卡（已合并至模型网关） */
+.gateway-migrate-card { padding: 18px 20px; }
+.migrate-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 8px; }
+.migrate-list { margin: 8px 0 10px; padding-left: 20px; display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--color-text-secondary); line-height: 1.6; }
+.migrate-list b { color: var(--color-text); }
 
 /* 参数在线配置面板 */
 .param-panel {
@@ -3779,6 +3500,8 @@ function formatUserDate(ts) {
 }
 
 .info-value {
+  min-width: 0;
+  overflow-wrap: anywhere;
   font-size: 13px;
   color: var(--color-text);
   font-weight: 500;
@@ -4573,7 +4296,22 @@ function formatUserDate(ts) {
   }
 
   .config-section {
+    padding: 0 16px;
+  }
+
+  .config-section[open] {
+    padding-bottom: 16px;
+  }
+
+  .section-header {
+    margin: 0 -16px;
     padding: 16px;
+    gap: 10px;
+    min-height: 68px;
+  }
+
+  .section-actions > .btn {
+    flex: 1 1 120px;
   }
 
   .section-title {

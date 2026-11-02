@@ -40,6 +40,8 @@ class AgentRuntime:
         with db.transaction() as conn:
             conn.execute("UPDATE wiki_compile_queue SET status='pending',updated_at=? WHERE status='processing'", (now,))
             conn.execute("UPDATE pending_uploads SET status='pending',updated_at=? WHERE status='parsing'", (now,))
+            conn.execute("UPDATE url_imports SET status='pending',revision=revision+1,updated_at=? WHERE status='parsing'", (now,))
+            conn.execute("UPDATE url_imports SET status='interrupted',error='服务重启，可能部分入库，请核对；不会自动重试',error_code='interrupted',updated_at=? WHERE status='ingesting'", (now,))
             conn.execute("UPDATE eval_runs SET status='interrupted',finished_at=COALESCE(finished_at,?) WHERE status='running'", (now,))
             conn.execute("""UPDATE pipeline_stages SET status='aborted',finished_at=COALESCE(finished_at,?)
                 WHERE status IN ('pending','running') AND run_id IN

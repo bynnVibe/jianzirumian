@@ -70,7 +70,8 @@ async def check_evidence_sufficiency(
     ]
 
     try:
-        llm = LLMFactory.create(llm_provider)
+        # 证据校验走网关 evidence_check 业务路由（规则+模型由网关解析）
+        llm = LLMFactory.create_for_role("evidence_check")
 
         async def _collect() -> str:
             collected = ""

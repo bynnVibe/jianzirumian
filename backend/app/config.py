@@ -5,7 +5,8 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv()
+# 固定配置位置，避免调试或从项目根目录启动时误读上级目录的 .env。
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 # 项目根目录
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
@@ -34,13 +35,17 @@ class Settings:
     API_MODEL: str = os.getenv("API_MODEL", "deepseek-chat")
 
     # ---- LLM Proxy（层3 自建网关）----
-    # LLM_PROVIDER=gateway 时，Agent 的 LLM 调用经 LLM Proxy 的 /v1 出网，
-    # 获得多模型路由 / Key 轮换 / 缓存 / 降级 / 成本统计；默认不启用（直连提供商）
-    # 本地开发默认 localhost:8001；compose 部署时由环境变量覆盖为 http://llm-proxy:8001
+    # 业务出网默认统一走网关：各模块经 create_for_role 按「业务路由」解析后，
+    # 请求 GATEWAY_INTERNAL_URL 指向的同进程 /v1（见下方），无需设 LLM_PROVIDER。
+    # 下面 LLM_PROXY_URL/KEY 仅用于「显式 LLM_PROVIDER=gateway 直连外部独立 Proxy」
+    # 或网关未初始化时的降级直连；本地开发默认 localhost:8001，compose 部署由环境变量覆盖为 http://llm-proxy:8001
     LLM_PROXY_URL: str = os.getenv("LLM_PROXY_URL", "http://localhost:8001")
     # 调用网关所用的本地服务密钥（sk-jzrm-...），在网关「密钥」页签生成
     LLM_PROXY_KEY: str = os.getenv("LLM_PROXY_KEY", "")
     LLM_PROXY_PORT: int = int(os.getenv("LLM_PROXY_PORT", "8001"))
+    # 系统内部出网地址：各业务模块经本网 /v1 代理出网（同进程回环，默认后端 8000 端口）；
+    # 独立部署 LLM Proxy 时可用环境变量指向其 /v1
+    GATEWAY_INTERNAL_URL: str = os.getenv("GATEWAY_INTERNAL_URL", "http://127.0.0.1:8000/v1")
 
     # ---- Embedding 配置 ----
     EMBEDDING_PROVIDER: str = os.getenv("EMBEDDING_PROVIDER", "ollama")
@@ -48,6 +53,9 @@ class Settings:
     EMBEDDING_API_BASE: str = os.getenv("EMBEDDING_API_BASE", "http://localhost:11434")
     EMBEDDING_API_KEY: str = os.getenv("EMBEDDING_API_KEY", "")
     EMBEDDING_API_MODEL: str = os.getenv("EMBEDDING_API_MODEL", "text-embedding-3-small")
+    EMBEDDING_REQUEST_TIMEOUT: float = float(os.getenv("EMBEDDING_REQUEST_TIMEOUT", "20"))
+    # 独立于本地索引加载；启用时启动发送一条无敏感内容的真实模型请求。
+    EMBEDDING_STARTUP_PROBE: bool = os.getenv("EMBEDDING_STARTUP_PROBE", "false").lower() == "true"
 
     # ---- OCR 配置 ----
     # provider: "local" | "aliyun" | "custom_api"
@@ -98,6 +106,10 @@ class Settings:
     # Skill 模块位于 backend/.skills/anysearch
     ANYSEARCH_API_KEY: str = os.getenv("ANYSEARCH_API_KEY", "")
 
+    # ---- 公开链接解析：浏览器仅在隔离容器运行 ----
+    URL_RENDERER_ENABLED: bool = os.getenv("URL_RENDERER_ENABLED", "false").lower() == "true"
+    URL_RENDERER_SOCKET: str = os.getenv("URL_RENDERER_SOCKET", "/ipc/renderer.sock")
+
     # ---- 数据目录 ----
     UPLOAD_DIR: str = str(DATA_DIR / "uploads")
     KNOWLEDGE_DIR: str = str(DATA_DIR / "knowledge")
@@ -105,8 +117,25 @@ class Settings:
     WIKI_DIR: str = os.getenv("WIKI_DIR", str(DATA_DIR / "wiki"))
 
     # ---- 会话 ----
-    SESSION_MAX_HISTORY: int = int(os.getenv("SESSION_MAX_HISTORY", "20"))
+    # 历史窗口：携带进 LLM 上下文的最近对话轮数（一轮=一问一答）。
+    # 收紧窗口是 Token 优化的 P0 手段之一，过大会显著放大每次请求的 prompt token。
+    SESSION_MAX_HISTORY: int = int(os.getenv("SESSION_MAX_HISTORY", "8"))
     CHAT_REQUEST_TIMEOUT: float = float(os.getenv("CHAT_REQUEST_TIMEOUT", "300"))
+
+    # ---- 上下文预算（Token 优化 P0）----
+    # 附件工具结果注入对话上下文的字符预算：单附件上限 + 全部附件总量上限，超限截断并标注。
+    # 附件（OCR/文档解析原文）是单次请求 Token 尖峰的最大来源，须设硬预算。
+    ATTACHMENT_CTX_PER_ITEM_CHARS: int = int(os.getenv("ATTACHMENT_CTX_PER_ITEM_CHARS", "1500"))
+    ATTACHMENT_CTX_TOTAL_CHARS: int = int(os.getenv("ATTACHMENT_CTX_TOTAL_CHARS", "4000"))
+    # 历史消息中「较早」消息的逐条字符上限（最近 KEEP_RECENT_FULL 条不截断，保留完整语境）。
+    HISTORY_MSG_MAX_CHARS: int = int(os.getenv("HISTORY_MSG_MAX_CHARS", "800"))
+    # 历史窗口内保留完整不截断的最近消息条数。
+    KEEP_RECENT_FULL: int = int(os.getenv("KEEP_RECENT_FULL", "4"))
+    # 会话摘要压缩触发阈值：消息条数或历史总字符数任一超过即触发（下调以更早压缩历史）。
+    SUMMARY_TRIGGER_MESSAGE_COUNT: int = int(os.getenv("SUMMARY_TRIGGER_MESSAGE_COUNT", "12"))
+    SUMMARY_TRIGGER_CHAR_COUNT: int = int(os.getenv("SUMMARY_TRIGGER_CHAR_COUNT", "6000"))
+    # 管理员 Token 告警阈值：单请求平均 prompt+completion token 超过该值即视为「用量偏高」。
+    TOKEN_AVG_WARN_PER_REQUEST: int = int(os.getenv("TOKEN_AVG_WARN_PER_REQUEST", "6000"))
     PROXY_REQUEST_TIMEOUT: float = float(os.getenv("PROXY_REQUEST_TIMEOUT", "240"))
     PROXY_DIAGNOSTIC_TOKEN: str = os.getenv("PROXY_DIAGNOSTIC_TOKEN", "")
     # 登录态有效期（秒），每次请求滑动续期，默认 24 小时

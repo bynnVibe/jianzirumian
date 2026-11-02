@@ -34,9 +34,14 @@
           <!-- 概览卡片 -->
           <div class="stat-grid">
             <div class="stat-card">
-              <span class="stat-label">上游渠道</span>
-              <span class="stat-value">{{ overview.channel_count || 0 }}</span>
-              <span class="stat-sub">启用 {{ overview.channel_enabled || 0 }} 个</span>
+              <span class="stat-label">上游</span>
+              <span class="stat-value">{{ overview.upstream_count || 0 }}</span>
+              <span class="stat-sub">启用 {{ overview.upstream_enabled || 0 }} 个</span>
+            </div>
+            <div class="stat-card">
+              <span class="stat-label">路由规则</span>
+              <span class="stat-value">{{ overview.rule_count || 0 }}</span>
+              <span class="stat-sub">启用 {{ overview.rule_enabled || 0 }} 条</span>
             </div>
             <div class="stat-card">
               <span class="stat-label">本地密钥</span>
@@ -61,14 +66,14 @@
               <span class="stat-sub">命中风险 {{ stats.overview?.risky || 0 }} 次</span>
             </div>
             <div class="stat-card">
-              <span class="stat-label">渠道健康</span>
+              <span class="stat-label">上游健康</span>
               <span class="stat-value health-mini">
-                <i class="h-dot h-healthy" :title="`健康 ${overview.channel_health?.healthy || 0}`"></i>
-                <i class="h-dot h-degraded" :title="`降级 ${overview.channel_health?.degraded || 0}`"></i>
-                <i class="h-dot h-down" :title="`熔断 ${overview.channel_health?.down || 0}`"></i>
+                <i class="h-dot h-healthy" :title="`健康 ${overview.upstream_health?.healthy || 0}`"></i>
+                <i class="h-dot h-degraded" :title="`降级 ${overview.upstream_health?.degraded || 0}`"></i>
+                <i class="h-dot h-down" :title="`熔断 ${overview.upstream_health?.down || 0}`"></i>
               </span>
               <span class="stat-sub">
-                健康 {{ overview.channel_health?.healthy || 0 }} · 降级 {{ overview.channel_health?.degraded || 0 }} · 熔断 {{ overview.channel_health?.down || 0 }}
+                健康 {{ overview.upstream_health?.healthy || 0 }} · 降级 {{ overview.upstream_health?.degraded || 0 }} · 熔断 {{ overview.upstream_health?.down || 0 }}
               </span>
             </div>
           </div>
@@ -114,12 +119,12 @@
           </div>
 
           <div class="dash-cols">
-            <!-- 渠道调用排行 -->
+            <!-- 规则调用分布 -->
             <div class="card">
-              <h3 class="card-title">渠道调用分布</h3>
+              <h3 class="card-title">规则调用分布</h3>
               <table v-if="stats.by_channel?.length" class="mini-table">
                 <thead>
-                  <tr><th>渠道</th><th class="num">调用</th><th class="num">成功率</th><th class="num">Token</th><th class="num">均延迟</th></tr>
+                  <tr><th>规则</th><th class="num">调用</th><th class="num">成功率</th><th class="num">Token</th><th class="num">均延迟</th></tr>
                 </thead>
                 <tbody>
                   <tr v-for="c in stats.by_channel" :key="c.name">
@@ -175,8 +180,14 @@
         </template>
       </section>
 
-      <!-- ============ 渠道 ============ -->
-      <ChannelsPanel v-else-if="activeTab === 'channels'" />
+      <!-- ============ 上游管理 ============ -->
+      <UpstreamsPanel v-else-if="activeTab === 'upstreams'" />
+
+      <!-- ============ 路由规则 ============ -->
+      <RulesPanel v-else-if="activeTab === 'rules'" />
+
+      <!-- ============ 业务路由 ============ -->
+      <RoleRoutesPanel v-else-if="activeTab === 'routes'" />
 
       <!-- ============ 密钥 ============ -->
       <KeysPanel v-else-if="activeTab === 'keys'" />
@@ -193,14 +204,18 @@
 <script setup>
 import { ref, reactive, onMounted } from 'vue'
 import { getGatewayOverview, getGatewayStats } from '@/api'
-import ChannelsPanel from '@/components/gateway/ChannelsPanel.vue'
+import UpstreamsPanel from '@/components/gateway/UpstreamsPanel.vue'
+import RulesPanel from '@/components/gateway/RulesPanel.vue'
+import RoleRoutesPanel from '@/components/gateway/RoleRoutesPanel.vue'
 import KeysPanel from '@/components/gateway/KeysPanel.vue'
 import LogsPanel from '@/components/gateway/LogsPanel.vue'
 import SecurityPanel from '@/components/gateway/SecurityPanel.vue'
 
 const tabs = [
   { key: 'dashboard', label: '仪表盘' },
-  { key: 'channels', label: '渠道 · 负载均衡' },
+  { key: 'upstreams', label: '上游管理' },
+  { key: 'rules', label: '路由规则' },
+  { key: 'routes', label: '业务路由' },
   { key: 'keys', label: '密钥 · 配额' },
   { key: 'logs', label: '日志 · 审计' },
   { key: 'security', label: '安全审计中心' },
@@ -208,7 +223,7 @@ const tabs = [
 const activeTab = ref('dashboard')
 const dashLoading = ref(true)
 const statDays = ref(7)
-const overview = reactive({ channel_health: {}, recent_risks: [] })
+const overview = reactive({ upstream_health: {}, recent_risks: [] })
 const stats = reactive({ overview: {}, daily: [], by_channel: [], by_model: [], by_risk: [], top_keys: [] })
 
 const RISK_LABELS = { none: '无风险', low: '低', medium: '中', high: '高', critical: '严重' }

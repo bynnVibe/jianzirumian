@@ -146,6 +146,7 @@ async function openPage(p) {
   try {
     const res = await getWikiPage(p.id)
     detailPage.value = res.data.page || p
+    assistant.pushAction(`打开百科词条《${(detailPage.value.title || '').slice(0, 40)}》`)
   } catch (e) {
     console.error('加载词条详情失败:', e)
   }
@@ -180,6 +181,36 @@ onUnmounted(() => {
   window.removeEventListener('wiki:page-updated', onWikiPageUpdated)
   assistant.clearPageContext()
   assistant.clearOpenDoc()
+  assistant.clearPageState()
+})
+
+// 知识百科列表的界面实时快照（词条清单 + 筛选），使助手无需重检即可感知“当前百科页”
+const WIKI_TYPE_LABELS = { source: '来源卡片', digest: '综合词条' }
+const wikiPageState = computed(() => {
+  const items = wikiPages.value.slice(0, 30).map((p) => ({
+    title: p.title || '未命名',
+    type: WIKI_TYPE_LABELS[p.page_type] || p.page_type || '',
+    link: '',
+  }))
+  return {
+    view: '知识百科' + (typeFilter.value ? `（筛选：${WIKI_TYPE_LABELS[typeFilter.value] || typeFilter.value}）` : ''),
+    kb_filter: kbFilter.value ? kbName(kbFilter.value) : '',
+    stats: { shown_count: wikiPages.value.length },
+    items,
+    items_truncated: wikiPages.value.length > items.length,
+  }
+})
+
+// 列表/筛选变化时同步快照
+watch(wikiPageState, (state) => {
+  if (state) assistant.setPageState(state)
+  else assistant.clearPageState()
+})
+
+// 筛选变化记一条行文动作
+watch([typeFilter, kbFilter], ([t, k], [ot, ok]) => {
+  if (t !== ot) assistant.pushAction(`筛选百科类型：${WIKI_TYPE_LABELS[t] || '全部类型'}`)
+  if (k !== ok) assistant.pushAction(`筛选百科知识库：${k ? kbName(k) : '全部知识库'}`)
 })
 
 // 打开/关闭词条详情时同步知识助手的「当前页面」上下文

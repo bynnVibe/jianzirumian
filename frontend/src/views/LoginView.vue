@@ -67,14 +67,23 @@
         以游客身份体验
       </button>
 
-      <router-link to="/guide" class="btn-guide">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" class="guest-icon">
-          <circle cx="12" cy="12" r="10"/>
-          <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/>
-          <line x1="12" y1="17" x2="12.01" y2="17"/>
-        </svg>
-        系统使用指导
-      </router-link>
+      <nav class="auth-help-links" aria-label="系统帮助">
+        <router-link to="/guide" class="btn-guide">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" class="guest-icon">
+            <circle cx="12" cy="12" r="10"/>
+            <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/>
+            <line x1="12" y1="17" x2="12.01" y2="17"/>
+          </svg>
+          系统使用指导
+        </router-link>
+        <a href="/系统样例.html" target="_blank" rel="noopener" class="btn-guide">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" class="guest-icon">
+            <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+            <circle cx="12" cy="12" r="3"/>
+          </svg>
+          系统样例
+        </a>
+      </nav>
     </div>
   </div>
 </template>
@@ -345,10 +354,21 @@ function handleGuest() {
   height: 18px;
 }
 
-.btn-guide {
+.auth-help-links {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
   margin-top: 10px;
-  width: 100%;
-  padding: 11px;
+}
+
+.auth-help-links .guest-icon { flex-shrink: 0; }
+
+.btn-guide {
+  flex: 1;
+  white-space: nowrap;
+  padding: 11px 2px;
   background: transparent;
   border: none;
   font-size: 13px;
@@ -366,5 +386,9 @@ function handleGuest() {
 
 .btn-guide:hover {
   color: #c98a4b;
+}
+
+@media (max-width: 480px) {
+  .auth-card { padding: 32px 24px; }
 }
 </style>

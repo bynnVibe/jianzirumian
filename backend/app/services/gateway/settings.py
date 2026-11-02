@@ -2,7 +2,8 @@
 见字如面 - 模型网关全局配置
 
 单行配置（id='default'）：审计模式、三类检测开关、失败重试次数、内置规则停用清单、
-自定义黑白名单、日志保留天数。读取时对缺失字段回退默认值，保证向前兼容。
+自定义黑白名单、日志保留天数，以及网关默认模型与系统内部出网密钥。
+读取时对缺失字段回退默认值，保证向前兼容。
 """
 import json
 import logging
@@ -23,6 +24,10 @@ _DEFAULTS = {
     "blacklist": [],
     "whitelist": [],
     "log_retention_days": 30,
+    # 网关默认模型：业务路由未指定模型名时的兜底出网模型（空=回退 .env API_MODEL）
+    "default_model": "",
+    # 系统内部出网密钥明文（各模块经 /v1 出网自动携带；本地信任边界内保存）
+    "internal_key": "",
 }
 
 _JSON_FIELDS = ("disabled_rules", "blacklist", "whitelist")
@@ -47,8 +52,8 @@ def get_settings() -> dict:
         db.execute(
             "INSERT INTO gateway_settings (id, audit_mode, unicode_detection, tool_cmd_detection,"
             " outbound_detection, retry_count, disabled_rules, blacklist, whitelist,"
-            " log_retention_days, updated_at)"
-            " VALUES ('default', 'audit', 1, 1, 1, 2, '[]', '[]', '[]', 30, ?)",
+            " log_retention_days, default_model, internal_key, updated_at)"
+            " VALUES ('default', 'audit', 1, 1, 1, 2, '[]', '[]', '[]', 30, '', '', ?)",
             (_now(),),
         )
         row = db.query_one("SELECT * FROM gateway_settings WHERE id = 'default'")
@@ -87,18 +92,22 @@ def save_settings(patch: dict) -> dict:
     for k in _JSON_FIELDS:
         if k in patch and isinstance(patch[k], list):
             cur[k] = [str(x).strip() for x in patch[k] if str(x).strip()]
+    if "default_model" in patch:
+        cur["default_model"] = str(patch["default_model"] or "").strip()
+    if "internal_key" in patch:
+        cur["internal_key"] = str(patch["internal_key"] or "").strip()
 
     db.execute(
         "UPDATE gateway_settings SET audit_mode=?, unicode_detection=?, tool_cmd_detection=?,"
         " outbound_detection=?, retry_count=?, disabled_rules=?, blacklist=?, whitelist=?,"
-        " log_retention_days=?, updated_at=? WHERE id='default'",
+        " log_retention_days=?, default_model=?, internal_key=?, updated_at=? WHERE id='default'",
         (
             cur["audit_mode"], cur["unicode_detection"], cur["tool_cmd_detection"],
             cur["outbound_detection"], cur["retry_count"],
             json.dumps(cur["disabled_rules"], ensure_ascii=False),
             json.dumps(cur["blacklist"], ensure_ascii=False),
             json.dumps(cur["whitelist"], ensure_ascii=False),
-            cur["log_retention_days"], _now(),
+            cur["log_retention_days"], cur["default_model"], cur["internal_key"], _now(),
         ),
     )
     return get_settings()
