@@ -52,6 +52,7 @@
                   :id="messageAnchor(store.currentSessionId, msg, idx)" class="message-anchor"
                   :class="{ 'located-turn': active === messageAnchor(store.currentSessionId, msg, idx) && !following }">
           <ChatMessage
+            v-if="!msg.hitl"
             :role="msg.role"
             :content="msg.content"
             :sources="msg.sources"
@@ -60,8 +61,19 @@
             :message-id="msg.message_id"
             :feedback="msg.feedback"
             :can-feedback="!auth.isGuest && !msg.interrupted"
+            :cache-hit="!!msg.cache_hit"
+            :cache-score="msg.cache_score || 0"
             @reask="handleReask"
             @feedback="(fb) => handleFeedback(msg, fb)"
+          />
+          <!-- HITL 卡片：联网确认 / 意图澄清（后端暂停本轮，等待用户响应后触发新请求） -->
+          <ChatHitlCard
+            v-else
+            :hitl="msg.hitl"
+            :busy="store.isGenerating"
+            @search="handleHitlSearch"
+            @direct="handleHitlDirect"
+            @option="handleHitlOption"
           />
           <ChatActionCard v-for="action in msg.actions || []" :key="action.id" :action="action" @update="store.updateAction" />
         </div>
@@ -98,6 +110,33 @@
             <span>{{ phaseMessage }}</span>
           </div>
         </div>
+        <!-- Agent（复杂度分流）执行过程：思考链 / 解题计划 / 工具调用 -->
+        <div v-if="store.isGenerating && hasAgentActivity" class="agent-panel">
+          <div v-if="store.agentPlan.length" class="agent-block">
+            <div class="agent-block-title">解题计划</div>
+            <ol class="agent-plan-list">
+              <li v-for="(s, i) in store.agentPlan" :key="i">
+                <span class="agent-tag">{{ s.tool }}</span>
+                <span class="agent-plan-text">{{ s.purpose || s.query }}</span>
+              </li>
+            </ol>
+          </div>
+          <div v-if="store.agentThoughts.length" class="agent-block">
+            <div class="agent-block-title">思考</div>
+            <p v-for="(t, i) in store.agentThoughts" :key="i" class="agent-thought">{{ t }}</p>
+          </div>
+          <div v-if="store.agentTools.length" class="agent-block">
+            <div class="agent-block-title">工具调用</div>
+            <div v-for="(t, i) in store.agentTools" :key="i" class="agent-tool-row" :class="{ failed: t.failed }">
+              <span class="agent-tag">{{ t.tool }}</span>
+              <span class="agent-tool-query">{{ t.query }}</span>
+              <span class="agent-tool-state">
+                <span v-if="t.state === 'start'" class="step-spinner"></span>
+                <template v-else>{{ t.failed ? '失败' : (t.summary || '完成') }}</template>
+              </span>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -125,7 +164,7 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, watch, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useChatStore } from '@/stores/chat'
 import { useAuthStore } from '@/stores/auth'
@@ -133,6 +172,7 @@ import { submitFeedback, getPublicConfig } from '@/api'
 import ChatMessage from '@/components/ChatMessage.vue'
 import ChatInput from '@/components/ChatInput.vue'
 import ChatActionCard from '@/components/ChatActionCard.vue'
+import ChatHitlCard from '@/components/ChatHitlCard.vue'
 import ConversationNavigator from '@/components/ConversationNavigator.vue'
 import { messageAnchor } from '@/utils/conversationNavigation'
 import { useConversationNavigation } from '@/utils/useConversationNavigation'
@@ -141,7 +181,9 @@ const route = useRoute()
 const router = useRouter()
 const store = useChatStore()
 const auth = useAuthStore()
-onBeforeUnmount(() => store.stopGeneration())
+// 切走页面（组件卸载）不中断回答：应答流生命周期在 store（全局）层，
+// 用户临时切到系统设置等页面时本轮回答继续执行，回来即可看到完整结果；
+// 仅「停止生成」按钮、切换/新建会话才取消。
 const messagesRef = ref(null)
 const chatInputRef = ref(null)
 
@@ -159,6 +201,7 @@ const phaseMessage = computed(() => {
     case 'tool_start':
     case 'tool_processing': return '正在处理附件...'
     case 'tool_done': return toolCallsSummary.value || '附件处理完成'
+    case 'ocr_retrieval': return '已识别图片文字，正在按图中内容检索知识库...'
     case 'rewriting': return '正在理解你的问题...'
     case 'retrieving': return '正在检索知识库...'
     case 'reranking': return '正在对检索结果重排序...'
@@ -171,8 +214,12 @@ const phaseMessage = computed(() => {
     case 'search_empty': return '联网搜索无结果'
     case 'search_error': return '联网搜索出错'
     case 'generating': return '正在生成回答...'
+    case 'planning': return '正在规划解题步骤...'
+    case 'executing': return '正在按计划执行检索...'
+    case 'thinking': return '正在思考...'
     case 'fallback': return '当前模型不可用，已切换免费模型重试...'
     case 'citations_checked': return '已核对引用编号'
+    case 'cache_hit': return '命中语义缓存，直接回复历史回答'
     default: return ''
   }
 })
@@ -185,10 +232,10 @@ const pipelineSteps = computed(() => {
 
   const steps = []
   const hasTool = history.some((p) =>
-    ['attachments_saved', 'tool_start', 'tool_processing', 'tool_done'].includes(p)
+    ['attachments_saved', 'tool_start', 'tool_processing', 'tool_done', 'ocr_retrieval'].includes(p)
   )
   if (hasTool) {
-    steps.push({ key: 'tool', label: '处理附件', phases: ['attachments_saved', 'tool_start', 'tool_processing', 'tool_done'] })
+    steps.push({ key: 'tool', label: '处理附件', phases: ['attachments_saved', 'tool_start', 'tool_processing', 'tool_done', 'ocr_retrieval'] })
   }
   steps.push({ key: 'rewrite', label: '理解问题', phases: ['rewriting'] })
   steps.push({
@@ -222,6 +269,24 @@ const toolCallsSummary = computed(() => {
   const ok = calls.filter((c) => c.success).length
   return `附件已处理 ${ok}/${calls.length} 个`
 })
+
+// Agent 过程面板是否可见（思考链/计划/工具任一非空）
+const hasAgentActivity = computed(() =>
+  (store.agentThoughts && store.agentThoughts.length) ||
+  (store.agentPlan && store.agentPlan.length) ||
+  (store.agentTools && store.agentTools.length)
+)
+
+// HITL 卡片交互：联网搜索 / 直接回答 / 澄清选项
+function handleHitlSearch(query) {
+  store.resendWithSearch(query)
+}
+function handleHitlDirect(query) {
+  store.answerWithoutSearch(query)
+}
+function handleHitlOption(text) {
+  store.sendClarifyOption(text)
+}
 
 // 路由变化时加载对应会话
 watch(() => route.params.sessionId, async (newId) => {
@@ -262,6 +327,8 @@ async function handleFeedback(msg, { rating, comment }) {
   }
 }
 
+// ---- 语义缓存面板已收拢至左下角用户菜单（AppSidebar），本页不再展示 ----
+
 onMounted(() => {
   chatInputRef.value?.focus()
 
@@ -283,6 +350,7 @@ onMounted(() => {
 <style scoped>
 .stop-generation { display: block; margin: 0 auto 10px; padding: 8px 20px; border: 1px solid #8b7355; border-radius: 8px; background: transparent; color: inherit; cursor: pointer; }
 .back-to-latest { display: block; margin: 0 auto 8px; background: #fffdf9; border: 1px solid var(--color-border); border-radius: 18px; padding: 6px 16px; font-size: 12px; color: var(--color-primary); cursor: pointer; }
+
 .message-anchor { border-radius: 10px; }
 .located-turn { box-shadow: inset 3px 0 var(--color-primary); }
 .chat-view {
@@ -467,6 +535,76 @@ onMounted(() => {
 
 @keyframes spin {
   to { transform: rotate(360deg); }
+}
+
+/* Agent（复杂度分流）执行过程面板 */
+.agent-panel {
+  margin: 4px 0 16px 44px;
+  padding: 10px 12px;
+  border: 1px dashed #e0cdb2;
+  border-radius: 10px;
+  background: #fffdf9;
+  font-size: 12.5px;
+  color: #4a3f35;
+}
+.agent-block + .agent-block {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid #f0e4d2;
+}
+.agent-block-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: #c98a4b;
+  margin-bottom: 4px;
+  letter-spacing: 0.5px;
+}
+.agent-plan-list {
+  margin: 0;
+  padding-left: 18px;
+}
+.agent-plan-list li {
+  margin: 2px 0;
+  line-height: 1.6;
+}
+.agent-plan-text {
+  margin-left: 6px;
+}
+.agent-thought {
+  margin: 2px 0;
+  line-height: 1.6;
+  color: #5c5145;
+}
+.agent-tag {
+  display: inline-block;
+  padding: 1px 7px;
+  font-size: 10.5px;
+  color: #fff;
+  background: #c98a4b;
+  border-radius: 999px;
+}
+.agent-tool-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 3px 0;
+}
+.agent-tool-row.failed .agent-tag {
+  background: #b05555;
+}
+.agent-tool-query {
+  color: #6b5a48;
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agent-tool-state {
+  margin-left: auto;
+  color: var(--color-text-secondary);
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 
 /* Input section */

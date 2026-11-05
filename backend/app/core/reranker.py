@@ -80,8 +80,61 @@ def _score_local(query: str, texts: List[str]) -> List[float]:
     return [float(s) for s in scores]
 
 
+def _score_via_gateway(query: str, texts: List[str]) -> Optional[List[float]]:
+    """经模型网关（role=rerank）打分：享 LB/日志/审计/熔断。
+
+    仅当存在启用的 rerank 上游、可解析出模型且选路有候选时走网关；
+    网关未就绪/调用失败返回 None，由调用方回退直连 DashScope。
+    """
+    try:
+        from app.services.gateway import keys as key_svc
+        from app.services.gateway import rules as rule_svc
+        from app.services.gateway import upstreams as up_svc
+        ups = [u for u in up_svc.list_upstreams(category="rerank") if u.get("enabled")]
+        if not ups:
+            return None
+        model = ((rule_svc.get_role_route("rerank") or {}).get("model_name") or "").strip()
+        if not model:
+            names = up_svc.all_model_names(category="rerank")
+            model = names[0] if names else ""
+        if not model:
+            return None
+        _, candidates = rule_svc.select_upstreams(model, role="rerank")
+        if not candidates:
+            return None
+        url = f"{settings.GATEWAY_INTERNAL_URL}/reranks"
+        headers = {"Authorization": f"Bearer {key_svc.ensure_internal_key()}",
+                   "Content-Type": "application/json"}
+        payload = {"model": model, "query": query, "documents": texts,
+                   "top_n": len(texts), "_gw_role": "rerank"}
+        resp = _get_http_client().post(url, json=payload, headers=headers)
+        if resp.status_code != 200:
+            logger.warning("[业务路由] rerank 网关返回 HTTP %s，回退直连: %s",
+                           resp.status_code, resp.text[:150])
+            return None
+        items = (resp.json() or {}).get("results") or []
+        if not items:
+            return None
+        scores = [0.0] * max(len(texts), 1)
+        for item in items:
+            idx = item.get("index")
+            if isinstance(idx, int) and 0 <= idx < len(texts):
+                scores[idx] = float(item.get("relevance_score", 0.0))
+        logger.info("[业务路由] rerank 经网关出网: model=%s 文档=%d", model, len(texts))
+        return scores
+    except Exception as e:
+        logger.warning("[业务路由] rerank 经网关失败，回退直连: %s", e)
+        return None
+
+
 def _score_dashscope(query: str, texts: List[str]) -> List[float]:
-    """调用阿里云 DashScope OpenAI 兼容 /reranks 接口打分（相关度 0~1），失败抛异常"""
+    """调用阿里云 DashScope OpenAI 兼容 /reranks 接口打分（相关度 0~1），失败抛异常。
+
+    优先经模型网关（role=rerank）；网关未就绪时回退直连 DashScope。
+    """
+    gw = _score_via_gateway(query, texts)
+    if gw is not None:
+        return gw
     cfg = effective_provider_config("rerank", "dashscope")
     api_key = cfg.get("api_key", "")
     if not api_key:

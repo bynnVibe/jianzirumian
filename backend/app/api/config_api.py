@@ -109,6 +109,16 @@ EDITABLE_FIELDS = {
 # 敏感字段：不回传明文，只回传 has_key 标记
 SECRET_FIELDS = {"api_key"}
 
+# 「网关唯一来源」：以下网络 provider 的连接配置只在「模型网关 · 上游管理」中维护，
+# 系统设置页改为只读现状 + 跳转，写入接口拒绝（410）。
+# 进程内 local 引擎（ocr local / rerank local）非网络端点、不能成为网关上游，不在此列，
+# 仍在本页配置（provider 类型切换与 local 字段保留）。
+GATEWAY_MANAGED_PROVIDERS = {
+    "ocr": {"aliyun", "custom_api"},
+    "embedding": {"ollama", "openai", "custom"},
+    "rerank": {"dashscope"},
+}
+
 
 def _public_config(category: str, provider: str) -> dict:
     """生效配置的对外版本：敏感字段转为 has_key 标记"""
@@ -258,6 +268,14 @@ async def save_provider_settings(body: ProviderSettingsBody, _admin: dict = Depe
 
     敏感字段（api_key）传空表示保持现有值不变。
     """
+    # 「网关唯一来源」：网络 OCR/Embedding/ReRank 的连接配置已迁至模型网关上游管理，
+    # 系统设置页只读，写入接口拒绝并提示跳转（local 引擎仍在本页配置，不在此列）。
+    if body.provider in GATEWAY_MANAGED_PROVIDERS.get(body.category, set()):
+        raise HTTPException(
+            status_code=410,
+            detail=(f"{body.category}/{body.provider} 的连接配置已迁移至「模型网关 · 上游管理」，"
+                    "请前往网关配置（系统设置页仅保留只读现状与 provider 类型切换）"),
+        )
     allowed = EDITABLE_FIELDS.get(body.category, {}).get(body.provider)
     if allowed is None:
         return {"success": False, "message": f"不支持的配置项: {body.category}/{body.provider}"}

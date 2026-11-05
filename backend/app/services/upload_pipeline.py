@@ -259,6 +259,7 @@ class UploadPipelineService:
         - 图片：整文切块入库（无页码）；
         - Word/PDF：逐页切块入库（带 page_number + pdf_preview_path，来源可跳页）。
         """
+        from app.services import ingest_dedup
         from app.services.knowledge import knowledge_service
         from app.services.usage import record_upload
         from app.services.wiki import wiki_service
@@ -282,6 +283,13 @@ class UploadPipelineService:
         save_title = (title or "").strip() or Path(row["filename"]).stem
 
         kb_id, visibility, owner_id = knowledge_service._resolve_kb(kb_id, "public", owner_id)
+
+        # 重复入库校验：入口即校验来源指纹，同一知识库内相同内容已入库则拦截，
+        # 不再重复向量化 / 编译百科卡片，减少系统重复工作与资源消耗。
+        fingerprint = ingest_dedup.compute_file_fingerprint(file_path)
+        ingest_dedup.ensure_can_ingest(
+            fingerprint, kb_id, ingest_dedup.KIND_FILE, save_title
+        )
 
         if source_type == "image":
             text = clean_ocr_text(text)
@@ -338,7 +346,7 @@ class UploadPipelineService:
         # 上传记录（与旧链路字段一致，保证知识库管理/检索来源展示正常）
         from app.config import settings
 
-        upload_records.add_record(
+        record = upload_records.add_record(
             filename=row["filename"],
             image_path=file_path,
             ocr_text=text,
@@ -353,6 +361,12 @@ class UploadPipelineService:
             pages=item_pages if source_type != "image" else None,
             pdf_preview_path=pdf_preview_path,
             title=save_title,
+        )
+        # 入库成功：登记来源指纹（幂等），供下次同库重复入库时入口拦截
+        ingest_dedup.register(
+            fingerprint, ingest_dedup.KIND_FILE, kb_id,
+            source_type=source_type, title=save_title, owner_id=owner_id,
+            record_id=record["id"], source_ref=file_path,
         )
         record_upload(owner_id)
 

@@ -22,6 +22,42 @@
       <button class="refresh-btn" @click="loadPages" :disabled="loading">刷新</button>
     </div>
 
+    <!-- 对话沉淀（llm-wiki 路径A：高频主题 → 私人综合词条） -->
+    <div class="conv-card" v-if="conv.enabled">
+      <div class="conv-head">
+        <div class="conv-head-text">
+          <h3 class="conv-title">对话沉淀</h3>
+          <p class="conv-desc">系统周期性归纳你反复问及的高频主题，自动综合成仅你可见的私人百科词条，提问时检索会优先命中</p>
+        </div>
+        <button class="conv-compile-btn" :disabled="convCompiling" @click="compileTopics">
+          {{ convCompiling ? '沉淀中...' : '立即沉淀' }}
+        </button>
+      </div>
+      <div class="conv-body">
+        <div class="conv-section" v-if="conv.candidates.length">
+          <span class="conv-label">高频主题</span>
+          <div class="conv-topics">
+            <span v-for="c in conv.candidates" :key="c.topic" class="conv-topic" :class="{ done: c.digested }">
+              {{ c.topic }}<em>×{{ c.hits }}</em>
+              <i v-if="c.digested" class="conv-done-flag">已沉淀</i>
+            </span>
+          </div>
+        </div>
+        <div class="conv-section" v-if="conv.digested.length">
+          <span class="conv-label">已沉淀私人词条</span>
+          <div class="conv-topics">
+            <button v-for="d in conv.digested" :key="d.page_id || d.topic" class="conv-digest-link" @click="openPageById(d.page_id)">
+              {{ d.topic }}
+            </button>
+          </div>
+        </div>
+        <p v-if="!conv.candidates.length && !conv.digested.length" class="conv-empty">
+          近期提问中出现被问及 {{ conv.min_hits }} 次以上的高频主题后，可在此沉淀为私人词条
+        </p>
+      </div>
+      <p v-if="convMessage" class="conv-message" :class="convMessageType">{{ convMessage }}</p>
+    </div>
+
     <!-- 加载状态 -->
     <div v-if="loading" class="loading-state">
       <div class="spinner"></div>
@@ -91,7 +127,7 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import MarkdownIt from 'markdown-it'
-import { getWikiPages, getWikiPage, deleteWikiPage, listKnowledgeBases } from '@/api'
+import { getWikiPages, getWikiPage, deleteWikiPage, listKnowledgeBases, getConversationTopics, compileConversationTopics } from '@/api'
 import { useAuthStore } from '@/stores/auth'
 import { useAssistantStore } from '@/stores/assistant'
 
@@ -107,6 +143,12 @@ const kbFilter = ref('')
 const detailPage = ref(null)
 const deleteTarget = ref(null)
 const deleting = ref(false)
+
+// 对话沉淀（llm-wiki 路径A）
+const conv = ref({ enabled: false, min_hits: 3, candidates: [], digested: [] })
+const convCompiling = ref(false)
+const convMessage = ref('')
+const convMessageType = ref('info')
 
 const renderedDetail = computed(() => (detailPage.value ? md.render(detailPage.value.content || '') : ''))
 
@@ -159,10 +201,58 @@ async function doDelete() {
     await deleteWikiPage(deleteTarget.value.id)
     deleteTarget.value = null
     await loadPages()
+    await loadConversation(false)
   } catch (e) {
     console.error('删除词条失败:', e)
   } finally {
     deleting.value = false
+  }
+}
+
+/** 加载对话沉淀预览；refresh=true 时后端调 LLM 归纳高频主题 */
+async function loadConversation(refresh = true) {
+  try {
+    const res = await getConversationTopics(refresh)
+    conv.value = {
+      enabled: !!res.data.enabled,
+      min_hits: res.data.min_hits || 3,
+      candidates: res.data.candidates || [],
+      digested: res.data.digested || [],
+    }
+  } catch (e) {
+    console.error('加载对话沉淀预览失败:', e)
+  }
+}
+
+/** 手动触发沉淀：把高频主题综合成私人词条 */
+async function compileTopics() {
+  convCompiling.value = true
+  convMessage.value = ''
+  try {
+    const res = await compileConversationTopics()
+    const n = res.data.generated || 0
+    convMessageType.value = n > 0 ? 'success' : 'info'
+    convMessage.value = res.data.message || (n > 0 ? `已沉淀 ${n} 条私人词条` : '暂无新的高频主题可沉淀')
+    await Promise.all([loadConversation(true), loadPages()])
+  } catch (e) {
+    convMessageType.value = 'error'
+    convMessage.value = '沉淀失败：' + (e.response?.data?.detail || e.message || '未知错误')
+  } finally {
+    convCompiling.value = false
+  }
+}
+
+/** 从已沉淀日志打开词条详情 */
+async function openPageById(pageId) {
+  if (!pageId) return
+  try {
+    const res = await getWikiPage(pageId)
+    if (res.data.page) {
+      detailPage.value = res.data.page
+      assistant.pushAction(`打开百科词条《${(res.data.page.title || '').slice(0, 40)}》`)
+    }
+  } catch (e) {
+    console.error('加载词条详情失败:', e)
   }
 }
 
@@ -174,6 +264,7 @@ onMounted(async () => {
     console.error('加载知识库列表失败:', e)
   }
   await loadPages()
+  await loadConversation(true)
   window.addEventListener('wiki:page-updated', onWikiPageUpdated)
 })
 
@@ -304,6 +395,159 @@ function onWikiPageUpdated() {
 .refresh-btn:hover:not(:disabled) {
   border-color: #c98a4b;
   color: #c98a4b;
+}
+
+/* ---- 对话沉淀卡 ---- */
+.conv-card {
+  background: #fdf8f0;
+  border: 1px solid #ecdcc4;
+  border-radius: 12px;
+  padding: 14px 16px;
+  margin-bottom: 16px;
+}
+
+.conv-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.conv-title {
+  font-size: 14.5px;
+  font-weight: 700;
+  color: #8a5a2b;
+  margin: 0 0 4px;
+}
+
+.conv-desc {
+  font-size: 12px;
+  color: #9a8874;
+  margin: 0;
+  line-height: 1.6;
+}
+
+.conv-compile-btn {
+  flex-shrink: 0;
+  padding: 7px 16px;
+  border: 1px solid #d8b783;
+  border-radius: 8px;
+  background: #f6e7cf;
+  color: #8a5a2b;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.conv-compile-btn:hover:not(:disabled) {
+  background: #efdcc0;
+  border-color: #c98a4b;
+}
+
+.conv-compile-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.conv-body {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.conv-section {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.conv-label {
+  font-size: 11.5px;
+  color: #a08b6f;
+  flex-shrink: 0;
+  min-width: 84px;
+}
+
+.conv-topics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.conv-topic {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12.5px;
+  color: #6b5d4f;
+  background: #fff;
+  border: 1px solid #e8dfd2;
+  border-radius: 999px;
+  padding: 3px 10px;
+}
+
+.conv-topic em {
+  font-style: normal;
+  color: #b08a5a;
+  font-size: 11px;
+}
+
+.conv-topic.done {
+  border-color: #cfe0cf;
+  background: #f2f7f2;
+  color: #5a7a5a;
+}
+
+.conv-done-flag {
+  font-style: normal;
+  font-size: 10px;
+  color: #4f7a4f;
+  background: #e2efe2;
+  border-radius: 999px;
+  padding: 0 6px;
+  margin-left: 2px;
+}
+
+.conv-digest-link {
+  border: none;
+  background: none;
+  padding: 0;
+  font-size: 12.5px;
+  color: #c98a4b;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.conv-empty {
+  font-size: 12px;
+  color: #a89a89;
+  margin: 0;
+}
+
+.conv-message {
+  margin: 10px 0 0;
+  font-size: 12px;
+  padding: 6px 10px;
+  border-radius: 8px;
+}
+
+.conv-message.success {
+  background: #e8f2e8;
+  color: #4f7a4f;
+}
+
+.conv-message.info {
+  background: #f0e9df;
+  color: #8d7f6f;
+}
+
+.conv-message.error {
+  background: #f7e6e6;
+  color: #a05555;
 }
 
 .loading-state,

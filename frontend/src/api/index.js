@@ -107,6 +107,8 @@ export function sendChatMessageWithFiles(params, files, signal) {
   form.append('llm_provider', params.llm_provider || '')
   form.append('kb_id', params.kb_id || '')
   form.append('rule_id', params.rule_id || '')
+  form.append('model', params.model || '')
+  form.append('skip_search_prompt', String(!!params.skip_search_prompt))
   for (const file of files || []) {
     form.append('files', file)
   }
@@ -162,6 +164,65 @@ export function deleteSession(sessionId) {
  */
 export function switchSession(sessionId) {
   return api.post(`/chat/sessions/${sessionId}/switch`)
+}
+
+/**
+ * 手动压缩会话历史（/compact 等价物）：focus 为可选压缩侧重点
+ */
+export function compactSession(sessionId, focus = '') {
+  return api.post(`/chat/sessions/${sessionId}/compact`, { focus })
+}
+
+/**
+ * 我的记忆：列表 / 主动写入 / 编辑 / 删除（个人中心「我的记忆」块）
+ */
+export function listMyMemories() {
+  return api.get('/me/memories')
+}
+
+export function createMyMemory(content, memoryType = '', importance = null) {
+  return api.post('/me/memories', { content, memory_type: memoryType, importance })
+}
+
+export function updateMyMemory(memoryId, { content = '', memory_type: memoryType = '', importance = null } = {}) {
+  return api.put(`/me/memories/${encodeURIComponent(memoryId)}`, { content, memory_type: memoryType, importance })
+}
+
+export function deleteMyMemory(memoryId) {
+  return api.delete(`/me/memories/${encodeURIComponent(memoryId)}`)
+}
+
+/**
+ * Skill 配置：列表 / 新建 / 编辑（含开关） / 删除
+ * kind: prompt（对话提示注入） | playbook（链接抓取策略）；内置技能仅可开关
+ */
+export function listSkills() {
+  return api.get('/skills')
+}
+
+export function createSkill({ name, kind = 'prompt', content = '', description = '', enabled = true, scope = null }) {
+  return api.post('/skills', { name, kind, content, description, enabled, scope })
+}
+
+export function updateSkill(skillId, { name = null, description = null, content = null, enabled = null } = {}) {
+  return api.put(`/skills/${encodeURIComponent(skillId)}`, { name, description, content, enabled })
+}
+
+export function deleteSkill(skillId) {
+  return api.delete(`/skills/${encodeURIComponent(skillId)}`)
+}
+
+/**
+ * Skill 文档（渐进式/懒加载）：
+ * - getSkillDoc：L2 激活，拉取 SKILL.md 主体 + 可用 references 列表（不含正文）
+ * - getSkillDocRef：L3 执行，按 path 单独拉取某一篇扩展参考文档
+ */
+export function getSkillDoc(skillId) {
+  return api.get(`/skills/${encodeURIComponent(skillId)}/doc`)
+}
+
+export function getSkillDocRef(skillId, path) {
+  return api.get(`/skills/${encodeURIComponent(skillId)}/doc/ref`, { params: { path } })
 }
 
 /**
@@ -785,6 +846,57 @@ export function recompileWikiAll() {
 }
 
 // ============================================
+// 对话/检索历史沉淀（llm-wiki 路径A：高频主题 → 私人综合词条）
+// ============================================
+
+/**
+ * 对话沉淀预览：已沉淀私人词条 + 归纳出的高频候选主题
+ * refresh=true 时调 LLM 归纳（稍慢），单独放宽超时
+ */
+export function getConversationTopics(refresh = true) {
+  return api.get('/wiki/conversation/topics', { params: { refresh }, timeout: 120000 })
+}
+
+/**
+ * 手动触发对话沉淀：把当前用户高频提问主题综合成私人 digest 词条（LLM 耗时长）
+ */
+export function compileConversationTopics() {
+  return api.post('/wiki/conversation/compile', {}, { timeout: 300000 })
+}
+
+// ============================================
+// 主问答语义缓存 API（当前用户专属：相似问题命中直回、绕过检索路由）
+// ============================================
+
+/**
+ * 语义缓存面板：开关/阈值/条目数/累计命中 + 当前用户缓存列表
+ */
+export function getSemanticCache(limit = 50) {
+  return api.get('/chat/cache', { params: { limit } })
+}
+
+/**
+ * 开/关语义缓存（运行时覆盖）
+ */
+export function toggleSemanticCache(enabled) {
+  return api.post('/chat/cache/toggle', { enabled })
+}
+
+/**
+ * 清空当前用户的全部语义缓存
+ */
+export function clearSemanticCache() {
+  return api.delete('/chat/cache')
+}
+
+/**
+ * 删除当前用户的单条语义缓存
+ */
+export function deleteSemanticCacheEntry(entryId) {
+  return api.delete(`/chat/cache/${entryId}`)
+}
+
+// ============================================
 // 知识助手 Agent API（侧栏问答 + 人工确认编辑）
 // ============================================
 
@@ -894,6 +1006,11 @@ export function getMyObservabilityMetrics(days = 7) {
   return api.get('/observability/my-metrics', { params: { days } })
 }
 
+/** 当前登录用户的「上下文窗口 + 记忆模块」使用概览。 */
+export function getMyContextOverview(days = 7) {
+  return api.get('/observability/my-context', { params: { days } })
+}
+
 /**
  * Agent trace 列表（一次用户请求 = 一条 trace）
  * @param {object} params { agent, status, limit, offset }
@@ -911,6 +1028,21 @@ export function getObservabilityTrace(traceId) {
 
 export function getObservabilityTraceLogs(traceId, params = {}) {
   return api.get(`/observability/traces/${encodeURIComponent(traceId)}/logs`, { params })
+}
+
+/**
+ * Skill 预审记录（仅 ops/admin）：汇总 + 明细列表，拒绝行为重点暴露
+ */
+export function getSkillReviews(limit = 30) {
+  return api.get('/observability/skill-reviews', { params: { limit } })
+}
+
+/**
+ * 链接正文「内容润色」：按 Skill 配置（scope=polish）做确定性清洗，
+ * 去角标/噪声行/多余空格，保留段落顺序与自然段，不新增内容。
+ */
+export function cleanArticle(text) {
+  return api.post('/knowledge/clean-article', { text })
 }
 
 
@@ -1093,6 +1225,44 @@ export function getEvalRun(runId) {
   return api.get(`/eval/runs/${runId}`)
 }
 
+// ---- Prompt / Skill 专项评测（静态断言 + Rubric 打分 + A/B + 优化上线）----
+
+/** 可评测目标：系统提示词 + 当前管理员的用户技能 */
+export function listPromptSkillTargets() {
+  return api.get('/eval/prompt-skill/targets')
+}
+
+/** 系统提示词版本历史与当前生效版本 */
+export function getPromptVersions() {
+  return api.get('/eval/prompt-skill/prompt-versions')
+}
+
+/** 发起 Prompt/Skill 评测，返回 { eval_id, status } */
+export function startPromptSkillEval(targetType, targetId) {
+  return api.post('/eval/prompt-skill/evaluate', { target_type: targetType, target_id: targetId })
+}
+
+/** Prompt/Skill 评测历史（概要） */
+export function listPromptSkillEvals(params = {}) {
+  return api.get('/eval/prompt-skill/evals', { params })
+}
+
+/** Prompt/Skill 评测详情 */
+export function getPromptSkillEval(evalId) {
+  return api.get(`/eval/prompt-skill/evals/${encodeURIComponent(evalId)}`)
+}
+
+/** 对优化候选发起 A/B 行为对比 */
+export function startPromptSkillAB(evalId, datasetId) {
+  return api.post(`/eval/prompt-skill/evals/${encodeURIComponent(evalId)}/ab`, { dataset_id: datasetId })
+}
+
+/** 上线：Prompt 发布新版本 / Skill 更新内容 */
+export function publishPromptSkill(evalId, content = null) {
+  return api.post(`/eval/prompt-skill/evals/${encodeURIComponent(evalId)}/publish`, { content })
+}
+
+
 // ============================================
 // CI/CD 流水线 API（管理员 / 运维角色）
 // ============================================
@@ -1244,6 +1414,19 @@ export function deleteGatewayRoleRoute(role) {
 // ---- 当前用户可用规则（聊天页路由下拉，普通登录用户可访问）----
 export function listMyGatewayRules(model = '') {
   return api.get('/gateway/my-rules', { params: { model } })
+}
+
+// ---- 聊天页模型下拉：匹配路由规则的上游模型清单（普通登录用户可访问）----
+export function getMyChatModels() {
+  return api.get('/gateway/my-chat-models')
+}
+
+// ---- 系统内部出网密钥：配置现状与轮换（管理员/运维）----
+export function getGatewayInternalKey() {
+  return api.get('/gateway/keys/internal')
+}
+export function rotateGatewayInternalKey() {
+  return api.post('/gateway/keys/internal/rotate')
 }
 
 export default api

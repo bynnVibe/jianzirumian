@@ -137,6 +137,108 @@ def test_gateway_json_failover_and_usage(monkeypatch):
     assert db.query_one("SELECT status,retries FROM gateway_logs") == {"status": "ok", "retries": 1}
 
 
+def test_gateway_stream_first_chunk_failover(monkeypatch):
+    """慢上游返回 200 但首块超期不产出 chunk 时应判定失败并切换，不吃满调用方超时。"""
+    monkeypatch.setattr(proxy, "_FIRST_CHUNK_UTILITY", 0.2)
+    monkeypatch.setattr(proxy, "_FIRST_CHUNK_DEFAULT", 0.2)
+    slow = add_upstream("slow")
+    good = add_upstream("good")
+    add_rule([slow["id"], good["id"]])
+    key = keys.create_key("stream-failover")
+    payload = body(stream=True)
+    payload["_gw_role"] = "intent_rewrite"
+    ctx = proxy.prepare(payload, key["key"])
+    seen = []
+
+    async def fake_stream_iterator(eff, lines):
+        host = str(eff.get("base_url") or "")
+        seen.append(host)
+        if "slow" in host:
+            await asyncio.sleep(5)  # 模拟上游挂起：长时间不产出任何 chunk
+            yield 'data: {"choices":[{"delta":{"content":"慢上游"}}]}\n\n'
+            yield "data: [DONE]\n\n"
+        else:
+            yield 'data: {"choices":[{"delta":{"content":"合成回答"}}]}\n\n'
+            yield "data: [DONE]\n\n"
+
+    monkeypatch.setattr(proxy.upstream, "stream_iterator", fake_stream_iterator)
+    client_class = httpx.AsyncClient
+    monkeypatch.setattr(
+        proxy.httpx, "AsyncClient",
+        lambda **kw: client_class(transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, content=b"data: x\n\n")), **kw))
+
+    async def collect():
+        out = []
+        async for sse in proxy.stream_response(ctx):
+            out.append(sse)
+        return out
+
+    events = asyncio.run(collect())
+    joined = "".join(events)
+    assert "合成回答" in joined and "慢上游" not in joined
+    assert len(seen) == 2 and "slow" in seen[0] and "good" in seen[1]
+    assert db.query_one("SELECT status,retries FROM gateway_logs") == {"status": "ok", "retries": 1}
+
+
+def test_role_route_strict_binding_ignores_pattern_name():
+    """业务路由严格绑定：规则 pattern 是规则名而非模型模式时，
+    role 绑定仍按「规则上游是否支持该模型」选路，不得回退其他规则。"""
+    ds = add_upstream("ds", models=["deepseek-v4-flash"])
+    ms = add_upstream("ms", models=["Qwen/Qwen3.8-27B"])
+    rule_ms = add_rule([ms["id"]], model_pattern="modelscope")
+    rules.update_rule(rule_ms["id"], {"is_default": True})  # 默认规则指向另一组上游
+    rule_ds = add_rule([ds["id"]], model_pattern="deepseek")  # pattern=规则名，不匹配模型
+    rules.upsert_role_route("chat_answer", rule_id=rule_ds["id"])
+    rule, ups = rules.select_upstreams("deepseek-v4-flash", role="chat_answer", rule_id=rule_ds["id"])
+    assert rule["id"] == rule_ds["id"]
+    assert [u["id"] for u in ups] == [ds["id"]]
+
+
+def test_role_route_unsupported_model_returns_empty_candidates():
+    """严格绑定：绑定规则内无上游支持该模型时返回空候选，
+    绝不跨规则静默回退到默认规则（避免 400 Invalid model id）。"""
+    ds = add_upstream("ds", models=["deepseek-v4-flash"])
+    ms = add_upstream("ms", models=["Qwen/Qwen3.8-27B"])
+    rule_ms = add_rule([ms["id"]], model_pattern="modelscope")
+    rules.update_rule(rule_ms["id"], {"is_default": True})
+    rule_ds = add_rule([ds["id"]], model_pattern="deepseek")
+    rules.upsert_role_route("chat_answer", rule_id=rule_ds["id"])
+    rule, ups = rules.select_upstreams("Qwen/Qwen3.8-27B", role="chat_answer", rule_id=rule_ds["id"])
+    assert rule["id"] == rule_ds["id"] and ups == []
+    # role 路由（未注入 rule_id）同语义
+    rule2, ups2 = rules.select_upstreams("Qwen/Qwen3.8-27B", role="chat_answer")
+    assert rule2["id"] == rule_ds["id"] and ups2 == []
+
+
+def test_prepare_503_message_carries_role_and_rule_context():
+    """严格绑定拒绝时，503 错误信息带 role/规则/模型上下文，便于定位。"""
+    ds = add_upstream("ds", models=["deepseek-v4-flash"])
+    rule_ds = add_rule([ds["id"]], model_pattern="deepseek")
+    rules.upsert_role_route("chat_answer", rule_id=rule_ds["id"])
+    key = keys.create_key("strict-503")
+    payload = {"model": "Qwen/Qwen3.8-27B",
+               "messages": [{"role": "user", "content": "合成测试"}], "stream": False,
+               "_gw_role": "chat_answer", "_gw_rule_id": rule_ds["id"]}
+    with pytest.raises(proxy.GatewayError) as exc:
+        proxy.prepare(payload, key["key"])
+    assert exc.value.status_code == 503
+    assert "chat_answer" in exc.value.message and "deepseek" in exc.value.message
+
+
+def test_unbound_role_prefers_supporting_rule_over_default():
+    """无 role 绑定时，按上游模型支持匹配选规则，
+    不得被默认规则接走后发往不支持的上游。"""
+    ms = add_upstream("ms", models=["Qwen/Qwen3.8-27B"])
+    ds = add_upstream("ds", models=["deepseek-v4-flash"])
+    rule_ms = add_rule([ms["id"]], model_pattern="modelscope")
+    rules.update_rule(rule_ms["id"], {"is_default": True})  # 默认规则只支持 Qwen
+    add_rule([ds["id"]], model_pattern="deepseek")
+    rule, ups = rules.select_upstreams("deepseek-v4-flash")
+    assert [u["id"] for u in ups] == [ds["id"]]
+    assert rule["model_pattern"] == "deepseek"
+
+
 @pytest.mark.parametrize("table,initial", [("wiki_compile_queue", "processing"), ("eval_runs", "running"), ("pipeline_runs", "running")])
 def test_proxy_metrics_must_not_reset_agent_tasks(table, initial):
     now = datetime.now().isoformat()

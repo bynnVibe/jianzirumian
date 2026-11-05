@@ -43,6 +43,8 @@ class UpstreamBody(BaseModel):
     api_key: str = ""
     # 成本层级：paid|free|subscription（free 且空 Base URL/Key 回退系统 OpenRouter）
     tier: str = "paid"
+    # 上游分类：llm|ocr|embedding|rerank（业务路由按 role→category 过滤候选上游）
+    category: str = "llm"
     # 模型清单（该上游可服务的模型名，图2「模型列表」）
     models: List[str] = []
     weight: int = 100
@@ -57,6 +59,7 @@ class UpstreamPatch(BaseModel):
     base_url: Optional[str] = None
     api_key: Optional[str] = None
     tier: Optional[str] = None
+    category: Optional[str] = None
     models: Optional[List[str]] = None
     weight: Optional[int] = None
     enabled: Optional[bool] = None
@@ -174,6 +177,8 @@ async def list_upstreams(_ops: dict = Depends(require_ops)):
     return {"success": True, "upstreams": up_svc.list_upstreams(),
             "protocols": list(up_svc.VALID_PROTOCOLS),
             "tiers": list(up_svc.TIERS),
+            "categories": list(up_svc.CATEGORIES),
+            "category_labels": dict(up_svc.CATEGORY_LABELS),
             "models": up_svc.all_model_names()}
 
 
@@ -317,6 +322,18 @@ async def my_rules(model: str = "", user: dict = Depends(get_current_user)):
     return {"success": True, "rules": slim}
 
 
+@router.get("/my-chat-models")
+async def my_chat_models(user: dict = Depends(get_current_user)):
+    """聊天页模型下拉：匹配路由规则（chat_answer 绑定 → 默认规则）的上游模型清单。
+
+    下拉只暴露该规则内的模型（选不了其他规则的模型）；选中即按该模型出网，
+    不选则由网关在规则内解析（业务路由固化模型 → 默认模型 → 规则内均衡）。
+    """
+    user_id = str(user.get("id") or user.get("username") or "")
+    info = rule_svc.resolve_chat_rule(user_id)
+    return {"success": True, **info}
+
+
 # ---------------------------------------------------------------------------
 # 密钥与配额管理
 # ---------------------------------------------------------------------------
@@ -336,6 +353,19 @@ async def create_key(body: KeyBody, ops: dict = Depends(require_ops)):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     # 明文 key 仅此次返回
+    return {"success": True, "key": info}
+
+
+@router.get("/keys/internal")
+async def internal_key_meta(_ops: dict = Depends(require_ops)):
+    """系统内部出网密钥配置现状（不含明文）：来源/存储/用量/启用状态。"""
+    return {"success": True, "meta": key_svc.get_internal_key_meta()}
+
+
+@router.post("/keys/internal/rotate")
+async def rotate_internal_key(ops: dict = Depends(require_ops)):
+    """轮换系统内部出网密钥（旧密钥立即失效；明文仅此次返回）。"""
+    info = key_svc.rotate_internal_key(created_by=ops.get("username") or ops.get("id") or "")
     return {"success": True, "key": info}
 
 
@@ -371,12 +401,12 @@ async def reset_key(key_id: str, _ops: dict = Depends(require_ops)):
 async def query_logs(
     key_id: str = "", model: str = "", channel_id: str = "", status: str = "",
     risk_level: str = "", keyword: str = "", start: str = "", end: str = "",
-    limit: int = 30, offset: int = 0, _ops: dict = Depends(require_ops),
+    role: str = "", limit: int = 30, offset: int = 0, _ops: dict = Depends(require_ops),
 ):
     result = log_svc.query_logs(
         key_id=key_id, model=model, channel_id=channel_id, status=status,
         risk_level=risk_level, keyword=keyword, start=start, end=end,
-        limit=limit, offset=offset)
+        role=role, limit=limit, offset=offset)
     return {"success": True, **result}
 
 

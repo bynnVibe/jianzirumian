@@ -21,19 +21,25 @@ export const useChatStore = defineStore('chat', () => {
   const currentResponse = ref('')
   const sources = ref([])
   const searchResults = ref([])
-  const generationPhase = ref('') // tool_start | rewriting | retrieving | reranking | gap_checking | rechecking | retrieved | not_found | searching | searched | generating | citations_checked
+  const generationPhase = ref('') // tool_start | ocr_retrieval | rewriting | retrieving | reranking | gap_checking | rechecking | retrieved | not_found | searching | searched | generating | citations_checked
   const phaseHistory = ref([]) // 本次对话经历过的阶段序列（供流水线进度条标记已完成步骤）
   const toolCalls = ref([]) // 本次对话附件工具调用结果 [{tool_name, filename, success, chunk_count}, ...]
   const editingDraft = ref(null) // 再编辑草稿 { text }，由 ChatInput 消费
   let controller = null
   let generationId = 0
   const pendingDone = ref(null) // 最近一次 done 事件数据（含 message_id）
+  const cacheHitInfo = ref(null) // 本轮是否命中语义缓存 { score }（命中则绕过检索路由直回）
+
+  // ---- Agent（复杂度分流）过程状态 ----
+  const agentPlan = ref([]) // Plan&Execute 步骤清单 [{tool, purpose, query}]
+  const agentThoughts = ref([]) // ReAct 思考链文本
+  const agentTools = ref([]) // 工具调用进度 [{tool, state, query, summary, index, total, purpose, failed}]
 
   // ---- 配置 ----
   const useKnowledge = ref(true)
   const useSearch = ref(false)
   const llmProvider = ref('')
-  const selectedRuleId = ref('') // 用户选择的路由规则（仅启用网关时生效）
+  const selectedModel = ref('') // 用户在聊天页显式选择的出网模型（仅限匹配规则上游模型；空=规则内均衡解析）
 
   // ---- 计算属性 ----
   const currentSession = computed(() => {
@@ -118,7 +124,7 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
-  async function sendMessage(query, files = []) {
+  async function sendMessage(query, files = [], options = {}) {
     if (isGenerating.value || (!query.trim() && !(files && files.length))) return
 
     // 初始化生成状态
@@ -129,6 +135,12 @@ export const useChatStore = defineStore('chat', () => {
     generationPhase.value = ''
     phaseHistory.value = []
     toolCalls.value = []
+    agentPlan.value = []
+    agentThoughts.value = []
+    agentTools.value = []
+    cacheHitInfo.value = null
+    resolveHitl() // 清除上一轮遗留的 HITL 卡片
+    const skipSearchPrompt = !!(options && options.skipSearchPrompt)
 
     let streamDoneReceived = false
     const requestId = ++generationId
@@ -161,7 +173,8 @@ export const useChatStore = defineStore('chat', () => {
               use_knowledge: useKnowledge.value,
               use_search: useSearch.value,
               llm_provider: llmProvider.value,
-              rule_id: selectedRuleId.value,
+              model: selectedModel.value,
+              skip_search_prompt: skipSearchPrompt,
             },
             files,
             requestController.signal,
@@ -172,7 +185,8 @@ export const useChatStore = defineStore('chat', () => {
             use_knowledge: useKnowledge.value,
             use_search: useSearch.value,
             llm_provider: llmProvider.value,
-            rule_id: selectedRuleId.value,
+            model: selectedModel.value,
+            skip_search_prompt: skipSearchPrompt,
           }, requestController.signal)
 
       await consumeChatStream(response, data => {
@@ -215,6 +229,8 @@ export const useChatStore = defineStore('chat', () => {
           use_knowledge: useKnowledge.value,
           use_search: useSearch.value,
           feedback: null,
+          cache_hit: !!cacheHitInfo.value,
+          cache_score: cacheHitInfo.value?.score || 0,
         })
       }
 
@@ -232,6 +248,9 @@ export const useChatStore = defineStore('chat', () => {
         break
       case 'status':
         generationPhase.value = data.phase || ''
+        if (data.phase === 'cache_hit') {
+          cacheHitInfo.value = { score: data.score || 0 }
+        }
         if (data.phase && phaseHistory.value[phaseHistory.value.length - 1] !== data.phase) {
           phaseHistory.value.push(data.phase)
         }
@@ -262,6 +281,39 @@ export const useChatStore = defineStore('chat', () => {
         currentResponse.value += data.content || ''
         break
 
+      case 'thought':
+        // ReAct 思考链：累积展示 Agent 的推理过程
+        if (data.text) agentThoughts.value.push(data.text)
+        break
+
+      case 'plan':
+        // Plan&Execute 步骤清单
+        agentPlan.value = Array.isArray(data.steps) ? data.steps : []
+        break
+
+      case 'tool':
+        handleAgentTool(data)
+        break
+
+      case 'need_search':
+        // HITL：知识库无结果、未开联网 → 弹卡询问是否联网搜索
+        pushHitlMessage({
+          type: 'need_search',
+          query: data.query || '',
+          message: data.message || '知识库中未检索到相关内容，是否联网搜索？',
+          reason: data.reason || '',
+        })
+        break
+
+      case 'clarify':
+        // HITL：证据不足且意图模糊 → 弹卡追问澄清
+        pushHitlMessage({
+          type: 'clarify',
+          question: data.question || '',
+          options: Array.isArray(data.options) ? data.options : [],
+        })
+        break
+
       case 'error':
         // LLM 错误 — 显示错误消息并立即结束；
         // 同时清理知识来源/搜索结果：生成失败时展示检索来源没有意义
@@ -280,6 +332,72 @@ export const useChatStore = defineStore('chat', () => {
   /** 将历史问题填入输入框再编辑（需求：问题再编辑） */
   function startReask(text) {
     editingDraft.value = { text }
+  }
+
+  // ---- HITL 卡片与 Agent 过程 ----
+
+  /** 把 HITL 卡片作为一条 assistant 消息推入列表（后端暂停时不落库，仅前端呈现） */
+  function pushHitlMessage(hitl) {
+    resolveHitl() // 先清除可能存在的旧卡片，避免重复
+    messages.value.push({
+      role: 'assistant',
+      content: '',
+      hitl: { ...hitl, pending: true },
+      sources: [],
+      search_results: [],
+    })
+  }
+
+  /** 移除消息列表中所有待处理的 HITL 卡片 */
+  function resolveHitl() {
+    if (messages.value.some((m) => m.role === 'assistant' && m.hitl)) {
+      messages.value = messages.value.filter((m) => !(m.role === 'assistant' && m.hitl))
+    }
+  }
+
+  /** 记录 Agent 工具调用进度（start/end 配对） */
+  function handleAgentTool(data) {
+    if (data.state === 'start') {
+      agentTools.value.push({
+        tool: data.tool,
+        state: 'start',
+        query: (data.args && data.args.query) || '',
+        index: data.index,
+        total: data.total,
+        purpose: data.purpose || '',
+      })
+    } else {
+      const last = [...agentTools.value].reverse().find((x) => x.tool === data.tool && x.state === 'start')
+      if (last) {
+        last.state = 'end'
+        last.summary = data.summary || ''
+        last.failed = !!data.failed
+      }
+    }
+  }
+
+  /** HITL「联网搜索」：开启联网后重发原问题（后端视作新一轮，会再次落库用户消息） */
+  async function resendWithSearch(query) {
+    if (isGenerating.value) return
+    const prev = useSearch.value
+    useSearch.value = true
+    try {
+      await sendMessage(query || '')
+    } finally {
+      useSearch.value = prev
+    }
+  }
+
+  /** HITL「直接回答」：带 skip_search_prompt 重发，不再询问、用模型自身知识作答 */
+  async function answerWithoutSearch(query) {
+    if (isGenerating.value) return
+    await sendMessage(query || '', [], { skipSearchPrompt: true })
+  }
+
+  /** HITL 澄清选项：作为新的用户消息发送 */
+  async function sendClarifyOption(text) {
+    if (isGenerating.value || !text) return
+    await sendMessage(text)
   }
 
   function stopGeneration() {
@@ -334,11 +452,15 @@ export const useChatStore = defineStore('chat', () => {
     phaseHistory,
     toolCalls,
     editingDraft,
+    cacheHitInfo,
+    agentPlan,
+    agentThoughts,
+    agentTools,
     // 配置
     useKnowledge,
     useSearch,
     llmProvider,
-    selectedRuleId,
+    selectedModel,
     // 计算
     currentSession,
     // 方法
@@ -350,6 +472,10 @@ export const useChatStore = defineStore('chat', () => {
     stopGeneration,
     updateAction,
     startReask,
+    resendWithSearch,
+    answerWithoutSearch,
+    sendClarifyOption,
+    resolveHitl,
     clearMessages,
     clearAllSessionData,
   }

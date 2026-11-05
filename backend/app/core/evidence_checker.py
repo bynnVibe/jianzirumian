@@ -22,7 +22,7 @@ logger = logging.getLogger("jianziruyang.evidence_checker")
 SELF_RAG_ENABLED = True
 
 # 证据判断的超时时间（秒）：超时时按"证据充分"处理，不拖慢回答
-CHECK_TIMEOUT = 15
+CHECK_TIMEOUT = 10
 
 # 送入证据判断的上下文最大长度（截断以控制判断调用成本）
 MAX_CONTEXT_CHARS = 4000
@@ -64,7 +64,7 @@ async def check_evidence_sufficiency(
             "role": "user",
             "content": (
                 f"【用户问题】\n{query}\n\n"
-                f"【知识库证据】\n{context_text[:MAX_CONTEXT_CHARS]}"
+                f"【知识库证据】\n{context_text[:MAX_CONTEXT_CHARS]}\n/no_think"
             ),
         },
     ]

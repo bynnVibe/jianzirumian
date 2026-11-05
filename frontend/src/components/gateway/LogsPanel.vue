@@ -30,6 +30,10 @@
         <option value="high">高</option>
         <option value="critical">严重</option>
       </select>
+      <select v-model="filters.role" class="field-input">
+        <option value="">全部场景</option>
+        <option v-for="(label, r) in ROLE_LABELS" :key="r" :value="r">{{ label }}</option>
+      </select>
       <input v-model.trim="filters.model" class="field-input" placeholder="模型名" @keyup.enter="reload" />
       <select v-model="filters.key_id" class="field-input">
         <option value="">全部密钥</option>
@@ -50,8 +54,9 @@
     <div v-else class="log-list">
       <div v-for="row in logs" :key="row.id" class="log-item">
         <div class="log-row" @click="toggleExpand(row)">
-          <span class="risk-tag" :class="`risk-${row.risk_level}`">{{ riskLabel(row.risk_level) }}</span>
+          <span class="risk-tag" :class="headBadge(row).cls">{{ headBadge(row).text }}</span>
           <span class="status-tag" :class="`st-${row.status}`">{{ statusLabel(row.status) }}</span>
+          <span v-if="row.role" class="scene-tag" :title="`业务场景 role=${row.role}`">{{ roleLabel(row.role) }}</span>
           <span class="log-code mono">{{ row.status_code || '-' }}</span>
           <span class="log-key">{{ row.key_name || '匿名' }}</span>
           <span class="log-model mono">{{ row.model_requested }}<template v-if="row.model_mapped && row.model_mapped !== row.model_requested"> → {{ row.model_mapped }}</template></span>
@@ -98,6 +103,7 @@
             <div class="detail-grid">
               <div class="detail-block">
                 <h4 class="detail-title">上游路由</h4>
+                <div class="kv"><span>业务场景</span><strong>{{ detail.role ? roleLabel(detail.role) : '-' }}<template v-if="detail.role">（role={{ detail.role }}）</template></strong></div>
                 <div class="kv"><span>规则</span><strong>{{ detail.channel_name || '-' }}</strong></div>
                 <div class="kv"><span>URL</span><code class="mono">{{ detail.upstream_url || '-' }}</code></div>
                 <div class="kv"><span>流式</span><strong>{{ detail.stream ? '是' : '否' }}</strong></div>
@@ -145,6 +151,7 @@ import {
   listGatewayKeys, listGatewayRoutingRules,
 } from '@/api'
 import TraceFlow from './TraceFlow.vue'
+import { roleLabel, ROLE_LABELS } from '@/utils/roleLabels'
 
 const PAGE_SIZE = 30
 const logs = ref([])
@@ -158,7 +165,7 @@ const detailLoading = ref(false)
 const keyOptions = ref([])
 const channelOptions = ref([])
 
-const filters = reactive({ keyword: '', status: '', risk_level: '', model: '', key_id: '', channel_id: '' })
+const filters = reactive({ keyword: '', status: '', risk_level: '', role: '', model: '', key_id: '', channel_id: '' })
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / PAGE_SIZE)))
 
 const RISK_LABELS = { none: '无风险', low: '低', medium: '中', high: '高', critical: '严重' }
@@ -167,6 +174,12 @@ const AUDIT_LABELS = { warn: '警告', mask: '已脱敏', block: '已阻断', ''
 const SEV_LABELS = { low: '低危', medium: '中危', high: '高危', critical: '严重' }
 function riskLabel(l) { return RISK_LABELS[l] || l }
 function statusLabel(s) { return STATUS_LABELS[s] || s }
+// 行头徽标：命中安全风险 → 风险等级；否则调用失败 → 「调用异常」；正常才显示「无风险」（修复失败却标无风险的逻辑矛盾）
+function headBadge(row) {
+  if (row.risk_level && row.risk_level !== 'none') return { cls: `risk-${row.risk_level}`, text: riskLabel(row.risk_level) }
+  if (row.status !== 'ok') return { cls: 'risk-abnormal', text: '调用异常' }
+  return { cls: 'risk-none', text: '无风险' }
+}
 function auditLabel(a) { return AUDIT_LABELS[a] || a }
 function sevLabel(s) { return SEV_LABELS[s] || s }
 function formatNum(n) { return (n || 0).toLocaleString('en-US') }
@@ -198,7 +211,7 @@ async function load() {
 }
 function reload() { page.value = 1; expanded.value = null; detail.value = null; load() }
 function resetFilters() {
-  Object.assign(filters, { keyword: '', status: '', risk_level: '', model: '', key_id: '', channel_id: '' })
+  Object.assign(filters, { keyword: '', status: '', risk_level: '', role: '', model: '', key_id: '', channel_id: '' })
   reload()
 }
 function goPage(p) { page.value = p; expanded.value = null; detail.value = null; load() }
@@ -263,6 +276,8 @@ onMounted(async () => { await Promise.all([loadOptions(), load()]) })
 .risk-medium { background: #fdf0d9; color: #b8802a; }
 .risk-high { background: #fbe7d9; color: #c1622a; }
 .risk-critical { background: #fbe4e3; color: #c0392b; }
+.risk-abnormal { background: #fbe4e3; color: #c0392b; border: 1px dashed #e0a49e; }
+.scene-tag { font-size: 10.5px; font-weight: 600; padding: 2px 8px; border-radius: 8px; background: #eef2f7; color: #4a6fa5; white-space: nowrap; }
 .status-tag { font-size: 10.5px; font-weight: 700; padding: 2px 8px; border-radius: 8px; }
 .st-ok { background: #e4f4e8; color: #3d8b52; }
 .st-error { background: #fbe4e3; color: #c0392b; }

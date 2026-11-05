@@ -254,6 +254,7 @@
                   <span class="status-err">✗ 解析失败</span>
                 </template>
               </span>
+              <span v-if="duplicateHints[f.id]" class="fi-dup" :title="duplicateHints[f.id].message">⚠ 重复来源</span>
             </div>
             <div v-if="f.status === 'uploading'" class="progress-track">
               <div class="progress-fill" :style="{ width: f.progress + '%' }"></div>
@@ -379,7 +380,14 @@
         <!-- 选中项：处理效果检查 / 编辑 / 入库 -->
         <div v-if="detail" class="review-panel">
           <div class="review-head">
-            <span class="review-title">处理效果检查 · {{ detail.filename }}</span>
+            <div class="review-head-row">
+              <span class="review-title">处理效果检查 · {{ detail.filename }}</span>
+              <button class="review-close" @click="closeDetail" aria-label="关闭" title="关闭面板（有未保存修改会二次确认）">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
+                  <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+                </svg>
+              </button>
+            </div>
             <input
               v-if="detail.source_type !== 'url'"
               v-model="ingestTitle"
@@ -400,10 +408,20 @@
           </template>
 
           <template v-else-if="detail.source_type === 'image'">
-            <!-- 图片：原图对照 + 可编辑 OCR 文本 -->
+            <!-- 图片：原图对照 + 可编辑 OCR 文本（润色版本可回溯） -->
             <div class="review-image-row">
               <img :src="buildImageUrl(detail.file_path)" class="review-thumb" alt="原始图片" />
-              <textarea v-model="detail.parsed_text" class="ocr-textarea" rows="12" placeholder="OCR 识别文本"></textarea>
+              <div class="image-text-col">
+                <div class="doc-page-actions">
+                  <button
+                    v-if="textVersions().length"
+                    class="btn btn-sm btn-outline"
+                    title="OCR 文本润色/恢复版本历史，可回溯恢复"
+                    @click="openVersionModal(textKey(), 'OCR 文本')"
+                  >版本 {{ textVersions().length }}</button>
+                </div>
+                <textarea v-model="detail.parsed_text" class="ocr-textarea" rows="12" placeholder="OCR 识别文本"></textarea>
+              </div>
             </div>
           </template>
 
@@ -432,6 +450,12 @@
                       target="_blank"
                       class="btn btn-sm btn-outline"
                     >预览</a>
+                    <button
+                      v-if="pageVersions(page).length"
+                      class="btn btn-sm btn-outline"
+                      :title="`第 ${page.page_number} 页润色/恢复版本历史，可回溯恢复`"
+                      @click="openVersionModal(pageKey(page), `第 ${page.page_number} 页`)"
+                    >版本 {{ pageVersions(page).length }}</button>
                     <button
                       class="btn btn-sm btn-primary"
                       :disabled="polishingPages.has(page.page_number)"
@@ -598,6 +622,38 @@
         <div class="crop-modal-footer">
           <button class="btn btn-secondary" @click="skipCrop">不裁剪，使用原图</button>
           <button class="btn btn-primary" @click="confirmCrop">确认裁剪</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 片段版本弹窗：一键润色/恢复前后状态留档，可预览并回溯恢复 -->
+    <div v-if="versionModal" class="preview-modal" @click.self="versionModal = null">
+      <div class="preview-modal-content kb-modal version-modal">
+        <div class="preview-modal-header">
+          <h3>片段版本 · {{ versionModal.title }}</h3>
+          <button class="modal-close" @click="versionModal = null" aria-label="关闭">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
+              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+            </svg>
+          </button>
+        </div>
+        <p class="version-hint">每次「一键润色」「恢复」都会自动留档改动前后的片段状态；可预览任意版本并一键回溯恢复。</p>
+        <div class="version-list">
+          <div v-for="v in versionModalItems" :key="v.seq" class="version-item">
+            <div class="version-item-head">
+              <span class="version-seq">#{{ v.seq }}</span>
+              <span class="version-label">{{ v.label }}</span>
+              <span class="version-at">{{ v.at }} · {{ v.text.length }} 字</span>
+              <span class="version-item-ops">
+                <button class="btn btn-sm btn-outline" @click="previewSeq = previewSeq === v.seq ? 0 : v.seq">
+                  {{ previewSeq === v.seq ? '收起' : '预览' }}
+                </button>
+                <button class="btn btn-sm btn-primary" @click="restoreVersion(v)">恢复此版本</button>
+              </span>
+            </div>
+            <pre v-if="previewSeq === v.seq" class="version-preview">{{ v.text }}</pre>
+          </div>
+          <div v-if="!versionModalItems.length" class="version-empty">暂无留档版本。</div>
         </div>
       </div>
     </div>
@@ -874,6 +930,8 @@ const docDragOver = ref(false)
 // ---- 文件列表：本地上传中条目 + 服务端待处理条目 ----
 const uploadingItems = ref([])
 const serverItems = ref([])
+// 重复入库预警：按待入库条目 id 缓存上传时命中的重复来源提示（轮询刷新不丢失）
+const duplicateHints = ref({})
 const fileList = computed(() => [...uploadingItems.value, ...serverItems.value])
 
 // ---- 状态提示 ----
@@ -1082,7 +1140,13 @@ async function uploadBatchItem(idx) {
     if (res.data?.item && !serverItems.value.some((s) => s.id === res.data.item.id)) {
       serverItems.value.unshift(res.data.item)
     }
-    showStatus(`《${bf.name}》上传成功，后台正在解析…`, 'success')
+    // 重复入库校验：入口命中既有来源则预警（同库重复入库会在确认入库时拦截）
+    if (res.data?.duplicate?.found && res.data?.item?.id) {
+      duplicateHints.value[res.data.item.id] = res.data.duplicate
+      showStatus(res.data.duplicate.message, 'warning')
+    } else {
+      showStatus(`《${bf.name}》上传成功，后台正在解析…`, 'success')
+    }
     refreshPending()
     // 已上传的条目进入下方统一文件列表，待选列表自动移除
     setTimeout(() => {
@@ -1426,7 +1490,13 @@ async function uploadOne(file, type, displayName) {
     if (res.data?.item && !serverItems.value.some((s) => s.id === res.data.item.id)) {
       serverItems.value.unshift(res.data.item)
     }
-    showStatus(`《${displayName}》上传成功，后台正在解析…`, 'success')
+    // 重复入库校验：入口命中既有来源则预警（同库重复入库会在确认入库时拦截）
+    if (res.data?.duplicate?.found && res.data?.item?.id) {
+      duplicateHints.value[res.data.item.id] = res.data.duplicate
+      showStatus(res.data.duplicate.message, 'warning')
+    } else {
+      showStatus(`《${displayName}》上传成功，后台正在解析…`, 'success')
+    }
     refreshPending()
   } catch (e) {
     const it = uploadingItems.value.find((x) => x.localId === localId)
@@ -1589,6 +1659,7 @@ async function selectItem(item) {
     const res = await (item.source_type === 'url' ? getUrlImport(item.id) : getPendingUpload(item.id))
     if (request !== detailRequest || !pageAlive) return
     detail.value = res.data.item
+    archiveVersions(detail.value)
     if (item.source_type === 'url' && !canWriteUrlTarget.value) {
       const target = kbList.value.find(kb => kb.visibility === 'private' && kb.owner_id === auth.user?.id)
       selectedKbId.value = target?.id || ''
@@ -1607,10 +1678,103 @@ function clearDetail() {
   ingestTitle.value = ''
 }
 
+// 关闭「处理效果检查」面板：有未保存修改时先二次确认，与切 tab / 离开路由行为一致
+function closeDetail() {
+  if (!allowLeave()) return
+  clearDetail()
+}
+
 const detailTextLength = computed(() => {
   if (!detail.value?.pages?.length) return 0
   return detail.value.pages.reduce((sum, p) => sum + (p.text || '').length, 0)
 })
+
+// ---- 片段版本留档（润色/恢复前后状态可回溯） ----
+// key = `${itemId}#page-${n}`（文档页）/ `${itemId}#text`（图片 OCR 文本）；
+// 会话内内存留档：每次润色/恢复自动记录改动前后状态，入库成功后清理。
+const fragmentVersions = reactive({})
+const versionModal = ref(null) // { key, title }
+const previewSeq = ref(0)
+
+const versionModalItems = computed(() => {
+  if (!versionModal.value) return []
+  return [...(fragmentVersions[versionModal.value.key] || [])].sort((a, b) => b.seq - a.seq)
+})
+
+function pageKey(page) { return `${detail.value.id}#page-${page.page_number}` }
+function textKey() { return `${detail.value.id}#text` }
+function pageVersions(page) { return fragmentVersions[pageKey(page)] || [] }
+function textVersions() { return fragmentVersions[textKey()] || [] }
+
+function fmtVersionTime() {
+  const d = new Date()
+  const p = (n) => String(n).padStart(2, '0')
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+}
+
+function pushVersion(key, label, text) {
+  const list = fragmentVersions[key] || (fragmentVersions[key] = [])
+  list.push({ seq: list.length + 1, label, at: fmtVersionTime(), text })
+}
+
+function archiveVersions(item) {
+  // 加载解析结果时留档基线版本；已有留档（切换选中再回来）不重置
+  if (!item) return
+  if (item.source_type === 'image') {
+    const key = `${item.id}#text`
+    if (!fragmentVersions[key]?.length) pushVersion(key, '原始解析文本', item.parsed_text || '')
+  }
+  for (const p of item.pages || []) {
+    const key = `${item.id}#page-${p.page_number}`
+    if (!fragmentVersions[key]?.length) pushVersion(key, '原始解析文本', p.text || '')
+  }
+}
+
+function openVersionModal(key, title) {
+  previewSeq.value = 0
+  versionModal.value = { key, title }
+}
+
+function currentTextOf(key) {
+  const d = detail.value
+  if (!d) return ''
+  if (key.endsWith('#text')) return d.parsed_text || ''
+  const n = Number(key.split('#page-')[1])
+  return (d.pages || []).find((p) => p.page_number === n)?.text || ''
+}
+
+function applyVersionText(key, text) {
+  const d = detail.value
+  if (!d) return
+  if (key.endsWith('#text')) {
+    d.parsed_text = text
+    return
+  }
+  const n = Number(key.split('#page-')[1])
+  const page = (d.pages || []).find((p) => p.page_number === n)
+  if (page) page.text = text
+}
+
+function restoreVersion(v) {
+  const key = versionModal.value?.key
+  if (!key) return
+  const list = fragmentVersions[key] || []
+  const cur = currentTextOf(key)
+  const last = list[list.length - 1]
+  // 当前文本若不在留档中（含手动编辑），先快照避免丢失
+  if (!last || last.text !== cur) pushVersion(key, '恢复前快照（含手动编辑）', cur)
+  applyVersionText(key, v.text)
+  pushVersion(key, `恢复自 #${v.seq}（${v.label}）`, v.text)
+  previewSeq.value = 0
+  showStatus(`已恢复 #${v.seq}（${v.label}），可直接入库或继续编辑`, 'success')
+}
+
+function clearVersions(itemId) {
+  for (const key of Object.keys(fragmentVersions)) {
+    if (key.startsWith(`${itemId}#`)) delete fragmentVersions[key]
+  }
+  if (versionModal.value?.key.startsWith(`${itemId}#`)) versionModal.value = null
+}
 
 // ---- 润色 ----
 async function polishImageText() {
@@ -1619,8 +1783,11 @@ async function polishImageText() {
   try {
     const res = await polishOCR(detail.value.parsed_text)
     if (res.data.success && res.data.polished_text) {
+      const key = textKey()
+      pushVersion(key, '润色前', detail.value.parsed_text)
       detail.value.parsed_text = res.data.polished_text
-      showStatus('润色完成，请检查后入库', 'success')
+      pushVersion(key, '润色后', detail.value.parsed_text)
+      showStatus('润色完成，润色前版本已留档，可点「版本」回溯', 'success')
     } else {
       showStatus(res.data.message || '润色失败', 'error')
     }
@@ -1637,8 +1804,11 @@ async function polishPage(page) {
   try {
     const res = await polishOCR(page.text)
     if (res.data.success && res.data.polished_text) {
+      const key = pageKey(page)
+      pushVersion(key, '润色前', page.text)
       page.text = res.data.polished_text
-      showStatus(`第 ${page.page_number} 页润色完成`, 'success')
+      pushVersion(key, '润色后', page.text)
+      showStatus(`第 ${page.page_number} 页润色完成，润色前版本已留档，可点「版本」回溯`, 'success')
     } else {
       showStatus(res.data.message || '润色失败', 'error')
     }
@@ -1694,10 +1864,17 @@ async function ingestSelected() {
       `《${title}》已入库：${data.chunk_count} 个知识片段，后台正在编译 llm-wiki 百科卡片`,
       'success'
     )
+    clearVersions(detail.value.id)
     clearDetail()
   } catch (e) {
     ingestProgress.value.fail = 1
-    showStatus('入库失败：' + (e.response?.data?.detail || e.message), 'error')
+    const detail = e.response?.data?.detail || e.message
+    // 409 = 重复入库：直接展示后端提示（不再重复入库），区别于一般入库失败
+    if (e.response?.status === 409) {
+      showStatus(detail, 'warning')
+    } else {
+      showStatus('入库失败：' + detail, 'error')
+    }
   } finally {
     ingestProgress.value.finished = true
     ingestBusy.value = false
@@ -1731,6 +1908,7 @@ async function ingestAll() {
         fail++
         ingestProgress.value.fail = fail
       }
+      clearVersions(detail.value.id)
       clearDetail()
     }
     for (const item of targets) {
@@ -1740,6 +1918,7 @@ async function ingestAll() {
       try {
         await ingestPendingUpload(item.id, { kb_id: selectedKbId.value })
         serverItems.value = serverItems.value.filter((x) => x.id !== item.id)
+        clearVersions(item.id)
         ok++
         ingestProgress.value.done = ok
       } catch (e) {
@@ -2052,7 +2231,13 @@ onUnmounted(() => {
   background: #fdfbf7; padding: 14px;
 }
 .review-head { margin-bottom: 12px; display: flex; flex-direction: column; gap: 8px; }
+.review-head-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .review-title { font-size: 13.5px; font-weight: 700; color: #2d2a24; }
+.review-close {
+  background: none; border: none; color: #8a7e72; cursor: pointer; padding: 4px;
+  border-radius: 6px; display: flex; flex-shrink: 0;
+}
+.review-close:hover { background: #f3ece2; color: #2d2a24; }
 .review-error {
   font-size: 13px; color: #b05555; background: #f9e2e2; border-radius: 8px;
   padding: 10px 12px; margin-bottom: 10px; line-height: 1.5;
@@ -2082,6 +2267,21 @@ onUnmounted(() => {
 }
 .doc-page-title { font-size: 12.5px; font-weight: 700; color: #84431f; }
 .doc-page-actions { display: flex; gap: 6px; }
+.image-text-col { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.image-text-col .doc-page-actions { justify-content: flex-end; }
+
+/* 片段版本留档弹窗 */
+.version-modal { width: 760px; max-width: 92vw; }
+.version-hint { font-size: 12px; color: #9a8a76; margin: 0 0 10px; }
+.version-list { display: flex; flex-direction: column; gap: 8px; max-height: 58vh; overflow-y: auto; }
+.version-item { border: 1px solid #e8dcc8; border-radius: 10px; padding: 8px 10px; background: #fdfaf4; }
+.version-item-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12.5px; }
+.version-seq { font-weight: 700; color: #c98a4b; }
+.version-label { font-weight: 600; }
+.version-at { color: #9a8a76; font-size: 11.5px; }
+.version-item-ops { margin-left: auto; display: flex; gap: 6px; }
+.version-preview { margin: 8px 0 0; padding: 8px 10px; background: #f6efe3; border-radius: 8px; font-size: 12px; line-height: 1.7; max-height: 240px; overflow: auto; white-space: pre-wrap; word-break: break-all; }
+.version-empty { color: #9a8a76; font-size: 12.5px; text-align: center; padding: 18px 0; }
 .doc-page-textarea {
   width: 100%; padding: 8px 10px; border-radius: 8px; font-size: 13px; line-height: 1.7;
   border: 1px solid #ede6dc; background: #fdfbf7; color: #2d2a24; outline: none;
@@ -2237,6 +2437,11 @@ onUnmounted(() => {
 }
 .status-toast.success { background: #5a8a4a; }
 .status-toast.error { background: #b05555; }
+.status-toast.warning { background: #c08a3e; }
+.fi-dup {
+  color: #a9713a; background: #fff3e0; border: 1px solid #f0d9b5;
+  border-radius: 6px; padding: 0 6px; font-size: 11px; white-space: nowrap;
+}
 
 /* ---------- 批量条目缩略图 ---------- */
 .batch-thumb {

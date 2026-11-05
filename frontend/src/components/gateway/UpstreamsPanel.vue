@@ -23,61 +23,75 @@
     </div>
 
     <template v-else>
-      <div class="count-line">共 {{ upstreams.length }} 个上游</div>
-      <table class="up-table">
-        <thead>
-          <tr>
-            <th>名称</th><th>层级</th><th>状态</th><th class="num">权重</th>
-            <th class="num">延迟</th><th class="num">模型数</th><th class="act">操作</th>
-          </tr>
-        </thead>
-        <tbody v-for="u in upstreams" :key="u.id">
-          <tr :class="{ 'row-disabled': !u.enabled }">
-            <td>
-              <div class="up-name">{{ u.name }}</div>
-              <div class="up-url mono">{{ u.base_url || (u.tier === 'free' ? '系统 OpenRouter 回退' : '—') }}</div>
-              <div v-if="u.last_error" class="up-err" :title="u.last_error">最近错误：{{ u.last_error }}</div>
-            </td>
-            <td><span class="tier-pill" :class="`t-${u.tier}`">{{ tierLabel(u.tier) }}</span></td>
-            <td>
-              <span class="health-pill" :class="`h-${u.health}`">{{ healthLabel(u.health) }}</span>
-              <span v-if="!u.enabled" class="disabled-pill">已禁用</span>
-            </td>
-            <td class="num">
-              <input class="weight-input" type="number" min="1" :value="u.weight"
-                     :disabled="testing === u.id" @change="onWeightChange(u, $event)" />
-            </td>
-            <td class="num">{{ u.latency_ms ? u.latency_ms + 'ms' : '—' }}</td>
-            <td class="num">
-              <span class="model-count" :title="(u.models || []).join(', ')">{{ u.model_count || 0 }}</span>
-            </td>
-            <td class="act">
-              <button class="btn btn-ghost sm" @click="onToggleEnabled(u)">{{ u.enabled ? '禁用' : '启用' }}</button>
-              <button class="btn btn-ghost sm" @click="openEdit(u)">编辑</button>
-              <button class="btn btn-ghost sm" @click="onClone(u)">克隆</button>
-              <button class="btn btn-ghost sm" :disabled="testing === u.id" @click="onTest(u)">
-                {{ testing === u.id ? '测试中…' : '测试' }}
-              </button>
-              <button v-if="u.health !== 'healthy'" class="btn btn-ghost sm" @click="onResetHealth(u)">重置健康</button>
-              <button class="btn btn-danger sm" @click="onDelete(u)">删除</button>
-            </td>
-          </tr>
-          <tr v-if="testResults[u.id]" class="test-row">
-            <td colspan="7">
-              <div class="test-banner" :class="testResults[u.id].success ? 'ok' : 'fail'">
-                <div class="test-summary">{{ testResults[u.id].success ? '✓' : '✕' }} {{ testResults[u.id].message }}</div>
-                <ul v-if="testResults[u.id].results && testResults[u.id].results.length" class="test-models">
-                  <li v-for="r in testResults[u.id].results" :key="r.model" :class="r.success ? 'ok' : 'fail'">
-                    <span class="t-mark">{{ r.success ? '✓' : '✕' }}</span>
-                    <span class="t-model mono">{{ r.model }}</span>
-                    <span class="t-msg">{{ r.message }}</span>
-                  </li>
-                </ul>
-              </div>
-            </td>
-          </tr>
-        </tbody>
-      </table>
+      <div class="count-line">
+        共 {{ upstreams.length }} 个上游
+        <span v-for="g in groups" :key="g.key" class="count-seg">· {{ g.label }} {{ g.items.length }}</span>
+      </div>
+      <div v-for="g in groups" :key="g.key" class="cat-group">
+        <button type="button" class="cat-head" @click="toggleCat(g.key)">
+          <svg class="chevron" :class="{ open: !collapsed[g.key] }" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2" width="16" height="16"><polyline points="9 18 15 12 9 6"/></svg>
+          <span class="cat-title">{{ g.label }} 模型</span>
+          <span class="cat-badge">{{ g.items.length }}</span>
+        </button>
+        <table v-show="!collapsed[g.key]" class="up-table">
+          <thead>
+            <tr>
+              <th>名称</th><th>层级</th><th>状态</th><th class="num">权重</th>
+              <th class="num">延迟</th><th class="num">模型数</th><th class="act">操作</th>
+            </tr>
+          </thead>
+          <tbody v-for="u in g.items" :key="u.id">
+            <tr :class="{ 'row-disabled': !u.enabled }">
+              <td>
+                <div class="up-name">{{ u.name }}</div>
+                <div class="up-url mono">{{ u.base_url || (u.tier === 'free' ? '系统 OpenRouter 回退' : '—') }}</div>
+                <div v-if="u.last_error" class="up-err" :title="u.last_error">最近错误：{{ u.last_error }}</div>
+              </td>
+              <td><span class="tier-pill" :class="`t-${u.tier}`">{{ tierLabel(u.tier) }}</span></td>
+              <td>
+                <span class="health-pill" :class="`h-${u.health}`">{{ healthLabel(u.health) }}</span>
+                <span v-if="!u.enabled" class="disabled-pill">已禁用</span>
+              </td>
+              <td class="num">
+                <input class="weight-input" type="number" min="1" :value="u.weight"
+                       :disabled="testing === u.id" @change="onWeightChange(u, $event)" />
+              </td>
+              <td class="num">{{ u.latency_ms ? u.latency_ms + 'ms' : '—' }}</td>
+              <td class="num">
+                <span class="model-count" :title="(u.models || []).join(', ')">{{ u.model_count || 0 }}</span>
+              </td>
+              <td class="act">
+                <button class="btn btn-ghost sm" @click="onToggleEnabled(u)">{{ u.enabled ? '禁用' : '启用' }}</button>
+                <button class="btn btn-ghost sm" @click="openEdit(u)">编辑</button>
+                <button class="btn btn-ghost sm" @click="onClone(u)">克隆</button>
+                <button class="btn btn-ghost sm" :disabled="testing === u.id" @click="onTest(u)">
+                  {{ testing === u.id ? '测试中…' : '测试' }}
+                </button>
+                <button v-if="u.health !== 'healthy'" class="btn btn-ghost sm" @click="onResetHealth(u)">重置健康</button>
+                <button class="btn btn-danger sm" @click="onDelete(u)">删除</button>
+              </td>
+            </tr>
+            <tr v-if="testResults[u.id]" class="test-row">
+              <td colspan="7">
+                <div class="test-banner" :class="testResults[u.id].success ? 'ok' : 'fail'">
+                  <div class="test-summary">{{ testResults[u.id].success ? '✓' : '✕' }} {{ testResults[u.id].message }}</div>
+                  <ul v-if="testResults[u.id].results && testResults[u.id].results.length" class="test-models">
+                    <li v-for="r in testResults[u.id].results" :key="r.model" :class="r.success ? 'ok' : 'fail'">
+                      <span class="t-mark">{{ r.success ? '✓' : '✕' }}</span>
+                      <span class="t-model mono">{{ r.model }}</span>
+                      <span class="t-msg">{{ r.message }}</span>
+                    </li>
+                  </ul>
+                </div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <div v-if="!collapsed[g.key] && !g.items.length" class="mini-empty sm">
+          该类别暂无上游，点击「+ 添加上游」并选择类别「{{ g.label }}」。
+        </div>
+      </div>
     </template>
 
     <!-- 添加/编辑上游弹窗（图2） -->
@@ -101,6 +115,12 @@
             <span class="field-label">API Key</span>
             <input v-model.trim="form.api_key" type="password" class="field-input"
                    :placeholder="editing && form.has_api_key ? `已配置（${form.api_key_masked}），留空不修改` : '上游厂商密钥'" />
+          </label>
+          <label class="field">
+            <span class="field-label">类别</span>
+            <select v-model="form.category" class="field-input">
+              <option v-for="c in categories" :key="c" :value="c">{{ categoryLabels[c] || c }}</option>
+            </select>
           </label>
           <label class="field">
             <span class="field-label">类型（协议）</span>
@@ -176,7 +196,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import {
   listGatewayUpstreams, createGatewayUpstream, updateGatewayUpstream,
   deleteGatewayUpstream, cloneGatewayUpstream, testGatewayUpstream,
@@ -191,12 +211,23 @@ const errorMsg = ref('')
 const testing = ref('')
 const testResults = ref({})
 
+// 上游分类（后端 GET /upstreams 返回 categories/category_labels）：按类别分组折叠展示
+const categories = ref(['llm', 'ocr', 'embedding', 'rerank'])
+const categoryLabels = ref({ llm: 'LLM', ocr: 'OCR', embedding: 'Embedding', rerank: 'ReRank' })
+const collapsed = reactive({})
+const groups = computed(() => categories.value.map((key) => ({
+  key,
+  label: categoryLabels.value[key] || key,
+  items: upstreams.value.filter((u) => (u.category || 'llm') === key),
+})))
+function toggleCat(key) { collapsed[key] = !collapsed[key] }
+
 const showModal = ref(false)
 const editing = ref(null)
 const saving = ref(false)
 const formError = ref('')
 const form = reactive({
-  name: '', protocol: 'openai', base_url: '', api_key: '', tier: 'paid',
+  name: '', protocol: 'openai', base_url: '', api_key: '', tier: 'paid', category: 'llm',
   modelsText: '', weight: 100, enabled: true, remark: '',
   has_api_key: false, api_key_masked: '',
 })
@@ -219,6 +250,8 @@ async function load() {
     upstreams.value = res.data.upstreams || []
     protocols.value = res.data.protocols || ['openai']
     tiers.value = res.data.tiers || ['paid', 'free', 'subscription']
+    categories.value = res.data.categories || ['llm', 'ocr', 'embedding', 'rerank']
+    categoryLabels.value = res.data.category_labels || categoryLabels.value
   } catch (e) {
     errorMsg.value = e.response?.data?.detail || '加载上游失败'
   } finally {
@@ -228,7 +261,7 @@ async function load() {
 
 function resetForm() {
   Object.assign(form, {
-    name: '', protocol: 'openai', base_url: '', api_key: '', tier: 'paid',
+    name: '', protocol: 'openai', base_url: '', api_key: '', tier: 'paid', category: 'llm',
     modelsText: '', weight: 100, enabled: true, remark: '',
     has_api_key: false, api_key_masked: '',
   })
@@ -241,7 +274,8 @@ function openEdit(u) {
   editing.value = u.id
   Object.assign(form, {
     name: u.name, protocol: u.protocol || 'openai', base_url: u.base_url || '',
-    api_key: '', tier: u.tier || 'paid', modelsText: (u.models || []).join(', '),
+    api_key: '', tier: u.tier || 'paid', category: u.category || 'llm',
+    modelsText: (u.models || []).join(', '),
     weight: u.weight || 100, enabled: !!u.enabled, remark: u.remark || '',
     has_api_key: !!u.has_api_key, api_key_masked: u.api_key_masked || '',
   })
@@ -253,7 +287,7 @@ function buildPayload() {
   const models = form.modelsText.split(/[,，]/).map((s) => s.trim()).filter(Boolean)
   return {
     name: form.name, protocol: form.protocol, base_url: form.base_url,
-    api_key: form.api_key, tier: form.tier, models,
+    api_key: form.api_key, tier: form.tier, category: form.category || 'llm', models,
     weight: Math.max(1, Number(form.weight) || 100), enabled: form.enabled, remark: form.remark,
   }
 }
@@ -371,6 +405,15 @@ onMounted(load)
 .head-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 
 .count-line { font-size: 12.5px; color: var(--color-text-secondary); margin-bottom: 8px; }
+.count-seg { margin-left: 6px; }
+.cat-group { margin-bottom: 14px; }
+.cat-head { display: flex; align-items: center; gap: 8px; width: 100%; padding: 9px 12px; background: #f7f2ea; border: 1px solid var(--color-border); border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 700; color: var(--color-text); }
+.cat-head:hover { border-color: var(--color-primary); }
+.cat-head .chevron { transition: transform 0.18s; color: var(--color-text-secondary); flex: none; }
+.cat-head .chevron.open { transform: rotate(90deg); }
+.cat-badge { font-size: 11px; font-weight: 700; padding: 1px 8px; border-radius: 9px; background: var(--color-primary-light); color: var(--color-primary); }
+.cat-group .up-table { margin-top: 8px; }
+.mini-empty.sm { padding: 14px; font-size: 12.5px; }
 .up-table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .up-table th { text-align: left; padding: 9px 10px; color: var(--color-text-secondary); font-weight: 600; border-bottom: 1px solid var(--color-border); font-size: 12px; }
 .up-table td { padding: 11px 10px; border-bottom: 1px solid #f4efe8; vertical-align: middle; }

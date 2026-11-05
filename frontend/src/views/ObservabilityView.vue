@@ -118,6 +118,51 @@
         </div>
       </section>
 
+      <!-- ============ Skill 安全预审（重点暴露拒绝行为） ============ -->
+      <section class="panel" v-if="skillReviews">
+        <div class="panel-head">
+          <span class="panel-title">Skill 安全预审（添加/修改技能时的安全与能力可行性评审）</span>
+        </div>
+        <div class="cards review-cards">
+          <div class="metric-card">
+            <span class="metric-num">{{ skillReviews.summary.total }}</span>
+            <span class="metric-label">评审次数</span>
+          </div>
+          <div class="metric-card">
+            <span class="metric-num" :class="{ warn: skillReviews.summary.rejected }">{{ skillReviews.summary.rejected }}</span>
+            <span class="metric-label">拒绝次数</span>
+          </div>
+          <div class="metric-card">
+            <span class="metric-num" :class="{ warn: skillReviews.summary.high_risk }">{{ skillReviews.summary.high_risk }}</span>
+            <span class="metric-label">高危安全风险</span>
+          </div>
+          <div class="metric-card">
+            <span class="metric-num">{{ skillReviews.summary.unsupported }}</span>
+            <span class="metric-label">能力不支持</span>
+          </div>
+        </div>
+        <table class="obs-table" v-if="skillReviews.items.length">
+          <thead>
+            <tr><th>时间</th><th>用户</th><th>操作</th><th>技能</th><th>结果</th><th>风险</th><th>原因</th></tr>
+          </thead>
+          <tbody>
+            <tr v-for="r in skillReviews.items" :key="r.id" :class="{ 'row-reject': r.verdict === 'reject' }">
+              <td class="cell-time">{{ formatTime(r.created_at) }}</td>
+              <td :title="r.user_id">{{ r.username || r.user_id || '-' }}</td>
+              <td>{{ reviewActionLabel(r.action) }}</td>
+              <td :title="r.kind + ' / ' + r.scope">{{ r.skill_name || '-' }}</td>
+              <td>
+                <span class="status-dot" :class="r.verdict === 'reject' ? 'error' : 'ok'"></span>
+                {{ r.verdict === 'reject' ? '已拒绝' : '通过' }}
+              </td>
+              <td>{{ reviewRiskLabel(r.risk) }}</td>
+              <td class="cell-input" :title="(r.reasons || []).join('；')">{{ (r.reasons || []).join('；') || '-' }}</td>
+            </tr>
+          </tbody>
+        </table>
+        <p v-else class="empty-hint">暂无技能预审记录（用户在「Skill 配置」新建/编辑技能时会自动评审并留痕）</p>
+      </section>
+
       <!-- ============ 每日趋势 ============ -->
       <section class="panel" v-if="metrics">
         <div class="panel-head"><span class="panel-title">每日请求趋势（近{{ days }}天）</span></div>
@@ -324,6 +369,81 @@
         </div>
       </section>
       </template>
+
+      <!-- ============ 当前用户：上下文窗口 + 记忆模块概览（登录用户均可见） ============ -->
+      <section class="panel my-context-panel" v-if="myContext">
+        <div class="panel-head">
+          <span class="panel-title">我的上下文窗口与记忆概览（近{{ myContext.days }}天）</span>
+        </div>
+
+        <div class="cards ctx-cards">
+          <div class="metric-card">
+            <span class="metric-num" :class="{ warn: myContext.context_window.overuse }">{{ formatNum(myContext.context_window.avg_prompt_tokens) }}</span>
+            <span class="metric-label">平均上下文 Token/请求</span>
+          </div>
+          <div class="metric-card">
+            <span class="metric-num">{{ formatNum(myContext.context_window.peak_prompt_tokens) }}</span>
+            <span class="metric-label">峰值上下文 Token</span>
+          </div>
+          <div class="metric-card">
+            <span class="metric-num">{{ myContext.context_window.requests }}</span>
+            <span class="metric-label">统计请求数</span>
+          </div>
+          <div class="metric-card">
+            <span class="metric-num">{{ myContext.context_window.history_rounds }}</span>
+            <span class="metric-label">历史窗口（轮）</span>
+          </div>
+          <div class="metric-card">
+            <span class="metric-num">{{ myContext.compression.sessions_with_summary }}</span>
+            <span class="metric-label">已压缩会话</span>
+          </div>
+        </div>
+        <p class="ctx-hint">
+          上下文告警水位 {{ formatNum(myContext.context_window.warn_threshold) }} Token/请求 ·
+          记忆注入预算 {{ myContext.context_window.memory_ctx_chars_budget }} 字符 ·
+          历史压缩触发 {{ formatNum(myContext.compression.trigger_tokens) }} Token，当前摘要占用 {{ formatNum(myContext.compression.summary_tokens) }} Token。
+        </p>
+
+        <div class="ctx-sub-title">上下文构成（按语义段累计）</div>
+        <table v-if="myContext.context_window.segments.length" class="obs-table">
+          <thead><tr><th>上下文段</th><th>累计 Token</th><th>平均/次</th><th>峰值</th><th>占比</th></tr></thead>
+          <tbody>
+            <tr v-for="seg in myContext.context_window.segments" :key="seg.segment">
+              <td>{{ seg.label }}</td>
+              <td>{{ formatNum(seg.tokens) }}</td>
+              <td>{{ formatNum(seg.avg_tokens) }}</td>
+              <td>{{ formatNum(seg.peak_tokens) }}</td>
+              <td class="share-cell">
+                <div class="share-bar"><span :style="{ width: (seg.share * 100).toFixed(1) + '%' }"></span></div>
+                {{ (seg.share * 100).toFixed(1) }}%
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <p v-else class="empty-hint">这段时间还没有上下文构成记录。发起一次问答后即可看到各段 Token 占用。</p>
+
+        <div class="ctx-sub-title">记忆模块概览</div>
+        <div class="cards mem-cards">
+          <div class="metric-card"><span class="metric-num">{{ myContext.memory.total }}</span><span class="metric-label">记忆条数 / 上限 {{ myContext.memory.storage_limit }}</span></div>
+          <div class="metric-card"><span class="metric-num">{{ myContext.memory.profile_count }}</span><span class="metric-label">画像卡候选</span></div>
+          <div class="metric-card"><span class="metric-num">{{ myContext.memory.retrieved_count }}</span><span class="metric-label">被检索命中</span></div>
+          <div class="metric-card"><span class="metric-num">{{ myContext.memory.never_used_count }}</span><span class="metric-label">从未使用</span></div>
+          <div class="metric-card"><span class="metric-num">{{ myContext.memory.avg_importance }}</span><span class="metric-label">平均重要度</span></div>
+        </div>
+        <div v-if="myContext.memory.total" class="mem-types">
+          <div v-for="t in myContext.memory.by_type" :key="t.type" class="mem-type-row">
+            <span class="mem-type-label">{{ t.label }}</span>
+            <div class="mem-type-bar"><span :style="{ width: memTypeWidth(t.count) }"></span></div>
+            <span class="mem-type-count">{{ t.count }}</span>
+          </div>
+          <p class="ctx-hint">
+            记忆字符占用 {{ formatNum(myContext.memory.total_chars) }} ·
+            画像卡预算 {{ myContext.memory.profile_chars_budget }} 字符、两层合计 {{ myContext.memory.ctx_chars_budget }} 字符 ·
+            存储水位 {{ (myContext.memory.storage_usage * 100).toFixed(1) }}%。
+          </p>
+        </div>
+        <p v-else class="empty-hint">还没有沉淀任何跨会话记忆。多轮对话后系统会自动抽取你的偏好与事实。</p>
+      </section>
     </div>
 
     <!-- ============ 图表 hover tooltip ============ -->
@@ -418,17 +538,19 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { useAuthStore } from '@/stores/auth'
-import { getMyObservabilityMetrics, getObservabilityMetrics, getObservabilityTraces, getObservabilityTrace, getObservabilityTraceLogs } from '@/api'
+import { getMyObservabilityMetrics, getMyContextOverview, getObservabilityMetrics, getObservabilityTraces, getObservabilityTrace, getObservabilityTraceLogs, getSkillReviews } from '@/api'
 
 const auth = useAuthStore()
 const canOps = computed(() => auth.canOps)
 const businessMetrics = ref(null)
+const myContext = ref(null)
 
 const days = ref(7)
 const loading = ref(false)
 const loadingTraces = ref(false)
 const errorMsg = ref('')
 const metrics = ref(null)
+const skillReviews = ref(null)
 const traces = ref([])
 const total = ref(0)
 const offset = ref(0)
@@ -453,11 +575,12 @@ async function loadAll() {
   errorMsg.value = ''
   try {
     if (canOps.value) {
-      await Promise.all([loadMetrics(), loadTraces()])
+      await Promise.all([loadMetrics(), loadTraces(), loadSkillReviews(), loadMyContext()])
     } else {
       businessMetrics.value = null
       const res = await getMyObservabilityMetrics(days.value)
       businessMetrics.value = res.data
+      await loadMyContext()
     }
   } catch (err) {
     errorMsg.value = canOps.value ? (err.response?.data?.detail || err.message || '加载失败') : '个人使用概览加载失败，请稍后刷新重试。'
@@ -466,10 +589,39 @@ async function loadAll() {
   }
 }
 
+// 当前用户上下文窗口 + 记忆模块概览：仅登录用户可见，加载失败不阻断其余面板
+async function loadMyContext() {
+  if (!auth.isAuthenticated || auth.isGuest) { myContext.value = null; return }
+  try {
+    const res = await getMyContextOverview(days.value)
+    myContext.value = res.data
+  } catch {
+    myContext.value = null
+  }
+}
+
 async function loadMetrics() {
   if (!canOps.value) return
   const res = await getObservabilityMetrics(days.value)
   metrics.value = res.data
+}
+
+async function loadSkillReviews() {
+  if (!canOps.value) return
+  try {
+    const res = await getSkillReviews(50)
+    skillReviews.value = res.data
+  } catch {
+    skillReviews.value = null  // 预审面板加载失败不阻断其余指标
+  }
+}
+
+function reviewActionLabel(action) {
+  return { create: '新建', update: '编辑', import: '导入' }[action] || action || '-'
+}
+
+function reviewRiskLabel(risk) {
+  return { high: '高危安全', unsupported: '能力不支持' }[risk] || '无'
 }
 
 async function loadTraces() {
@@ -596,6 +748,13 @@ function formatNum(n) {
   const v = Number(n || 0)
   if (v >= 10000) return `${(v / 1000).toFixed(1)}k`
   return String(v)
+}
+
+// 记忆类型条形宽度：相对该用户各类型中的最大条数归一化
+function memTypeWidth(count) {
+  const types = myContext.value?.memory?.by_type || []
+  const max = Math.max(1, ...types.map((t) => Number(t.count || 0)))
+  return ((Number(count || 0) / max) * 100).toFixed(1) + '%'
 }
 
 function formatTime(iso) {
@@ -1207,6 +1366,11 @@ function toggleSegment(seg) {
 
 .status-dot.cancelled, .status-dot.interrupted { background: #637080; }
 .status-dot.timeout { background: #c28725; }
+
+/* Skill 安全预审面板 */
+.review-cards { margin-bottom: 14px; }
+.row-reject td { background: #fdf3ef; }
+.row-reject .cell-input { color: #b4553d; }
 .status-dot.ok {
   background: #43a047;
 }
@@ -1509,4 +1673,46 @@ function toggleSegment(seg) {
   overflow-y: auto;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
+
+/* ---- 当前用户：上下文窗口 + 记忆概览 ---- */
+.my-context-panel { margin-top: 16px; }
+.ctx-cards, .mem-cards { margin: 4px 0 8px; }
+.ctx-hint {
+  margin: 2px 0 12px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--color-text-secondary);
+}
+.ctx-sub-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--color-text);
+  margin: 14px 0 8px;
+  padding-left: 8px;
+  border-left: 3px solid var(--color-primary);
+}
+.share-cell { min-width: 130px; }
+.share-bar {
+  display: inline-block;
+  vertical-align: middle;
+  width: 70px;
+  height: 6px;
+  margin-right: 8px;
+  background: #f0ebe3;
+  border-radius: 3px;
+  overflow: hidden;
+}
+.share-bar span { display: block; height: 100%; background: var(--color-primary); border-radius: 3px; }
+.mem-types { display: flex; flex-direction: column; gap: 6px; }
+.mem-type-row { display: flex; align-items: center; gap: 10px; }
+.mem-type-label { width: 40px; font-size: 12px; color: var(--color-text-secondary); }
+.mem-type-bar {
+  flex: 1;
+  height: 8px;
+  background: #f0ebe3;
+  border-radius: 4px;
+  overflow: hidden;
+}
+.mem-type-bar span { display: block; height: 100%; background: var(--color-primary); border-radius: 4px; }
+.mem-type-count { width: 32px; text-align: right; font-size: 12px; font-weight: 600; color: var(--color-text); }
 </style>

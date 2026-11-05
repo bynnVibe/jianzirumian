@@ -12,7 +12,9 @@
     <p v-if="!item.original_text && editable" class="notice">可粘贴你有权使用的正文；保存后将标记为“用户补充”，不会视为抓取成功。</p>
     <label>入库标题<input v-model="title" :disabled="!editable || busy" maxlength="300" placeholder="文章标题" /></label>
     <div class="editor-toolbar"><span>{{ text.length }} 字 · 版本 {{ item.revision }}{{ dirty ? ' · 未保存' : ' · 已保存' }}</span>
-      <button type="button" @click="preview = !preview">{{ preview ? '编辑正文' : '预览正文' }}</button></div>
+      <button type="button" @click="preview = !preview">{{ preview ? '编辑正文' : '预览正文' }}</button>
+      <button type="button" class="polish" :disabled="busy || polishing || !editable || !text.trim()" @click="polishContent"
+              title="按 Skill 配置的清洗策略去角标/噪声行/多余空格，保留段落顺序，不新增内容">{{ polishing ? '润色中…' : '内容润色' }}</button></div>
     <div v-if="preview" class="article-preview" v-html="renderArticle(text)"></div>
     <textarea v-else v-model="text" :disabled="!editable || busy" maxlength="500000" rows="16" aria-label="链接正文" placeholder="解析后的 Markdown 正文；可检查并修改后确认入库"></textarea>
     <details v-if="item.original_text"><summary>查看最初提取正文（不随编辑改变）</summary><pre>{{ item.original_text }}</pre></details>
@@ -29,7 +31,7 @@
 
 <script setup>
 import { computed, ref, watch } from 'vue'
-import { saveUrlImport, confirmUrlImport } from '@/api'
+import { saveUrlImport, confirmUrlImport, cleanArticle } from '@/api'
 import { renderArticle, safeArticleUrl, urlDraftFingerprint, urlStatusLabel } from '@/utils/urlArticles'
 const props = defineProps({ item: { type: Object, required: true }, kbId: String, canWrite: Boolean })
 const emit = defineEmits(['updated', 'dirty', 'submitted', 'busy'])
@@ -38,6 +40,7 @@ const text = ref(props.item.parsed_text || '')
 const saved = ref(urlDraftFingerprint(title.value, text.value))
 const preview = ref(false)
 const busy = ref(false)
+const polishing = ref(false)
 const message = ref('')
 const editable = computed(() => props.item.phase === 'parse' && ['done', 'error'].includes(props.item.status))
 const dirty = computed(() => editable.value && saved.value !== urlDraftFingerprint(title.value, text.value))
@@ -59,6 +62,21 @@ async function save() {
   try { await persist(); message.value = '草稿已保存，尚未入库。' }
   catch (error) { message.value = error.response?.data?.detail || '保存失败，本地编辑已保留，请重试。' }
   finally { busy.value = false }
+}
+// 内容润色：后端按 Skill 配置（scope=polish）做确定性清洗；结果只更新本地草稿，由用户保存/确认入库
+async function polishContent() {
+  if (busy.value || polishing.value || !editable.value || !text.value.trim()) return
+  polishing.value = true; message.value = ''
+  try {
+    const res = await cleanArticle(text.value)
+    const d = res.data
+    if (d.success && typeof d.cleaned_text === 'string' && d.cleaned_text !== text.value) {
+      text.value = d.cleaned_text
+    }
+    message.value = d.message || (d.success ? '润色完成' : '润色未执行')
+  } catch (error) {
+    message.value = error.response?.data?.detail || '润色失败，请重试。'
+  } finally { polishing.value = false }
 }
 async function confirmDraft() {
   if (busy.value || !editable.value || !props.canWrite || !text.value.trim()) return
@@ -84,6 +102,8 @@ textarea { font-family: monospace; resize: vertical; line-height: 1.7; }
 button { border: 1px solid var(--color-border); background: #fff; color: var(--color-text); border-radius: 7px; padding: 7px 12px; cursor: pointer; }
 button:disabled { opacity: .5; cursor: not-allowed; }
 .confirm { background: var(--color-primary); color: #fff; }
+.polish { border-color: #ecd9bd; background: var(--color-primary-light); color: #a9713a; font-weight: 600; }
+.polish:hover:not(:disabled) { border-color: var(--color-primary); }
 .notice { color: #8b5e22; background: #fff7e7; padding: 10px; border-radius: 7px; font-size: 13px; white-space: pre-wrap; }
 .success { color: #32804e; }
 details { font-size: 12px; margin-bottom: 16px; }

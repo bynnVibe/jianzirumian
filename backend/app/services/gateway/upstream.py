@@ -24,8 +24,17 @@ _ANTHROPIC_VERSION = "2023-06-01"
 # 请求构造：返回 (headers, payload)
 # ---------------------------------------------------------------------------
 
-def build_request(channel: dict, body: dict, mapped_model: str, stream: bool) -> tuple[dict, dict]:
-    """按渠道协议把 OpenAI 形态请求体转换为上游请求（headers + payload）。"""
+def build_request(channel: dict, body: dict, mapped_model: str, stream: bool,
+                  kind: str = "chat") -> tuple[dict, dict]:
+    """按渠道协议把 OpenAI 形态请求体转换为上游请求（headers + payload）。
+
+    kind: chat（默认）/ embeddings / rerank。后两者为透传型 JSON 端点，仅按协议
+    做最小适配（ollama embeddings 走 /api/embeddings 且无鉴权头），与 chat 通道隔离。
+    """
+    if kind == "embeddings":
+        return _build_embeddings_request(channel, body, mapped_model)
+    if kind == "rerank":
+        return _build_rerank_request(channel, body, mapped_model)
     protocol = channel.get("protocol") or "openai"
     api_key = channel.get("api_key") or ""
 
@@ -70,6 +79,40 @@ def build_request(channel: dict, body: dict, mapped_model: str, stream: bool) ->
     return headers, payload
 
 
+def _build_embeddings_request(channel: dict, body: dict, mapped_model: str) -> tuple[dict, dict]:
+    """embeddings 请求构造：openai 兼容透传 {model,input,...}；ollama 走 /api/embeddings。"""
+    protocol = channel.get("protocol") or "openai"
+    api_key = channel.get("api_key") or ""
+    # 透传非内部字段，替换 model，剥离 stream（embeddings 无流式）
+    payload = {k: v for k, v in body.items() if not k.startswith("_gw_")}
+    payload["model"] = mapped_model
+    payload.pop("stream", None)
+    payload.setdefault("input", body.get("input") or [])
+    if protocol == "ollama":
+        # ollama /api/embeddings 仅需 model + input，无鉴权头
+        return {}, {"model": mapped_model, "input": payload["input"]}
+    headers = {"content-type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    return headers, payload
+
+
+def _build_rerank_request(channel: dict, body: dict, mapped_model: str) -> tuple[dict, dict]:
+    """rerank 请求构造：{model,query,documents,top_n?} + Bearer（镜像原生 reranker）。"""
+    api_key = channel.get("api_key") or ""
+    payload = {
+        "model": mapped_model,
+        "query": body.get("query") or "",
+        "documents": body.get("documents") or [],
+    }
+    if body.get("top_n") is not None:
+        payload["top_n"] = body["top_n"]
+    headers = {"content-type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    return headers, payload
+
+
 def _split_anthropic_messages(messages: list) -> tuple[list, str]:
     """Anthropic 的 system 独立于 messages：抽取 system 消息，其余转为 {role,content} 文本。"""
     system_parts = []
@@ -98,7 +141,11 @@ def _openai_tool_to_anthropic(tool: dict) -> dict:
 # 非流式响应归一化：统一为 OpenAI dict
 # ---------------------------------------------------------------------------
 
-def normalize_response(channel: dict, status_code: int, raw: dict) -> dict:
+def normalize_response(channel: dict, status_code: int, raw: dict, kind: str = "chat") -> dict:
+    if kind == "embeddings":
+        return _normalize_embeddings(channel, raw)
+    if kind == "rerank":
+        return _normalize_rerank(channel, raw)
     protocol = channel.get("protocol") or "openai"
     if protocol == "openai":
         return raw
@@ -107,6 +154,47 @@ def normalize_response(channel: dict, status_code: int, raw: dict) -> dict:
     if protocol == "anthropic":
         return _anthropic_to_openai(channel, raw)
     return raw
+
+
+def _normalize_embeddings(channel: dict, raw: dict) -> dict:
+    """embeddings 响应归一为 OpenAI {object:list,data:[{object:embedding,index,embedding}],model,usage}。
+
+    openai 兼容上游已为该形态则透传；ollama {embeddings:[[..]]}（/api/embed）或
+    {embedding:[..]}（/api/embeddings 单条）翻译为 OpenAI 形态。
+    """
+    protocol = channel.get("protocol") or "openai"
+    if protocol != "ollama" and isinstance(raw.get("data"), list):
+        return raw
+    model = raw.get("model") or channel.get("name", "")
+    vectors: list = []
+    if isinstance(raw.get("embeddings"), list):
+        vectors = raw["embeddings"]
+    elif isinstance(raw.get("embedding"), list):
+        vectors = [raw["embedding"]]
+    elif isinstance(raw.get("data"), list):
+        vectors = [d.get("embedding") for d in raw["data"]]
+    data = [{"object": "embedding", "index": i, "embedding": v} for i, v in enumerate(vectors)]
+    usage = raw.get("usage") or {}
+    pt = int(usage.get("prompt_tokens") or 0)
+    total = int(usage.get("total_tokens") or pt)
+    return {"object": "list", "model": model, "data": data,
+            "usage": {"prompt_tokens": pt, "total_tokens": total}}
+
+
+def _normalize_rerank(channel: dict, raw: dict) -> dict:
+    """rerank 响应归一为 {model,results:[{index,relevance_score}]}。
+
+    兼容顶层 results（OpenAI 兼容）/ output.results（DashScope 原生）。
+    """
+    items = raw.get("results") or (raw.get("output") or {}).get("results") or []
+    results = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        score = it.get("relevance_score", it.get("score", 0.0))
+        results.append({"index": it.get("index"), "relevance_score": float(score or 0.0)})
+    return {"model": raw.get("model") or channel.get("name", ""), "results": results,
+            "usage": raw.get("usage") or {}}
 
 
 def _ollama_to_openai(channel: dict, raw: dict) -> dict:

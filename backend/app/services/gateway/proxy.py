@@ -36,6 +36,14 @@ logger = logging.getLogger("jianziruyang.gateway.proxy")
 _TIMEOUT = httpx.Timeout(connect=10, read=300, write=30, pool=10)
 # 触发故障切换的上游状态码（4xx 客户端错误除鉴权/限流外不重试）
 _FAILOVER_STATUS = {401, 403, 408, 429}
+# 首块保护：上游返回 200 但长时间不产出任何 chunk（排队/挂起）时视为失败上游并切换，
+# 避免慢上游吃满调用方（意图改写/证据判断等）的全部超时预算后才暴露。
+# 工具类角色（短输出任务）首块期限更紧；回答类放宽。
+_UTILITY_ROLES = {"intent_rewrite", "evidence_check", "memory_extract", "session_summary"}
+_FIRST_CHUNK_UTILITY = 8.0
+_FIRST_CHUNK_DEFAULT = 15.0
+# Qwen 系上游：工具类角色默认关思考，避免长思考链拖慢工具化流水线
+_NO_THINK_HOSTS = ("modelscope", "dashscope", "aliyuncs")
 
 
 class GatewayError(Exception):
@@ -83,6 +91,8 @@ class Ctx:
         self.key_row: dict = {}
         self.model_req = ""
         self.stream = False
+        # 请求类型：chat（默认）/ embeddings / rerank（与 chat 通道隔离）
+        self.kind = "chat"
         # 业务路由提示（role/显式规则/发起用户）
         self.role = ""
         self.rule_id = ""
@@ -121,8 +131,9 @@ def _latency(ctx: Ctx) -> int:
 # prepare：鉴权/模型授权 → 安全审计 → 选路 → 原子认领（同步；失败写日志并抛错）
 # ---------------------------------------------------------------------------
 
-def prepare(body: dict, raw_key: str, client_ip: str = "") -> Ctx:
+def prepare(body: dict, raw_key: str, client_ip: str = "", kind: str = "chat") -> Ctx:
     ctx = Ctx()
+    ctx.kind = kind or "chat"
     ctx.client_ip = client_ip or ""
     ctx.settings = settings_svc.get_settings()
     ctx.stream = bool(body.get("stream"))
@@ -130,6 +141,9 @@ def prepare(body: dict, raw_key: str, client_ip: str = "") -> Ctx:
     ctx.forward_body = body
     # 业务路由提示（由 LLMFactory.create_for_role 通过 extra_body 注入，出网时被 upstream 剥离）
     ctx.role = str(body.get("_gw_role") or "")
+    if not ctx.role:
+        # embeddings/rerank 端点无 extra_body 注入机制，按 kind 默认角色（供 category 过滤选路）
+        ctx.role = {"embeddings": "embed", "rerank": "rerank"}.get(ctx.kind, "")
     ctx.rule_id = str(body.get("_gw_rule_id") or "")
     ctx.user_id = str(body.get("_gw_user_id") or "")
     base = {
@@ -137,6 +151,8 @@ def prepare(body: dict, raw_key: str, client_ip: str = "") -> Ctx:
         "model_requested": ctx.model_req, "stream": ctx.stream,
         "request_body": json.dumps(body, ensure_ascii=False),
         "key_id": "", "key_name": "",
+        # 业务场景（role）：审计页据此展示「该链路是哪个业务模块发起的」
+        "role": ctx.role,
     }
 
     # 1. 密钥鉴权
@@ -160,6 +176,9 @@ def prepare(body: dict, raw_key: str, client_ip: str = "") -> Ctx:
                            "latency_ms": _latency(ctx), "trace_steps": ctx.tracer.dump(),
                            "error": msg, "audit_action": "block"})
         raise GatewayError(403, msg, "model_not_allowed")
+    ctx.tracer.add("quota", "模型授权", "ok",
+                   f"密钥「{base['key_name']}」允许访问模型「{ctx.model_req}」"
+                   "（可访问模型清单为空=不限）")
 
     # 3. 安全审计（脱敏 / 阻断）
     mode = ctx.settings.get("audit_mode", "audit")
@@ -190,7 +209,17 @@ def prepare(body: dict, raw_key: str, client_ip: str = "") -> Ctx:
         ctx.model_req, role=ctx.role or None,
         rule_id=ctx.rule_id or None, user_id=ctx.user_id or None)
     if not ctx.candidates:
-        msg = f"没有可用于模型「{ctx.model_req}」的上游，请先在网关中配置上游与路由规则"
+        rule_name = (ctx.rule or {}).get("model_pattern") or ""
+        if ctx.role and rule_name:
+            # 业务路由严格绑定：规则内无上游支持该模型，拒绝跨规则回退，
+            # 错误信息带 role/规则/模型上下文，避免误判为未配置
+            msg = (f"路由规则「{rule_name}」(role={ctx.role}) 内无支持模型「{ctx.model_req}」的上游，"
+                   f"已拒绝跨规则回退；请检查上游模型列表或业务路由绑定")
+        else:
+            msg = (f"没有可用于模型「{ctx.model_req}」的上游"
+                   + (f"（role={ctx.role}，未绑定业务路由或绑定规则的上游不支持该模型）"
+                      if ctx.role else "")
+                   + "，请先在网关中配置上游与路由规则，或在业务路由中为该角色绑定含该模型的规则")
         ctx.tracer.add("route", "规则选路", "error", msg)
         log_svc.write_log({**base, "status": "error", "status_code": 503,
                            "latency_ms": _latency(ctx), "risk_level": risk_level,
@@ -201,7 +230,8 @@ def prepare(body: dict, raw_key: str, client_ip: str = "") -> Ctx:
     health_note = "、".join(f"{c['name']}(W{c.get('weight', 100)})"
                            for c in ctx.candidates[:4])
     ctx.tracer.add("route", "规则选路", "ok",
-                   f"规则「{pat}」命中 {len(ctx.candidates)} 个上游：{health_note}")
+                   f"role={ctx.role or '-'} 模型「{ctx.model_req}」命中规则「{pat}」，"
+                   f"候选上游 {len(ctx.candidates)} 个：{health_note}")
     # 显性化日志：路由规则 → 模型 → 上游候选（与 trace_steps 同源，便于直接查日志文件）
     logger.info("[网关选路] role=%s 路由规则「%s」→ 模型「%s」 上游候选 %d 个：%s",
                 ctx.role or "-", pat, ctx.model_req, len(ctx.candidates), health_note)
@@ -216,12 +246,28 @@ def prepare(body: dict, raw_key: str, client_ip: str = "") -> Ctx:
     except TimeoutError as e:
         _finalize(ctx, status="timeout", status_code=504, error=str(e))
         raise GatewayError(504, str(e), "request_timeout") from e
-    ctx.tracer.add("quota", "原子配额认领", "ok", f"已认领第 {ctx.key_row['request_count']} 次请求")
+    ctx.tracer.add("quota", "原子配额认领", "ok",
+                   f"密钥「{ctx.key_row.get('name') or base['key_name']}」已认领第"
+                   f" {ctx.key_row['request_count']} 次请求（配额 0=不限）")
     return ctx
 
 
 def _max_attempts(ctx: Ctx) -> int:
     return max(1, int(ctx.settings.get("retry_count", 2)) + 1)
+
+
+def _first_chunk_limit(ctx: Ctx) -> float:
+    """首块保护期限：工具类角色紧、回答类宽。"""
+    return _FIRST_CHUNK_UTILITY if ctx.role in _UTILITY_ROLES else _FIRST_CHUNK_DEFAULT
+
+
+def _suppress_utility_thinking(ctx: Ctx, eff: dict, payload) -> None:
+    """工具类角色在 Qwen 系上游注入 enable_thinking=False（其他上游不含该 host 不受影响）。"""
+    if ctx.role not in _UTILITY_ROLES or not isinstance(payload, dict):
+        return
+    host = str(eff.get("base_url") or "").lower()
+    if any(h in host for h in _NO_THINK_HOSTS):
+        payload.setdefault("enable_thinking", False)
 
 
 def _finalize(ctx: Ctx, *, status: str, status_code: int, prompt_tokens: int = 0,
@@ -285,6 +331,7 @@ async def _json_response(ctx: Ctx) -> tuple[int, dict]:
         t0 = time.monotonic()
         try:
             headers, payload = upstream.build_request(eff, ctx.forward_body, mapped, stream=False)
+            _suppress_utility_thinking(ctx, eff, payload)
             async with httpx.AsyncClient(timeout=_network_timeout(ctx)) as client:
                 resp = await client.post(url, headers=headers, json=payload)
             sc = resp.status_code
@@ -338,6 +385,104 @@ def _extract_preview(normalized: dict) -> tuple[str, list]:
 
 
 # ---------------------------------------------------------------------------
+# 非流式响应（embeddings / rerank）：与 chat 通道隔离，复用 failover/健康/计量/日志
+# ---------------------------------------------------------------------------
+
+async def json_response_kind(ctx: Ctx, kind: str) -> tuple[int, dict]:
+    try:
+        async with asyncio.timeout(remaining(ctx.deadline)):
+            return await _json_response_kind(ctx, kind)
+    except (TimeoutError, httpx.TimeoutException) as e:
+        _finalize(ctx, status="timeout", status_code=504, error="请求总预算耗尽")
+        raise GatewayError(504, "请求总预算耗尽", "request_timeout") from e
+    except asyncio.CancelledError:
+        _finalize(ctx, status="cancelled", status_code=499, error="客户端取消")
+        raise
+
+
+async def _json_response_kind(ctx: Ctx, kind: str) -> tuple[int, dict]:
+    last_err = ""
+    for idx, up in enumerate(ctx.candidates[:_max_attempts(ctx)]):
+        ctx.retries = idx
+        eff = up_svc.effective(up)
+        url = up_svc.build_upstream_url(eff, kind)
+        mapped = ctx.model_req
+        ctx.upstream, ctx.model_mapped, ctx.upstream_url = up, mapped, url
+        t0 = time.monotonic()
+        try:
+            headers, payload = upstream.build_request(eff, ctx.forward_body, mapped,
+                                                      stream=False, kind=kind)
+            async with httpx.AsyncClient(timeout=_network_timeout(ctx)) as client:
+                resp = await client.post(url, headers=headers, json=payload)
+            sc = resp.status_code
+            if sc in _FAILOVER_STATUS or sc >= 500:
+                raise RuntimeError(f"上游返回 {sc}: {resp.text[:200]}")
+            try:
+                raw = resp.json()
+            except Exception:
+                raise RuntimeError(f"上游响应非 JSON: {resp.text[:200]}")
+            normalized = upstream.normalize_response(eff, sc, raw, kind)
+            up_svc.mark_success(up["id"], int((time.monotonic() - t0) * 1000))
+            ctx.tracer.add("upstream", f"调用上游 {up['name']}", "ok",
+                           f"{eff.get('protocol')} → {mapped}（{kind}），HTTP {sc}")
+            logger.info("[网关出网] 路由规则「%s」→ 模型「%s」 via 上游「%s」 %s HTTP %s %dms",
+                        (ctx.rule or {}).get("model_pattern", ""), mapped, up["name"], kind, sc,
+                        int((time.monotonic() - t0) * 1000))
+            pt, ct, preview = _meter_kind(ctx, kind, normalized)
+            ctx.tracer.add("response", "响应下游", "ok", f"tokens={pt}+{ct}，{preview[:40]}")
+            ctx.tracer.add("log", "日志入库", "ok", "已留存调用记录与链路")
+            _finalize(ctx, status="ok" if sc < 400 else "error", status_code=sc,
+                      prompt_tokens=pt, completion_tokens=ct, response_preview=preview)
+            return sc, normalized
+        except Exception as e:
+            last_err = str(e)
+            up_svc.mark_failure(up["id"], last_err)
+            ctx.tracer.add("upstream", f"调用上游 {up['name']}", "error", last_err)
+            logger.warning("网关上游失败（%s），切换下一个: upstream=%s err=%s",
+                           kind, up.get("name"), last_err)
+            continue
+    ctx.tracer.add("response", "响应下游", "error", f"全部上游失败: {last_err}")
+    ctx.tracer.add("log", "日志入库", "ok", "已留存失败链路")
+    _finalize(ctx, status="error", status_code=502, error=f"所有上游均调用失败: {last_err}",
+              response_preview="")
+    raise GatewayError(502, f"所有上游均调用失败: {last_err}", "all_upstreams_failed")
+
+
+def _meter_kind(ctx: Ctx, kind: str, normalized: dict) -> tuple[int, int, str]:
+    """embeddings/rerank 计量：返回 (prompt_tokens, completion_tokens, 预览)。
+
+    embeddings 用 usage.prompt_tokens/total_tokens；rerank 无 token 则按 query+documents 估算。
+    """
+    usage = normalized.get("usage") or {}
+    pt = int(usage.get("prompt_tokens") or 0)
+    total = int(usage.get("total_tokens") or 0)
+    body = ctx.forward_body or {}
+    if kind == "embeddings":
+        data = normalized.get("data") or []
+        dim = 0
+        if data and isinstance(data[0].get("embedding"), list):
+            dim = len(data[0]["embedding"])
+        preview = f"embedding × {len(data)}" + (f"（{dim} 维）" if dim else "")
+        if not (pt or total):
+            texts = body.get("input")
+            if isinstance(texts, str):
+                texts = [texts]
+            pt = sum(agent_obs.estimate_tokens(str(t)) for t in (texts or []))
+        return pt, 0, preview
+    if kind == "rerank":
+        results = normalized.get("results") or []
+        preview = f"rerank × {len(results)}"
+        if not (pt or total):
+            q = str(body.get("query") or "")
+            docs = body.get("documents") or []
+            pt = agent_obs.estimate_tokens(q) + sum(
+                agent_obs.estimate_tokens(str(d)) for d in docs)
+        return pt, 0, preview
+    preview, _ = _extract_preview(normalized)
+    return pt, int(usage.get("completion_tokens") or 0), preview
+
+
+# ---------------------------------------------------------------------------
 # 流式响应
 # ---------------------------------------------------------------------------
 
@@ -364,6 +509,7 @@ async def stream_response(ctx: Ctx) -> AsyncGenerator[str, None]:
             client = resp = iterator = None
             try:
                 headers, payload = upstream.build_request(eff, ctx.forward_body, mapped, stream=True)
+                _suppress_utility_thinking(ctx, eff, payload)
                 client = httpx.AsyncClient(timeout=_network_timeout(ctx))
                 async with asyncio.timeout(remaining(ctx.deadline)):
                     req = client.build_request("POST", url, headers=headers, json=payload)
@@ -373,7 +519,23 @@ async def stream_response(ctx: Ctx) -> AsyncGenerator[str, None]:
                         raise RuntimeError(f"上游 {resp.status_code}: {body_txt}")
                 ctx.tracer.add("upstream", f"调用上游 {up['name']}", "ok", f"{mapped}（流式）")
                 iterator = iterate(upstream.stream_iterator(eff, resp.aiter_lines()), ctx.deadline)
-                async for sse in iterator:
+                first_chunk_limit = _first_chunk_limit(ctx)
+                while True:
+                    try:
+                        if committed:
+                            sse = await iterator.__anext__()
+                        else:
+                            # 首块前仍可切换：上游在期限内不产出任何 chunk 视为慢上游失败
+                            sse = await asyncio.wait_for(
+                                iterator.__anext__(),
+                                timeout=min(first_chunk_limit, max(0.5, remaining(ctx.deadline))))
+                    except StopAsyncIteration:
+                        break
+                    except (TimeoutError, asyncio.TimeoutError):
+                        if committed or remaining(ctx.deadline) <= 0.5:
+                            raise TimeoutError("请求超时或总预算耗尽")
+                        raise RuntimeError(
+                            f"上游 {first_chunk_limit:.0f}s 内未产出首块，判定慢上游并切换")
                     _account_sse(sse, acc_text, usage, tool_names)
                     if any(line.strip() == "data: [DONE]" for line in sse.splitlines()):
                         final_status, final_code, final_err = "ok", resp.status_code, ""

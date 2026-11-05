@@ -31,12 +31,31 @@ from app.core.vector_store import vector_store
 from app.services.config_manager import runtime_config
 from app.services.knowledge import knowledge_service
 from app.services.memory import memory_service
+from app.services.skill import skill_service
 from app.services.records import upload_records
 from app.services import session_summary
 from app.services import tool_orchestrator
 from app.services.web_search import web_search
+from app.services import chat_agent
+from app.services import semantic_cache
+from app.core.query_complexity import classify_complexity
+from app.core.intent_clarifier import decide_clarification
 
 logger = logging.getLogger("jianziruyang.chat")
+
+# HITL 卡片展示/复用的问题文本上限（纯截图提问时识别内容可能数百字，不宜整段塞进卡片）
+_CARD_QUERY_CHARS = 60
+
+
+def _card_query(raw_query: str, effective_query: str) -> str:
+    """HITL 卡片用的问题文本。
+
+    用户有输入文本时原样使用；纯截图提问（文本为空、以 OCR 摘录作为问题）时截断，
+    避免卡片被整段识别文字占满，同时保证前端「联网搜索」按钮复用的是可读的短查询。
+    """
+    if raw_query.strip() or len(effective_query) <= _CARD_QUERY_CHARS:
+        return effective_query
+    return effective_query[:_CARD_QUERY_CHARS].rstrip() + "…"
 
 
 class Message:
@@ -95,7 +114,11 @@ class ChatSession:
 
         # 根据第一条用户消息更新标题
         if len(self.messages) == 1 and message.role == "user":
-            self.title = message.content[:30] + "..." if len(message.content) > 30 else message.content
+            text = (message.content or "").strip()
+            # 纯截图/附件提问（未输入文本）时用附件名，避免会话标题为空
+            if not text and message.attachments:
+                text = message.attachments[0].get("filename") or "图片提问"
+            self.title = (text[:30] + "..." if len(text) > 30 else text) or self.title
 
     def get_history(self, max_count: int = None) -> List[dict]:
         """获取历史消息 (用于 LLM 上下文)"""
@@ -270,6 +293,8 @@ class ChatService:
         attachments: Optional[List[dict]] = None,
         kb_id: str = "",
         rule_id: str = "",
+        model: str = "",
+        skip_search_prompt: bool = False,
     ) -> AsyncGenerator[str, None]:
         """流式聊天（外层负责可观测性追踪：一次提问 = 一条 trace）
 
@@ -296,6 +321,7 @@ class ChatService:
         iterator = iterate(self._chat_stream_inner(
             session_id, query, use_knowledge, use_search,
             llm_provider, user_id, attachments, kb_id, tasks, rule_id,
+            skip_search_prompt, model,
         ), deadline)
         try:
             async for event in iterator:
@@ -354,6 +380,8 @@ class ChatService:
         kb_id: str,
         tasks: set,
         rule_id: str = "",
+        skip_search_prompt: bool = False,
+        model: str = "",
     ) -> AsyncGenerator[str, None]:
         """流式聊天内层主流程（检索/搜索/工具/生成各环节记录 trace span）"""
         logger.info("开始处理聊天: session=%s, query=%.50s, knowledge=%s, search=%s",
@@ -379,6 +407,38 @@ class ChatService:
         if att_meta:
             yield f"data: {self._json_event('status', {'phase': 'attachments_saved', 'attachments': att_meta, 'message_id': user_msg.message_id})}\n\n"
 
+        # 2.4 语义缓存命中直回：针对当前用户历史问答，语义相似的问题直接回复缓存内容，
+        # 绕过知识检索 / Agent / LLM 生成的业务路由（仅纯文本、启用知识库、登录用户时生效）
+        if (not attachments and use_knowledge and semantic_cache.semantic_cache_enabled()
+                and user_id and user_id != "guest"):
+            try:
+                cache_hit = await semantic_cache.lookup(user_id, query)
+            except Exception as e:
+                logger.warning("语义缓存查询失败，走正常流程: %s", e)
+                cache_hit = None
+            if cache_hit:
+                cached_answer = cache_hit.get("answer", "")
+                obs.record_step(
+                    "semantic_cache",
+                    f"命中语义缓存（相似度 {cache_hit.get('score')}），直接回复历史回答",
+                )
+                yield f"data: {self._json_event('status', {'phase': 'cache_hit', 'message': '命中语义缓存，直接回复历史回答', 'score': cache_hit.get('score')})}\n\n"
+                yield f"data: {self._json_event('token', {'content': cached_answer})}\n\n"
+                assistant_msg = Message(
+                    role="assistant",
+                    content=cached_answer,
+                    sources=cache_hit.get("sources", []),
+                    use_knowledge=use_knowledge,
+                    use_search=False,
+                )
+                session.add_message(assistant_msg)
+                self._persist_session(session)
+                from app.services.usage import record_usage
+                record_usage(user_id, len(query), len(cached_answer),
+                             use_knowledge=use_knowledge, use_search=False)
+                yield f"data: {self._json_event('done', {'session_id': session.session_id, 'user_message_id': user_msg.message_id, 'message': assistant_msg.to_dict(), 'cache_hit': True, 'cache_score': cache_hit.get('score')})}\n\n"
+                return
+
         # 2.5 聊天框附件工具调用：按用户文本意图路由到 OCR / 入库 / 总结工具
         tool_context_text = ""
         tool_records: List[dict] = []
@@ -398,30 +458,80 @@ class ChatService:
                 obs.record_tool(
                     rec.get("tool_name") or "attachment_tool",
                     {"filename": rec.get("filename", "")},
-                    rec,
+                    # 识别原文不入 span（已由 note_segment("tool") 记录完整上下文），避免 trace 膨胀
+                    {k: v for k, v in rec.items() if k != "text"},
                     status="ok" if rec.get("success") else "error",
                     error="" if rec.get("success") else "工具执行失败",
                     fail_trace=False,
                 )
             executed = [rec for rec in tool_records if not rec.get("confirmation")]
             if executed:
-                yield f"data: {self._json_event('status', {'phase': 'tool_done', 'message': '附件处理完成', 'tool_calls': executed})}\n\n"
+                yield f"data: {self._json_event('status', {'phase': 'tool_done', 'message': '附件处理完成', 'tool_calls': [{k: v for k, v in r.items() if k != 'text'} for r in executed]})}\n\n"
+
+        # 2.6 截图检索：图片 OCR 文本并入知识检索查询
+        # retrieval_query=检索用（用户文本 + 图中文字）；effective_query=提问用
+        # （用户只贴图不打字时，图中文字就是他想问的内容）
+        retrieval_query, effective_query, ocr_excerpt = query, query, ""
+        if tool_records:
+            retrieval_query, ocr_excerpt = tool_orchestrator.build_ocr_retrieval_query(
+                query, tool_records
+            )
+            if ocr_excerpt:
+                if not query.strip():
+                    effective_query = ocr_excerpt
+                obs.record_step(
+                    "ocr_retrieval",
+                    f"图片识别 {len(ocr_excerpt)} 字并入检索查询"
+                    + ("（用户未输入文本，以识别内容作为提问）" if not query.strip() else ""),
+                )
+                yield f"data: {self._json_event('status', {'phase': 'ocr_retrieval', 'message': f'已识别图片文字（{len(ocr_excerpt)} 字），将结合图中内容检索作答', 'ocr_chars': len(ocr_excerpt)})}\n\n"
 
         # 3. 构建 LLM 消息列表：系统 prompt + 用户跨会话记忆 + 历史消息（摘要压缩后）+ 工具结果
         # 统一走网关 chat_answer 业务路由（规则+模型由网关解析；llm_provider 参数已废弃）
-        llm = LLMFactory.create_for_role("chat_answer", user_id, rule_id)
+        # model 为聊天页用户显式选择的模型（空=按业务路由/规则内均衡解析）
+        llm = LLMFactory.create_for_role("chat_answer", user_id, rule_id, model or None)
         llm_messages = self._build_system_prompt()
         # segment 级 token 度量：系统提示段
         obs.note_segment("system", "\n".join(m.get("content", "") for m in llm_messages))
 
-        relevant_memories = memory_service.retrieve_relevant(user_id, query)
-        if relevant_memories:
-            memory_text = "\n".join(f"- {m['content']}" for m in relevant_memories)
+        # 记忆两层加载（借鉴 Claude Code：常驻索引层 + 按需检索层），合计受字符预算约束
+        memory_text = ""
+        profile_memories = memory_service.profile_memories(user_id)
+        profile_text = "\n".join(f"- {m['content']}" for m in profile_memories)
+        obs.note_segment("memory_profile", profile_text)
+        relevant_memories = memory_service.retrieve_relevant(
+            user_id, effective_query, exclude_ids=[m["id"] for m in profile_memories]
+        )
+        ctx_budget = int(getattr(settings, "MEMORY_CTX_CHARS", 600))
+        relevant_lines, used = [], len(profile_text)
+        for m in relevant_memories:
+            line = f"- {m['content']}"
+            if used + len(line) > ctx_budget:
+                break
+            relevant_lines.append(line)
+            used += len(line)
+        relevant_text = "\n".join(relevant_lines)
+        obs.note_segment("memory_relevant", relevant_text)
+        sections = []
+        if profile_text:
+            sections.append(f"用户画像（常驻）:\n{profile_text}")
+        if relevant_text:
+            sections.append(f"相关记忆:\n{relevant_text}")
+        if sections:
+            memory_text = "\n".join(sections)
             llm_messages.append({
                 "role": "system",
                 "content": f"【关于该用户的长期记忆，供参考，不要逐字复述】\n{memory_text}",
             })
-            obs.note_segment("memory", memory_text)
+
+        # 已启用的用户 Skill（prompt 类）注入：用户可在侧边栏「Skill 配置」定制并开关
+        skills_text = skill_service.build_prompt_text(user_id)
+        obs.note_segment("skills", skills_text)
+        if skills_text:
+            llm_messages.append({
+                "role": "system",
+                "content": f"【用户已启用的技能要求，请在回答中遵循】\n{skills_text}",
+            })
 
         history_messages = session_summary.build_context_messages(
             session, settings.SESSION_MAX_HISTORY
@@ -435,6 +545,46 @@ class ChatService:
             llm_messages.append({"role": "system", "content": tool_context_text})
             obs.note_segment("tool", tool_context_text)
 
+        # 3.5 复杂度分流：simple→fast（下方现有流水线不变），moderate→ReAct，complex→Plan&Execute。
+        # 带附件工具结果时强制 fast（附件为专用流程，Agent 不处理工具上下文）。
+        if not tool_context_text:
+            complexity = await classify_complexity(query, history_ctx)
+            mode = complexity.get("mode", "fast")
+            if mode in ("react", "plan_execute"):
+                agent_result = {
+                    "status": "ok", "answer": "", "sources": [],
+                    "search_results": [], "hitl": None, "error": "",
+                }
+                agent_failed_early = False
+                try:
+                    async for ev in chat_agent.run_chat_agent(
+                        mode=mode, query=query, user_id=user_id, rule_id=rule_id,
+                        model=model,
+                        use_knowledge=use_knowledge, use_search=use_search,
+                        skip_search_prompt=skip_search_prompt, history_ctx=history_ctx,
+                        memory_text=memory_text, system_prompt=self._build_system_prompt(),
+                        result=agent_result,
+                    ):
+                        yield ev
+                except (asyncio.CancelledError, GeneratorExit):
+                    raise
+                except Exception as e:
+                    logger.error("主聊天 Agent 异常: %s", e)
+                    obs.record_step("chat_agent", "", status="error", error=str(e), fail_trace=False)
+                    # 未产出正文/卡片 → 早期失败，回退现有 fast 流水线（最坏情况=现状）
+                    if not agent_result.get("answer") and not agent_result.get("hitl"):
+                        agent_failed_early = True
+                    else:
+                        yield f"data: {self._json_event('error', {'message': f'复杂问答处理失败：{e}'})}\n\n"
+                        return
+                if not agent_failed_early:
+                    async for ev in self._finalize_agent_turn(
+                        session, user_msg, agent_result, use_knowledge, use_search, llm_provider
+                    ):
+                        yield ev
+                    return
+                logger.warning("主聊天 Agent 早期失败，回退现有流水线: mode=%s", mode)
+
         # 4. 知识检索 + 5. 联网搜索
         # 两者同时启用时并行执行；同步检索（embedding/rerank）放入线程池，
         # 避免阻塞事件循环拖慢其他请求
@@ -447,21 +597,27 @@ class ChatService:
             # 发出检索开始信号
             yield f"data: {self._json_event('status', {'phase': 'retrieving', 'message': '正在检索知识库...'})}\n\n"
 
-            # 意图改写：用 LLM 将用户问题改写为更适合检索的查询（超时保护，避免卡死流水线）
+            # 意图改写：用 LLM 将检索查询改写为更适合向量检索的查询（超时保护，避免卡死流水线）
+            # 检索查询=用户文本 + 图片 OCR 摘录（截图检索），改写负责把长摘录压成检索式
             yield f"data: {self._json_event('status', {'phase': 'rewriting', 'message': '正在理解你的问题...'})}\n\n"
             t_rewrite = time.monotonic()
             try:
+                # 改写是增强而非必需：8s 内未完成即回退原问题检索，避免慢上游吃满 15s 旧预算
                 search_query = await asyncio.wait_for(
-                    rewrite_query(query, llm_provider), timeout=15
+                    rewrite_query(retrieval_query, llm_provider), timeout=8
                 )
-                obs.record_llm("intent_rewrite", query, search_query, t0=t_rewrite, fail_trace=False)
+                obs.record_llm("intent_rewrite", retrieval_query, search_query, t0=t_rewrite, fail_trace=False)
             except asyncio.TimeoutError:
                 logger.warning("意图改写超时，使用原问题检索")
-                obs.record_llm("intent_rewrite", query, "", t0=t_rewrite,
+                obs.record_llm("intent_rewrite", retrieval_query, "", t0=t_rewrite,
                                status="error", error="timeout", fail_trace=False)
-                search_query = query.strip()
-            if search_query != query.strip():
-                logger.info("检索查询改写: %r → %r", query[:50], search_query[:50])
+                # 贴图场景回退时按预算截断（OCR 摘录可能数百字，过长会稀释检索信号）；
+                # 纯文本提问保持原样，行为与改造前一致
+                search_query = retrieval_query.strip()
+                if ocr_excerpt:
+                    search_query = search_query[:max(60, settings.OCR_RETRIEVAL_CHARS)]
+            if search_query != retrieval_query.strip():
+                logger.info("检索查询改写: %r → %r", retrieval_query[:50], search_query[:50])
 
             retrieve_task = asyncio.create_task(
                 asyncio.to_thread(knowledge_service.retrieve_for_user, search_query, user_id)
@@ -470,7 +626,7 @@ class ChatService:
 
         if use_search:
             yield f"data: {self._json_event('status', {'phase': 'searching', 'message': '正在联网搜索...'})}\n\n"
-            search_task = asyncio.create_task(web_search(query))
+            search_task = asyncio.create_task(web_search(effective_query))
             tasks.add(search_task)
 
         # 等待检索结果（与联网搜索并行进行中）
@@ -488,7 +644,7 @@ class ChatService:
                 # Rerank 重排序 + 相关度过滤（同步计算移入线程池，避免阻塞事件循环）
                 yield f"data: {self._json_event('status', {'phase': 'reranking', 'message': '正在对检索结果重排序...'})}\n\n"
                 context_text, sources = await asyncio.to_thread(
-                    knowledge_service.format_knowledge_context, query, results
+                    knowledge_service.format_knowledge_context, effective_query, results
                 )
 
                 # 轻量 Self-RAG：信息缺口判断，证据不足时改写查询重检一次
@@ -496,32 +652,47 @@ class ChatService:
                     yield f"data: {self._json_event('status', {'phase': 'gap_checking', 'message': '正在评估证据是否充分...'})}\n\n"
                     t_evidence = time.monotonic()
                     sufficient, missing = await check_evidence_sufficiency(
-                        query, context_text, llm_provider
+                        effective_query, context_text, llm_provider
                     )
                     obs.record_llm(
                         "evidence_check",
-                        f"问题：{query}\n\n证据摘录：\n{context_text[:2000]}",
+                        f"问题：{effective_query}\n\n证据摘录：\n{context_text[:2000]}",
                         json.dumps({"sufficient": sufficient, "missing": missing or ""}, ensure_ascii=False),
                         t0=t_evidence, fail_trace=False,
                     )
                     if not sufficient:
-                        recheck_msg = f'证据不足（{missing or "信息缺口"}），正在改写重检...'
+                        recheck_msg = f'证据不足（{missing or "信息缺口"}），正在补充重检...'
                         yield f"data: {self._json_event('status', {'phase': 'rechecking', 'message': recheck_msg})}\n\n"
                         results, context_text, sources = await self._recheck_once(
-                            query, missing, user_id, results, llm_provider
+                            effective_query, missing, user_id, results, llm_provider
                         )
+                        # HITL：重检后证据仍不充分 → 判断缺口是否源于意图模糊，需要澄清追问
+                        clarification = await decide_clarification(effective_query, context_text, missing)
+                        if clarification.get("should_clarify"):
+                            yield chat_agent.clarify_event(
+                                clarification["question"], clarification["options"]
+                            )
+                            yield f"data: {self._json_event('done', {'session_id': session.session_id, 'user_message_id': user_msg.message_id, 'hitl': 'clarify'})}\n\n"
+                            return
 
-                augmented_query = knowledge_service.build_knowledge_prompt(query, context_text, True)
+                augmented_query = knowledge_service.build_knowledge_prompt(effective_query, context_text, True)
                 # segment 级 token 度量：知识上下文段（含重检后的最终上下文）
                 obs.note_segment("knowledge", context_text)
 
                 # 发出检索完成信号
                 yield f"data: {self._json_event('status', {'phase': 'retrieved', 'message': f'检索到 {len(sources)} 份相关知识文档', 'sources': sources})}\n\n"
             else:
-                augmented_query = knowledge_service.build_knowledge_prompt(query, "", True)
+                # HITL：只知识检索、未开联网、未跳过询问 → 弹卡询问是否联网搜索，结束本轮
+                if not use_search and not skip_search_prompt:
+                    yield chat_agent.need_search_event(_card_query(query, effective_query))
+                    yield f"data: {self._json_event('done', {'session_id': session.session_id, 'user_message_id': user_msg.message_id, 'hitl': 'need_search'})}\n\n"
+                    return
+                # 用户已选「直接回答」（skip_search_prompt）→ 不受知识库约束，用模型自身知识作答
+                kb_flag = False if skip_search_prompt else True
+                augmented_query = knowledge_service.build_knowledge_prompt(effective_query, "", kb_flag)
                 yield f"data: {self._json_event('status', {'phase': 'not_found', 'message': '知识库中未检索到相关内容'})}\n\n"
         else:
-            augmented_query = knowledge_service.build_knowledge_prompt(query, "", False)
+            augmented_query = knowledge_service.build_knowledge_prompt(effective_query, "", False)
 
         # 等待联网搜索结果
         if search_task is not None:
@@ -650,6 +821,11 @@ class ChatService:
         session.add_message(assistant_msg)
         self._persist_session(session)  # 每次对话后持久化
 
+        # 8.5 写入语义缓存：本次正常作答（无错误、纯文本、启用知识库）沉淀为当前用户缓存，
+        # 供后续相似问题命中直回；失败静默降级，不影响 done。
+        if llm_error is None and not attachments and use_knowledge:
+            await semantic_cache.store(user_id, effective_query, full_response, sources)
+
         # 用量统计埋点：查询次数 + 字符数（Token 估算由统计层完成）
         from app.services.usage import record_usage
         prompt_chars = sum(len(m.get("content", "")) for m in llm_messages)
@@ -669,6 +845,49 @@ class ChatService:
         }
         yield f"data: {self._json_event('done', done_data)}\n\n"
 
+    async def _finalize_agent_turn(self, session, user_msg, result, use_knowledge, use_search, llm_provider):
+        """Agent 轮次收尾：HITL 暂停只发 done；正常完成则落库/摘要/记忆/用量后发 done。
+
+        Agent 本身不发 done（单一 done 所有者=chat.py）；答案元信息由 Agent 回填到 result。
+        """
+        # HITL 暂停：不落库助手消息、不做摘要/记忆/用量，仅发 done（携带 hitl 标记）
+        if result.get("hitl"):
+            yield f"data: {self._json_event('done', {'session_id': session.session_id, 'user_message_id': user_msg.message_id, 'hitl': result['hitl']})}\n\n"
+            return
+        # Agent 内部已出错（已发 error 事件）：不再落库，直接结束（外层见 error 会 return）
+        if result.get("status") == "error":
+            return
+        full_response = result.get("answer", "")
+        assistant_msg = Message(
+            role="assistant",
+            content=full_response,
+            sources=result.get("sources", []),
+            search_results=result.get("search_results", []),
+            use_knowledge=use_knowledge,
+            use_search=use_search,
+        )
+        from copy import copy
+        summary_session = copy(session)
+        summary_session.messages = [*session.messages, assistant_msg]
+        await self._post_turn_background(summary_session, user_msg, assistant_msg, llm_provider)
+        if not db.query_one("SELECT message_id FROM chat_messages WHERE message_id=?", (user_msg.message_id,)):
+            raise asyncio.CancelledError()
+        session.add_message(assistant_msg)
+        self._persist_session(session)
+        # 写入语义缓存（Agent 轮次的正常作答同样沉淀，纯文本、启用知识库时）
+        if use_knowledge and not user_msg.attachments:
+            await semantic_cache.store(session.user_id, user_msg.content, full_response,
+                                       result.get("sources", []))
+        from app.services.usage import record_usage
+        record_usage(
+            session.user_id,
+            result.get("prompt_chars", len(full_response)),
+            len(full_response),
+            use_knowledge=use_knowledge,
+            use_search=use_search,
+        )
+        yield f"data: {self._json_event('done', {'session_id': session.session_id, 'user_message_id': user_msg.message_id, 'message': assistant_msg.to_dict()})}\n\n"
+
     async def _recheck_once(
         self,
         query: str,
@@ -677,24 +896,18 @@ class ChatService:
         first_results: list,
         llm_provider: str = None,
     ) -> tuple[list, str, list]:
-        """证据不足时的单次改写重检（轻量 Self-RAG 的第二步）
+        """证据不足时的单次补充重检（轻量 Self-RAG 的第二步）
 
-        用缺失要点引导 LLM 改写出新检索查询，重新检索并与首轮结果去重合并，
-        再整体重排序一次。任何环节失败都静默降级为首轮结果。
+        用缺失要点确定性拼接出新检索查询（省一次改写 LLM 调用，2~15s），
+        重新检索并与首轮结果去重合并，再整体重排序一次。任何环节失败都静默降级为首轮结果。
 
         Returns:
             (merged_results, context_text, sources)
         """
         try:
-            # 1. 结合缺失要点改写检索查询（超时保护）
-            rewrite_input = f"{query}（补充关注：{missing}）" if missing else query
-            try:
-                improved_query = await asyncio.wait_for(
-                    rewrite_query(rewrite_input, llm_provider), timeout=15
-                )
-            except asyncio.TimeoutError:
-                improved_query = rewrite_input
-            logger.info("Self-RAG 改写重检: %r", improved_query[:60])
+            # 1. 结合缺失要点确定性构造重检查询（与改写超时兜底同语义，免去一次 LLM 往返）
+            improved_query = f"{query.strip()} {missing.strip()}"[:120] if missing else query.strip()
+            logger.info("Self-RAG 补充重检: %r", improved_query[:60])
 
             # 2. 重新检索（同步检索移入线程池）
             new_results = await asyncio.to_thread(
@@ -741,23 +954,17 @@ class ChatService:
             logger.warning("用户记忆抽取任务异常: %s", e)
 
     def _build_system_prompt(self) -> List[dict]:
-        """构建系统提示词"""
+        """构建系统提示词。
+
+        正文由 prompt_store 托管：默认回退内置正文，若 Prompt 评测「上线」了新版本，
+        则采用已发布版本正文（固定尾规 FINAL_ANSWER_RULES 始终追加，保证引用/证据契约不变）。
+        """
+        from app.services import prompt_store
+
         return [
             {
                 "role": "system",
-                "content": (
-                    "你是「见字如面」智能助手，一个专注于健康养生知识库的问答系统。\n\n"
-                    "你的能力：\n"
-                    "1. 基于知识库内容回答用户关于健康、养生、中医等方面的问题\n"
-                    "2. 引用知识库原文和原始图片来源\n"
-                    "3. 结合联网搜索结果提供更全面的信息\n\n"
-                    "行为准则：\n"
-                    "- 回答要准确、专业、有据可查\n"
-                    "- 不确定的内容不要编造，明确告知用户\n"
-                    "- 引用来源时，清晰标注原文出处\n"
-                    "- 以温暖、关怀的语气与用户交流\n"
-                    + FINAL_ANSWER_RULES
-                ),
+                "content": prompt_store.get_active_body() + FINAL_ANSWER_RULES,
             }
         ]
 

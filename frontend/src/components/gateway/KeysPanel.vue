@@ -12,6 +12,27 @@
       <button class="btn btn-primary" @click="openCreate">+ 生成密钥</button>
     </div>
 
+    <!-- 系统内部出网密钥：配置过程显性化（来源/存储/携带方式/自愈与轮换） -->
+    <div class="internal-key-card">
+      <div class="ik-head">
+        <h3>🔧 系统内部调用密钥 · 配置过程</h3>
+        <button class="btn btn-ghost sm" :disabled="rotating" @click="onRotateInternal">{{ rotating ? '轮换中…' : '轮换密钥' }}</button>
+      </div>
+      <ol class="ik-steps">
+        <li><strong>自动创建</strong>：业务模块（聊天回答/意图改写/记忆抽取等）首次经网关出网时，<code>keys.ensure_internal_key()</code> 自动生成名为「系统内部调用」的密钥（无限配额、不限模型），无需手工配置；</li>
+        <li><strong>存储位置</strong>：明文存于 <code>gateway_settings</code> 表的 <code>internal_key</code> 字段（SQLite，本地信任边界，与上游 api_key 同级）；下方密钥表仅存哈希与前缀；</li>
+        <li><strong>携带方式</strong>：每次出网自动以 <code>Authorization: Bearer &lt;内部密钥&gt;</code> 访问本网关 <code>/v1/chat/completions</code>，日志审计中密钥名即「系统内部调用」，业务场景见展开链路的 role；</li>
+        <li><strong>自愈与轮换</strong>：密钥行被删除/禁用时下次出网自动重建；点「轮换密钥」生成新密钥并使旧密钥立即失效（新明文仅展示一次）。</li>
+      </ol>
+      <div v-if="internalMeta.configured" class="ik-meta">
+        当前：前缀 <code class="mono">{{ internalMeta.prefix }}…</code>
+        · 状态 <strong :class="internalMeta.enabled ? 'ok' : 'bad'">{{ internalMeta.enabled ? '启用' : '已禁用（下次出网自动重建）' }}</strong>
+        · 创建 {{ internalMeta.created_at ? formatTime(internalMeta.created_at) : '-' }}
+        · 已用 {{ formatNum(internalMeta.request_count) }} 次 / {{ formatNum(internalMeta.token_used) }} Token
+      </div>
+      <div v-else class="ik-meta">当前：尚未生成（业务模块首次出网时自动创建并回显于此）</div>
+    </div>
+
     <p v-if="errorMsg" class="err-tip">{{ errorMsg }}</p>
     <div v-if="loading" class="mini-loading">加载密钥中…</div>
     <div v-else-if="!keys.length" class="mini-empty">还没有密钥。生成一个下游访问密钥以开始调用网关。</div>
@@ -128,6 +149,7 @@ import { ref, reactive, computed, onMounted } from 'vue'
 import {
   listGatewayKeys, createGatewayKey, updateGatewayKey,
   deleteGatewayKey, resetGatewayKey,
+  getGatewayInternalKey, rotateGatewayInternalKey,
 } from '@/api'
 
 const keys = ref([])
@@ -135,6 +157,9 @@ const models = ref([])
 const loading = ref(true)
 const errorMsg = ref('')
 const origin = window.location.origin
+// 系统内部出网密钥配置现状（不含明文）
+const internalMeta = ref({ configured: false, prefix: '', enabled: false, created_at: '', request_count: 0, token_used: 0 })
+const rotating = ref(false)
 
 const showModal = ref(false)
 const editing = ref(null)
@@ -156,13 +181,30 @@ function formatTime(iso) {
 async function load() {
   loading.value = true
   try {
-    const res = await listGatewayKeys()
+    const [res, iRes] = await Promise.all([listGatewayKeys(), getGatewayInternalKey().catch(() => null)])
     keys.value = res.data.keys || []
     models.value = res.data.models || []
+    if (iRes) internalMeta.value = iRes.data.meta || internalMeta.value
   } catch (e) {
     errorMsg.value = e.response?.data?.detail || '加载密钥失败'
   } finally {
     loading.value = false
+  }
+}
+
+async function onRotateInternal() {
+  if (!confirm('确认轮换系统内部出网密钥？旧密钥将立即失效，业务模块下次出网自动改用新密钥。')) return
+  rotating.value = true
+  errorMsg.value = ''
+  try {
+    const res = await rotateGatewayInternalKey()
+    newPlainKey.value = res.data.key?.key || ''
+    copied.value = false
+    await load()
+  } catch (e) {
+    errorMsg.value = e.response?.data?.detail || '轮换失败'
+  } finally {
+    rotating.value = false
   }
 }
 
@@ -291,4 +333,17 @@ onMounted(load)
 .btn-ghost:hover:not(:disabled) { border-color: var(--color-primary); color: var(--color-primary); }
 .err-tip { color: #d9534f; font-size: 12.5px; margin-bottom: 10px; }
 .mini-loading, .mini-empty { color: var(--color-text-secondary); font-size: 13px; padding: 32px; text-align: center; }
+
+/* 系统内部出网密钥：配置过程显性化卡片 */
+.internal-key-card { background: #faf6ef; border: 1px dashed var(--color-primary); border-radius: 12px; padding: 14px 16px; margin-bottom: 16px; }
+.ik-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+.ik-head h3 { font-size: 13.5px; font-weight: 700; margin: 0; }
+.ik-steps { margin: 0 0 8px 18px; padding: 0; font-size: 12px; color: var(--color-text-secondary); line-height: 1.75; }
+.ik-steps li { margin-bottom: 3px; }
+.ik-steps strong { color: var(--color-text); }
+.ik-steps code { background: #f4ece0; padding: 1px 5px; border-radius: 4px; font-size: 11px; }
+.ik-meta { font-size: 11.5px; color: var(--color-text-secondary); border-top: 1px dashed #e4d9c8; padding-top: 8px; line-height: 1.7; }
+.ik-meta code { background: #f4ece0; padding: 1px 5px; border-radius: 4px; font-size: 11px; }
+.ik-meta .ok { color: #3d8b52; }
+.ik-meta .bad { color: #c0392b; }
 </style>

@@ -63,8 +63,20 @@
               </div>
             </label>
           </div>
-          <!-- 参数在线配置 -->
-          <div v-if="currentParamFields('ocr').length" class="param-panel">
+          <!-- 「网关唯一来源」：网络 OCR 连接配置已迁至模型网关，本页只读 + 跳转 -->
+          <div v-if="isGatewayManaged('ocr')" class="param-panel">
+            <p class="section-desc">
+              当前生效：<b>{{ ocrLabels[activeConfig.ocr] || activeConfig.ocr }}</b>
+              <template v-if="config.ocr_config?.[activeConfig.ocr]?.model"> · 模型 {{ config.ocr_config[activeConfig.ocr].model }}</template>
+              <template v-if="config.ocr_config?.[activeConfig.ocr]?.base_url"> · {{ config.ocr_config[activeConfig.ocr].base_url }}</template>
+            </p>
+            <p class="section-desc">该网络 OCR 的连接配置（地址 / 密钥 / 模型）已统一迁移至「模型网关 · 上游管理」，本页仅保留只读现状与引擎类型切换。</p>
+          </div>
+          <div v-if="isGatewayManaged('ocr')" class="section-actions">
+            <button class="btn btn-primary" @click="$router.push('/admin/gateway?tab=upstreams')">前往模型网关 · 上游管理</button>
+          </div>
+          <!-- 参数在线配置（仅 local 引擎；网络 provider 已迁至网关） -->
+          <div v-if="!isGatewayManaged('ocr') && currentParamFields('ocr').length" class="param-panel">
             <div class="param-row" v-for="f in currentParamFields('ocr')" :key="f.key">
               <label class="param-label">{{ f.label }}</label>
               <input
@@ -76,7 +88,7 @@
               />
             </div>
           </div>
-          <div class="section-actions">
+          <div v-if="!isGatewayManaged('ocr')" class="section-actions">
             <button
               v-if="currentParamFields('ocr').length"
               class="btn btn-primary"
@@ -196,8 +208,8 @@
               </div>
             </label>
           </div>
-          <!-- 参数在线配置 -->
-          <div v-if="currentParamFields('embedding').length" class="param-panel">
+          <!-- 参数在线配置（仅非网关托管；网络 Embedding 连接配置已迁至模型网关） -->
+          <div v-if="!isGatewayManaged('embedding') && currentParamFields('embedding').length" class="param-panel">
             <div class="param-row" v-for="f in currentParamFields('embedding')" :key="f.key">
               <label class="param-label">{{ f.label }}</label>
               <input
@@ -231,7 +243,14 @@
               <span class="info-value">{{ config.embedding?.index_loaded ? '已加载' : '尚未创建' }}<template v-if="config.embedding?.index_dimension"> · {{ config.embedding.index_dimension }} 维</template> · {{ config.embedding?.knowledge_count ?? 0 }} 个片段</span>
             </div>
           </div>
-          <div class="section-actions">
+          <!-- 「网关唯一来源」：网络 Embedding 连接配置已迁至模型网关，本页只读 + 跳转 -->
+          <div v-if="isGatewayManaged('embedding')" class="param-panel">
+            <p class="section-desc">网络 Embedding 的连接配置（地址 / 密钥 / 模型）已统一迁移至「模型网关 · 上游管理」，上方为只读现状，本页仅保留模型类型切换。</p>
+          </div>
+          <div v-if="isGatewayManaged('embedding')" class="section-actions">
+            <button class="btn btn-primary" @click="$router.push('/admin/gateway?tab=upstreams')">前往模型网关 · 上游管理</button>
+          </div>
+          <div v-if="!isGatewayManaged('embedding')" class="section-actions">
             <button
               v-if="currentParamFields('embedding').length"
               class="btn btn-primary"
@@ -283,8 +302,19 @@
               </div>
             </label>
           </div>
-          <!-- 参数在线配置 -->
-          <div v-if="currentParamFields('rerank').length" class="param-panel">
+          <!-- 「网关唯一来源」：网络 ReRank（DashScope）连接配置已迁至模型网关，本页只读 + 跳转 -->
+          <div v-if="isGatewayManaged('rerank')" class="param-panel">
+            <p class="section-desc">
+              当前生效：<b>{{ rerankLabels[activeConfig.rerank] || activeConfig.rerank }}</b>
+              <template v-if="config.rerank_config?.[activeConfig.rerank]?.model"> · 模型 {{ config.rerank_config[activeConfig.rerank].model }}</template>
+            </p>
+            <p class="section-desc">该网络 ReRank 的连接配置（地址 / 密钥 / 模型）已统一迁移至「模型网关 · 上游管理」，本页仅保留只读现状与引擎类型切换（本地 CrossEncoder 仍在下方配置）。</p>
+          </div>
+          <div v-if="isGatewayManaged('rerank')" class="section-actions">
+            <button class="btn btn-primary" @click="$router.push('/admin/gateway?tab=upstreams')">前往模型网关 · 上游管理</button>
+          </div>
+          <!-- 参数在线配置（仅 local 引擎；网络 DashScope 已迁至网关） -->
+          <div v-if="!isGatewayManaged('rerank') && currentParamFields('rerank').length" class="param-panel">
             <div class="param-row" v-for="f in currentParamFields('rerank')" :key="f.key">
               <label class="param-label">{{ f.label }}</label>
               <input
@@ -296,7 +326,7 @@
               />
             </div>
           </div>
-          <div class="section-actions">
+          <div v-if="!isGatewayManaged('rerank')" class="section-actions">
             <button
               v-if="currentParamFields('rerank').length"
               class="btn btn-primary"
@@ -394,6 +424,15 @@
             借鉴 llm-wiki 思想：LLM 作为「知识编译器」，资料入库后先被编译成结构化百科卡片并回写向量库，检索时优先命中高质量卡片，原始碎片兜底；还可对主题跨素材生成持久化 digest 综合词条。编译完全异步、失败静默降级，不影响现有问答链路。
           </p>
 
+          <!-- 分页签：配置与百科列表分开展示，避免单页内容过长 -->
+          <div class="wiki-subtabs">
+            <button class="wiki-subtab" :class="{ active: wikiTab === 'config' }" @click="wikiTab = 'config'">编译配置</button>
+            <button class="wiki-subtab" :class="{ active: wikiTab === 'pages' }" @click="wikiTab = 'pages'">
+              百科列表<span v-if="wikiPages.length" class="wiki-subtab-count">{{ wikiPages.length }}</span>
+            </button>
+          </div>
+
+          <div v-show="wikiTab === 'config'">
           <div class="toggle-row">
             <div class="toggle-info">
               <span class="toggle-label">{{ wikiForm.compile_enabled ? '知识编译已开启' : '知识编译已关闭' }}</span>
@@ -444,15 +483,17 @@
               </button>
             </div>
           </div>
+          </div>
 
-          <!-- 百科页面列表 -->
+          <!-- 百科页面列表（分页展示） -->
+          <div v-show="wikiTab === 'pages'">
           <div class="wiki-filter-row">
-            <select v-model="wikiTypeFilter" class="kb-filter-select" @change="loadWikiPages">
+            <select v-model="wikiTypeFilter" class="kb-filter-select" @change="reloadWikiPages">
               <option value="">全部类型</option>
               <option value="source">来源卡片</option>
               <option value="digest">综合词条</option>
             </select>
-            <select v-model="wikiKbFilter" class="kb-filter-select" @change="loadWikiPages">
+            <select v-model="wikiKbFilter" class="kb-filter-select" @change="reloadWikiPages">
               <option value="">全部知识库</option>
               <option v-for="kb in kbList" :key="kb.id" :value="kb.id">{{ kb.name }}</option>
             </select>
@@ -461,13 +502,26 @@
           <div v-if="wikiPagesLoading" class="loading-container"><div class="spinner"></div><p>加载百科列表...</p></div>
           <div v-else-if="!wikiPages.length" class="empty-state"><p>暂无百科词条，可点击「存量补编译」为已有资料生成知识卡片</p></div>
           <ul v-else class="wiki-page-list">
-            <li v-for="p in wikiPages" :key="p.id" class="wiki-page-item">
+            <li v-for="p in pagedWikiPages" :key="p.id" class="wiki-page-item">
               <span class="wiki-type-tag" :class="p.page_type">{{ p.page_type === 'digest' ? '综合' : '卡片' }}</span>
               <button class="wiki-page-title" :title="p.excerpt || p.title" @click="openWikiPage(p.id)">{{ p.title }}</button>
               <span v-if="p.visibility === 'private'" class="kb-visibility-badge private">私人</span>
               <button v-if="canDeleteWikiPage(p)" class="btn btn-danger btn-sm" @click="wikiPageDeleteTarget = p">删除</button>
             </li>
           </ul>
+          <div v-if="!wikiPagesLoading && wikiTotalPages > 1" class="wiki-pagination">
+            <button class="wiki-page-btn" :disabled="wikiPage <= 1" @click="wikiPage--">上一页</button>
+            <button
+              v-for="n in wikiPageNumbers"
+              :key="n"
+              class="wiki-page-num"
+              :class="{ active: n === wikiPage }"
+              @click="wikiPage = n"
+            >{{ n }}</button>
+            <button class="wiki-page-btn" :disabled="wikiPage >= wikiTotalPages" @click="wikiPage++">下一页</button>
+            <span class="wiki-page-info">共 {{ wikiPages.length }} 条</span>
+          </div>
+          </div>
         </details>
 
         <!-- 用户注册开关（自原「用户管理」标签页迁入：属系统级配置，随系统设置统一管理） -->
@@ -1075,6 +1129,22 @@
       </div>
     </div>
 
+    <!-- ============ 配置未保存离开拦截 ============ -->
+    <div v-if="leavePrompt" class="modal-overlay">
+      <div class="modal-box">
+        <h3 class="modal-title">配置未保存</h3>
+        <p class="modal-desc">系统设置页的配置已有改动但尚未保存，是否保留配置后离开？</p>
+        <div class="modal-actions">
+          <button class="btn btn-primary" :disabled="leaveSaving" @click="resolveLeave('save')">
+            <span v-if="leaveSaving" class="spinner-xs"></span>
+            {{ leaveSaving ? '保存中...' : '保存配置后离开' }}
+          </button>
+          <button class="btn btn-outline" :disabled="leaveSaving" @click="resolveLeave('leave')">不保留直接离开</button>
+          <button class="btn btn-outline" :disabled="leaveSaving" @click="resolveLeave('stay')">留在本页</button>
+        </div>
+      </div>
+    </div>
+
     <!-- ============ 图片放大查看器 ============ -->
     <div v-if="showImageViewer" class="image-viewer-overlay" @click.self="closeImageViewer">
       <div class="image-viewer-toolbar">
@@ -1118,7 +1188,7 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, onBeforeRouteLeave } from 'vue-router'
 import MarkdownIt from 'markdown-it'
 import UrlSource from '@/components/UrlSource.vue'
 import { safeArticleUrl } from '@/utils/urlArticles'
@@ -1185,11 +1255,13 @@ onMounted(() => {
   loadEntries()
   loadKbList()
   loadFullTexts()
+  window.addEventListener('beforeunload', onBeforeUnload)
 })
 
 // 离开管理/知识库页时清除注入助手的界面实时快照，避免陈旧上下文泄露到其他页面
 onUnmounted(() => {
   assistant.clearPageState()
+  window.removeEventListener('beforeunload', onBeforeUnload)
 })
 
 // ---- 路由切换同步 ----
@@ -1411,6 +1483,30 @@ const wikiKbFilter = ref('')
 const wikiDetailPage = ref(null)
 const wikiPageDeleteTarget = ref(null)
 const wikiDeletingPage = ref(false)
+// 区块内分页签：config=编译配置 / pages=百科列表；列表客户端分页，避免单页内容过长
+const wikiTab = ref('config')
+const WIKI_PAGE_SIZE = 10
+const wikiPage = ref(1)
+const wikiTotalPages = computed(() => Math.max(1, Math.ceil(wikiPages.value.length / WIKI_PAGE_SIZE)))
+const pagedWikiPages = computed(() => {
+  const start = (wikiPage.value - 1) * WIKI_PAGE_SIZE
+  return wikiPages.value.slice(start, start + WIKI_PAGE_SIZE)
+})
+// 页码省略：当前页 ±2，首尾页恒显
+const wikiPageNumbers = computed(() => {
+  const total = wikiTotalPages.value
+  const cur = wikiPage.value
+  const nums = []
+  for (let i = 1; i <= total; i++) {
+    if (i === 1 || i === total || Math.abs(i - cur) <= 2) nums.push(i)
+  }
+  return nums
+})
+watch(wikiTotalPages, (t) => { if (wikiPage.value > t) wikiPage.value = t })
+function reloadWikiPages() {
+  wikiPage.value = 1
+  loadWikiPages()
+}
 
 const renderedWikiPage = computed(() =>
   wikiDetailPage.value ? wikiMd.render(wikiDetailPage.value.content || '') : ''
@@ -1449,6 +1545,18 @@ function currentParamFields(category) {
 function currentProviderConfig(category) {
   const provider = activeConfig[category]
   return config.value[categoryConfigKey[category]]?.[provider] || {}
+}
+
+// 「网关唯一来源」：网络 OCR/Embedding/ReRank 的连接配置（地址/密钥/模型）已迁至
+// 「模型网关 · 上游管理」，系统设置页对当前选中的网络 provider 只读 + 跳转；
+// 进程内 local 引擎（ocr local / rerank local）非网络端点，仍在本页配置。
+const GATEWAY_MANAGED_PROVIDERS = {
+  ocr: ['aliyun', 'custom_api'],
+  embedding: ['ollama', 'openai', 'custom'],
+  rerank: ['dashscope'],
+}
+function isGatewayManaged(category) {
+  return (GATEWAY_MANAGED_PROVIDERS[category] || []).includes(activeConfig[category])
 }
 
 function paramPlaceholder(category, field) {
@@ -1492,6 +1600,7 @@ async function saveParams(category) {
     const cfgRes = await getSystemConfig()
     config.value = cfgRes.data
     fillParamForm(category)
+    refreshSettingsSnapshot()
   } catch (err) {
     saveResults[category] = {
       success: false,
@@ -1529,6 +1638,7 @@ async function loadConfig() {
     redisForm.url = res.data.redis_config?.url || ''
     redisForm.enabled = res.data.redis_config?.enabled !== false
     fillAllParamForms()
+    refreshSettingsSnapshot()
   } catch (err) {
     console.error('加载配置失败:', err)
   } finally {
@@ -1547,6 +1657,7 @@ async function saveRedis() {
       config.value = cfgRes.data
       redisForm.url = cfgRes.data.redis_config?.url || ''
       redisForm.enabled = cfgRes.data.redis_config?.enabled !== false
+      refreshSettingsSnapshot()
       redisTestResult.value = { success: true, message: '配置已保存并立即生效' }
     } else {
       redisTestResult.value = { success: false, message: res.data.message || '保存失败' }
@@ -1582,6 +1693,7 @@ async function loadWikiSettings() {
     const res = await getWikiConfig()
     wikiForm.compile_enabled = res.data.compile_enabled !== false
     wikiForm.priority_enabled = res.data.priority_enabled !== false
+    refreshSettingsSnapshot()
   } catch (err) {
     console.error('加载知识编译配置失败:', err)
   }
@@ -1616,6 +1728,73 @@ async function saveWikiSettings() {
     wikiMsg.value = { success: false, message: '保存失败: ' + (err.response?.data?.detail || err.message) }
   } finally {
     wikiSaving.value = false
+  }
+}
+
+// ---- 配置未保存离开拦截（系统设置页） ----
+// 草稿态 = 各分类参数表单 + Redis 表单 + 知识编译表单；加载/保存成功后打快照，与快照不一致即视为未保存改动。
+const settingsSnapshot = ref('')
+const leavePrompt = ref(false)
+const leaveSaving = ref(false)
+// 单一待决 resolver：保证同一时刻只有一个离开弹窗在等待用户选择，避免重入产生孤儿 promise
+let leaveResolve = null
+
+function settingsStateJson() {
+  return JSON.stringify({ p: paramForms, r: redisForm, w: wikiForm })
+}
+function refreshSettingsSnapshot() {
+  settingsSnapshot.value = settingsStateJson()
+}
+const settingsDirty = computed(() => !!settingsSnapshot.value && settingsStateJson() !== settingsSnapshot.value)
+
+function askLeaveChoice() {
+  leavePrompt.value = true
+  return new Promise((resolve) => { leaveResolve = resolve })
+}
+function resolveLeave(choice) {
+  leavePrompt.value = false
+  const r = leaveResolve
+  leaveResolve = null
+  if (r) r(choice)
+}
+
+async function saveAllDirtySettings() {
+  // 逐分类仅保存有改动的草稿，避免把未改动内容重复提交
+  const base = JSON.parse(settingsSnapshot.value || '{}')
+  for (const category of Object.keys(paramForms)) {
+    if (JSON.stringify(paramForms[category]) !== JSON.stringify(base.p?.[category] || {})) {
+      await saveParams(category)
+    }
+  }
+  if (JSON.stringify(redisForm) !== JSON.stringify(base.r || {})) await saveRedis()
+  if (JSON.stringify(wikiForm) !== JSON.stringify(base.w || {})) await saveWikiSettings()
+  refreshSettingsSnapshot()
+}
+
+// 路由离开拦截：系统设置页有未保存改动时弹窗确认（保存后离开/直接离开/留下）
+onBeforeRouteLeave(async () => {
+  if (route.name !== 'AdminSettings' || !settingsDirty.value) return true
+  // 已有弹窗在等待用户选择时，取消这次重复导航，由首个守卫统一放行，
+  // 避免重入绕过拦截或让待决 resolver 变孤儿（表现为“点了离开却不跳转”）
+  if (leavePrompt.value) return false
+  const choice = await askLeaveChoice()
+  if (choice === 'stay') return false
+  if (choice === 'save') {
+    leaveSaving.value = true
+    try {
+      await saveAllDirtySettings()
+    } finally {
+      leaveSaving.value = false
+    }
+  }
+  return true
+})
+
+// 浏览器级离开（关签/刷新/地址栏）：原生未保存提示
+function onBeforeUnload(e) {
+  if (route.name === 'AdminSettings' && settingsDirty.value) {
+    e.preventDefault()
+    e.returnValue = ''
   }
 }
 
@@ -1705,6 +1884,8 @@ async function handleProviderChange(type, value) {
     saveResults[type] = null
     if (type === 'ocr') ocrTestResult.value = null
     if (type === 'rerank') rerankTestResult.value = null
+    // 提供商切换已即时持久化到后端，刷新快照避免被误判为“未保存改动”
+    refreshSettingsSnapshot()
   } catch (err) {
     console.error(`切换 ${type} 提供商失败:`, err)
     alert('切换失败: ' + (err.response?.data?.detail || err.message))
@@ -3158,6 +3339,110 @@ function formatUserDate(ts) {
   align-items: center;
   gap: 8px;
   margin: 16px 0 8px;
+}
+
+.wiki-subtabs {
+  display: flex;
+  gap: 8px;
+  margin: 14px 0 4px;
+  border-bottom: 1px solid #ede6dc;
+  padding-bottom: 0;
+}
+
+.wiki-subtab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 16px;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: 8px 8px 0 0;
+  background: transparent;
+  font-size: 13px;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: all 0.2s;
+  margin-bottom: -1px;
+}
+
+.wiki-subtab:hover {
+  color: var(--color-primary);
+}
+
+.wiki-subtab.active {
+  background: white;
+  border-color: #ede6dc;
+  border-bottom-color: white;
+  color: var(--color-primary);
+  font-weight: 600;
+}
+
+.wiki-subtab-count {
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--color-primary-light);
+  font-size: 11px;
+  line-height: 18px;
+}
+
+.wiki-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+
+.wiki-page-btn {
+  padding: 5px 12px;
+  border: 1px solid #ede6dc;
+  border-radius: 8px;
+  background: white;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.wiki-page-btn:hover:not(:disabled) {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+
+.wiki-page-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.wiki-page-num {
+  min-width: 28px;
+  height: 28px;
+  padding: 0 4px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.wiki-page-num:hover {
+  background: #f3efe9;
+}
+
+.wiki-page-num.active {
+  background: var(--color-primary-light);
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+  font-weight: 600;
+}
+
+.wiki-page-info {
+  font-size: 12px;
+  color: var(--color-text-muted);
+  margin-left: 4px;
 }
 
 .wiki-page-list {

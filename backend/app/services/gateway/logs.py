@@ -45,8 +45,8 @@ def write_log(entry: dict) -> str:
             " channel_id, channel_name, upstream_url, stream, status_code, status,"
             " prompt_tokens, completion_tokens, total_tokens, latency_ms, retries,"
             " tool_calls, request_body, response_preview, risk_level, risk_score, risks,"
-            " audit_action, trace_steps, client_ip, error, created_at)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING",
+            " audit_action, trace_steps, client_ip, error, role, created_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING",
             (
                 log_id,
                 entry.get("key_id", ""), entry.get("key_name", ""),
@@ -63,7 +63,8 @@ def write_log(entry: dict) -> str:
                 entry.get("risk_level", "none"), int(entry.get("risk_score") or 0),
                 _dumps(entry.get("risks") or []), entry.get("audit_action", ""),
                 _dumps(entry.get("trace_steps") or []), entry.get("client_ip", ""),
-                _clip(entry.get("error", ""), 500), entry.get("created_at") or _now(),
+                _clip(entry.get("error", ""), 500), entry.get("role", ""),
+                entry.get("created_at") or _now(),
             ),
         )
     except Exception as e:
@@ -91,6 +92,8 @@ def _row_to_summary(row: dict) -> dict:
         "risk_score": int(row.get("risk_score") or 0),
         "audit_action": row.get("audit_action") or "",
         "client_ip": row.get("client_ip") or "",
+        # 业务场景（role）：记忆抽取/意图改写/聊天回答…，空=非业务路由发起
+        "role": row.get("role") or "",
         "created_at": row.get("created_at"),
     }
 
@@ -117,12 +120,14 @@ def get_log(log_id: str) -> Optional[dict]:
 
 def query_logs(key_id: str = "", model: str = "", channel_id: str = "", status: str = "",
                risk_level: str = "", keyword: str = "", start: str = "", end: str = "",
-               limit: int = 30, offset: int = 0) -> dict:
+               role: str = "", limit: int = 30, offset: int = 0) -> dict:
     """搜索/筛选/分页查询日志列表，返回 {total, items}。"""
     where = ["1=1"]
     params: list = []
     if key_id:
         where.append("key_id = ?"); params.append(key_id)
+    if role:
+        where.append("role = ?"); params.append(role)
     if model:
         where.append("(model_requested LIKE ? OR model_mapped LIKE ?)")
         params.extend([f"%{model}%", f"%{model}%"])

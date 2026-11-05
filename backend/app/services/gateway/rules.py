@@ -3,12 +3,17 @@
 
 路由规则 = 模型模式（支持 * 通配）→ 一组上游（有序 id 列表）+ 负载均衡策略 + 优先级 +
 默认标记 + 授权用户。选路优先级：
-  1. 显式 rule_id（用户下拉）——校验启用/模式匹配/用户授权；
-  2. role 业务路由（gateway_role_routes.rule_id）；
-  3. 模式匹配（精确 > 通配 fnmatch，各按 priority desc 取首条）；
+  1. 显式 rule_id：
+     - 带 role（业务路由注入）：严格绑定——只校验「规则上游是否支持该模型」，
+       不以 model_pattern 作门槛（pattern 是规则名/模型模式，不是 role 绑定语义）；
+       规则内无上游支持该模型时返回空候选（报 503），绝不跨规则静默回退；
+     - 不带 role（聊天页下拉）：校验启用/模式匹配/用户授权，候选再按模型支持过滤；
+  2. role 业务路由（gateway_role_routes.rule_id），同严格绑定语义；
+  3. 模式匹配（精确 > 通配 fnmatch > 上游模型支持，各按 priority desc 取首条）；
   4. is_default 默认规则；
-命中规则后取其 upstreams 列表解析为上游行，按 lb_strategy 排序（健康优先、熔断兜底），
-返回 (rule, 有序上游行[含密钥])；代理按序尝试，失败自动切换下一个并更新上游健康度。
+所有路径的候选上游均按「上游模型清单支持请求模型」过滤（清单为空视为不限制），
+杜绝把模型发给不支持它的上游（400 Invalid model id）。
+命中后按 lb_strategy 排序上游，健康优先、熔断兜底；代理按序尝试，失败自动切换下一个并更新上游健康度。
 
 负载均衡：round_robin（计数取模）/ weighted（A-Res 加权随机）/ random（洗牌）/
 priority（保持规则内上游列表顺序）；健康上游排在熔断上游之前，保留故障切换。
@@ -27,11 +32,22 @@ from app.core import db
 logger = logging.getLogger("jianziruyang.gateway.rules")
 
 LB_STRATEGIES = ("round_robin", "weighted", "random", "priority")
-# 业务角色清单（供前端下拉与校验）
+# 业务角色清单（供前端下拉与校验）：凡经 create_for_role 出网的 role 都应在此登记，
+# 否则无法在「业务路由」中绑定规则/模型（如记忆抽取曾缺席导致只能走默认模型报 503）
 ROLES = (
     "chat_answer", "assistant", "intent_rewrite", "evidence_check",
-    "wiki_compile", "embed", "rerank",
+    "wiki_compile", "embed", "rerank", "ocr",
+    "memory_extract", "session_summary", "knowledge_summarize", "text_polish",
 )
+
+# role → 上游分类映射：select_upstreams 按此过滤候选上游 category，防跨类误选
+# （如 LLM 规则误选 embedding/rerank/ocr 上游，反之亦然）。未登记 role 归 llm。
+ROLE_CATEGORY = {
+    "chat_answer": "llm", "assistant": "llm", "intent_rewrite": "llm",
+    "evidence_check": "llm", "wiki_compile": "llm", "memory_extract": "llm",
+    "session_summary": "llm", "knowledge_summarize": "llm", "text_polish": "llm",
+    "embed": "embedding", "rerank": "rerank", "ocr": "ocr",
+}
 
 
 def _now() -> str:
@@ -303,8 +319,56 @@ def resolve_rule_models(rule_id: str) -> Tuple[bool, List[str]]:
     return wildcard, models
 
 
-def _materialize(rule_row: dict) -> Tuple[dict, List[dict]]:
-    """把规则的 upstreams id 列表解析为有序上游行（含密钥，供 proxy 出网）。"""
+def resolve_chat_rule(user_id: Optional[str] = None) -> dict:
+    """解析聊天回答（chat_answer）实际匹配的路由规则与可选模型（供聊天页模型下拉）。
+
+    匹配顺序：chat_answer 业务路由绑定规则 → 全局默认规则 → 首个该用户可用的启用规则。
+    返回 {rule_id, rule_name, models, pinned_model}；models 为规则上游模型并集，
+    聊天页下拉只暴露这些模型（选不了其他规则的模型），pinned_model 为业务路由
+    固化的模型名（为空表示不选模型时在规则内均衡选择）。
+    """
+    route = get_role_route("chat_answer") or {}
+    rule_id = (route.get("rule_id") or "").strip()
+    row = None
+    if rule_id:
+        row = db.query_one("SELECT * FROM gateway_rules WHERE id=? AND enabled=1", (rule_id,))
+    if not row:
+        row = db.query_one(
+            "SELECT * FROM gateway_rules WHERE enabled=1 AND is_default=1"
+            " ORDER BY priority DESC LIMIT 1")
+    if not row:
+        for r in db.query("SELECT * FROM gateway_rules WHERE enabled=1"
+                          " ORDER BY priority DESC, created_at DESC"):
+            if _user_allowed(r, user_id):
+                row = r
+                break
+    if not row:
+        return {"rule_id": "", "rule_name": "", "models": [],
+                "pinned_model": (route.get("model_name") or "").strip()}
+    _, models = resolve_rule_models(row["id"])
+    return {
+        "rule_id": row["id"],
+        "rule_name": row.get("model_pattern") or "",
+        "models": models,
+        "pinned_model": (route.get("model_name") or "").strip(),
+    }
+
+
+def _upstream_supports(up: dict, model: str) -> bool:
+    """上游是否支持该模型：模型清单为空视为不限制；否则需精确命中或 `*`。"""
+    models = _parse_json(up.get("models"), [])
+    if not models:
+        return True
+    return any(m == model or m == "*" for m in (str(x).strip() for x in models))
+
+
+def _materialize(rule_row: dict, model: str = "",
+                 category: Optional[str] = None) -> Tuple[dict, List[dict]]:
+    """把规则的 upstreams id 列表解析为有序上游行（含密钥，供 proxy 出网）。
+
+    传入 model 时先按「上游模型清单支持」过滤，杜绝模型发往不支持它的上游；
+    传入 category 时按上游分类过滤（role→ROLE_CATEGORY），杜绝跨类误选。
+    """
     up_ids = _parse_json(rule_row.get("upstreams"), [])
     rule = _row_to_dict(rule_row)
     if not up_ids:
@@ -312,6 +376,10 @@ def _materialize(rule_row: dict) -> Tuple[dict, List[dict]]:
     rows = db.query("SELECT * FROM gateway_upstreams WHERE enabled=1")
     by_id = {r["id"]: r for r in rows}
     ups = [by_id[i] for i in up_ids if i in by_id]
+    if category:
+        ups = [u for u in ups if (u.get("category") or "llm") == category]
+    if model:
+        ups = [u for u in ups if _upstream_supports(u, model)]
     return rule, _order_by_strategy(ups, rule_row.get("lb_strategy"))
 
 
@@ -324,39 +392,80 @@ def select_upstreams(model: str, role: Optional[str] = None,
     > is_default 默认规则。命中后按 lb_strategy 排序上游，健康优先、熔断兜底。
     """
     rules = db.query("SELECT * FROM gateway_rules WHERE enabled=1")
+    # role → 上游分类：按 ROLE_CATEGORY 过滤候选上游（无 role/未知 role 视为通用 chat=llm），
+    # 防止把 embedding/rerank/ocr 请求发往 LLM 上游，或反之
+    category = ROLE_CATEGORY.get(role, "llm")
     # 1. 显式规则优先
     if rule_id:
         row = next((r for r in rules if r["id"] == rule_id), None)
-        if row and _matches(row.get("model_pattern"), model) and _user_allowed(row, user_id):
-            return _materialize(row)
-        logger.warning("显式规则不可用，回退常规选路: rule=%s model=%s user=%s",
-                       rule_id, model, user_id)
-    # 2. role 业务路由
+        if row and _user_allowed(row, user_id):
+            if role:
+                # 业务路由注入的 rule_id：严格绑定，只认「规则上游支持该模型」，
+                # 不支持时返回空候选由代理报 503，绝不跨规则静默回退混淆路由
+                rule, ups = _materialize(row, model, category)
+                if ups:
+                    return rule, ups
+                logger.warning("业务路由严格绑定：规则「%s」内无上游支持模型「%s」，"
+                               "拒绝跨规则回退: role=%s rule=%s",
+                               row.get("model_pattern"), model, role, rule_id)
+                return rule, []
+            if _matches(row.get("model_pattern"), model):
+                rule, ups = _materialize(row, model, category)
+                if ups:
+                    return rule, ups
+                logger.warning("显式规则上游均不支持模型，回退常规选路: rule=%s model=%s user=%s",
+                               rule_id, model, user_id)
+            else:
+                logger.warning("显式规则模式不匹配，回退常规选路: rule=%s model=%s user=%s",
+                               rule_id, model, user_id)
+        else:
+            logger.warning("显式规则不可用（禁用/删除/未授权），回退常规选路: rule=%s model=%s user=%s",
+                           rule_id, model, user_id)
+    # 2. role 业务路由（rule_id 未注入时）
     if role:
         route = get_role_route(role)
         rid = (route or {}).get("rule_id")
         if rid:
             row = next((r for r in rules if r["id"] == rid), None)
-            if row and _matches(row.get("model_pattern"), model) and _user_allowed(row, user_id):
-                return _materialize(row)
+            if row and _user_allowed(row, user_id):
+                rule, ups = _materialize(row, model, category)
+                if ups:
+                    return rule, ups
+                logger.warning("业务路由严格绑定：规则「%s」内无上游支持模型「%s」，"
+                               "拒绝跨规则回退: role=%s rule=%s",
+                               row.get("model_pattern"), model, role, rid)
+                return rule, []
     allowed = [r for r in rules if _user_allowed(r, user_id)]
-    # 3a. 精确模式匹配（pattern 字面等于请求模型名），按 priority desc 取首
+    # 3a. 精确模式匹配（pattern 字面等于请求模型名），按 priority desc 取首（需有上游支持）
     exact = [r for r in allowed if (r.get("model_pattern") or "").strip() == model]
-    if exact:
-        exact.sort(key=lambda r: -int(r.get("priority") or 0))
-        return _materialize(exact[0])
-    # 3b. 通配匹配（* 或 fnmatch），按 priority desc 取首
+    exact.sort(key=lambda r: -int(r.get("priority") or 0))
+    for r in exact:
+        rule, ups = _materialize(r, model, category)
+        if ups:
+            return rule, ups
+    # 3b. 通配匹配（* 或 fnmatch），按 priority desc 取首（需有上游支持）
     wild = [r for r in allowed
             if (r.get("model_pattern") or "").strip() not in ("", model)
             and _matches(r.get("model_pattern"), model)]
-    if wild:
-        wild.sort(key=lambda r: -int(r.get("priority") or 0))
-        return _materialize(wild[0])
-    # 4. 默认规则
+    wild.sort(key=lambda r: -int(r.get("priority") or 0))
+    for r in wild:
+        rule, ups = _materialize(r, model, category)
+        if ups:
+            return rule, ups
+    # 3c. 上游模型支持匹配：规则内任一上游支持该模型（按 priority desc），
+    #     避免未绑定角色被默认规则接走后发往不支持的上游
+    supp = sorted(allowed, key=lambda r: -int(r.get("priority") or 0))
+    for r in supp:
+        rule, ups = _materialize(r, model, category)
+        if ups:
+            return rule, ups
+    # 4. 默认规则（同样需有上游支持该模型）
     defaults = [r for r in allowed if int(r.get("is_default") or 0) == 1]
-    if defaults:
-        defaults.sort(key=lambda r: -int(r.get("priority") or 0))
-        return _materialize(defaults[0])
+    defaults.sort(key=lambda r: -int(r.get("priority") or 0))
+    for r in defaults:
+        rule, ups = _materialize(r, model, category)
+        if ups:
+            return rule, ups
     return None, []
 
 

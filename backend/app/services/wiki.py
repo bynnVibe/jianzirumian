@@ -430,36 +430,14 @@ class WikiService:
                 raise WikiCompileError("编译结果为空/过短")
 
             wiki_title = _first_heading(card, base_title)
-            # 重新编译：先清理该来源旧卡片
-            self.delete_page_by_source(source_image, rebuild=False)
-
-            page = self._save_page(
-                page_type="source",
-                title=wiki_title,
-                content=card,
-                kb_id=kb_id,
-                visibility=visibility,
-                owner_id=owner_id,
-                source_image=source_image,
-                source_refs=[source_image],
-                source_hash=sha,
-                analysis=analysis,
+            # 落库段（DB 写 + embed HTTP + FAISS 索引 + 派生视图重建）为同步重活，
+            # 移出主事件循环到工作线程执行，避免存量补编译阻塞其他请求
+            page = await asyncio.to_thread(
+                self._persist_page,
+                card, base_title, wiki_title, sha, analysis,
+                source_image, kb_id, visibility, owner_id,
+                source_type, pdf_preview_path, source_metadata,
             )
-            # 百科卡片以原始来源类型回写，使前端来源卡能跳回原文；打 is_wiki_page 标记
-            page["doc_ids"] = self._index_page(
-                page, source_type=source_type, pdf_preview_path=pdf_preview_path,
-                source_metadata=source_metadata,
-            )
-            self._update_doc_ids(page["id"], page["doc_ids"])
-
-            # 落盘镜像 + 缓存 + 日志 + 派生视图重建
-            wiki_store.write_page(page)
-            wiki_store.update_cache(source_image, sha, page["id"])
-            wiki_store.append_log(
-                "ingest", "source", wiki_title,
-                f"hash={sha[:12]} chunks={len(page['doc_ids'])} entities={len(analysis.get('entities', []))}"
-            )
-            self._rebuild_views()
             logger.info("[WIKI] 知识卡片编译完成 | %s | chunks=%d", wiki_title, len(page["doc_ids"]))
             return page
         except Exception as e:
@@ -467,6 +445,54 @@ class WikiService:
             raise
         finally:
             obs.end_trace(_trace_status, _trace_error)
+
+    def _persist_page(
+        self,
+        card: str,
+        base_title: str,
+        wiki_title: str,
+        sha: str,
+        analysis: dict,
+        source_image: str,
+        kb_id: str,
+        visibility: str,
+        owner_id: str,
+        source_type: str,
+        pdf_preview_path: Optional[str],
+        source_metadata: Optional[dict],
+    ) -> dict:
+        """同步落库段（在工作线程中执行）：清理旧卡片 → 保存新页 → 向量索引 → 镜像/缓存/日志/派生视图。"""
+        # 重新编译：先清理该来源旧卡片
+        self.delete_page_by_source(source_image, rebuild=False)
+
+        page = self._save_page(
+            page_type="source",
+            title=wiki_title,
+            content=card,
+            kb_id=kb_id,
+            visibility=visibility,
+            owner_id=owner_id,
+            source_image=source_image,
+            source_refs=[source_image],
+            source_hash=sha,
+            analysis=analysis,
+        )
+        # 百科卡片以原始来源类型回写，使前端来源卡能跳回原文；打 is_wiki_page 标记
+        page["doc_ids"] = self._index_page(
+            page, source_type=source_type, pdf_preview_path=pdf_preview_path,
+            source_metadata=source_metadata,
+        )
+        self._update_doc_ids(page["id"], page["doc_ids"])
+
+        # 落盘镜像 + 缓存 + 日志 + 派生视图重建
+        wiki_store.write_page(page)
+        wiki_store.update_cache(source_image, sha, page["id"])
+        wiki_store.append_log(
+            "ingest", "source", wiki_title,
+            f"hash={sha[:12]} chunks={len(page['doc_ids'])} entities={len(analysis.get('entities', []))}"
+        )
+        self._rebuild_views()
+        return page
 
     async def _throttle(self) -> None:
         """对免费/低配额 LLM 友好：相邻两次编译请求之间保留最小间隔。"""
@@ -537,22 +563,32 @@ class WikiService:
         )
         return [r["title"] for r in rows if r.get("title")]
 
-    async def synthesize(self, query: str, user_id: str) -> dict:
-        """跨素材深度综合，生成 digest 百科条目并持久化（外层记可观测性 trace）。"""
+    async def synthesize(self, query: str, user_id: str, *,
+                         visibility: Optional[str] = None,
+                         owner_id: Optional[str] = None) -> dict:
+        """跨素材深度综合，生成 digest 百科条目并持久化（外层记可观测性 trace）。
+
+        visibility/owner_id 为可选覆盖：传入时强制词条归属（对话沉淀路径A
+        用于生成 visibility=private, owner_id=用户 的私人综合词条），
+        不传则沿用由素材推导的可见性（含私人素材即私人）。
+        """
         query = (query or "").strip()
         if not query:
             raise ValueError("主题不能为空")
         obs.start_trace("wiki_synthesize", user_id, query)
         status, err = "ok", ""
         try:
-            return await self._synthesize_inner(query, user_id)
+            return await self._synthesize_inner(query, user_id,
+                                                visibility=visibility, owner_id=owner_id)
         except Exception as e:
             status, err = "error", str(e)
             raise
         finally:
             obs.end_trace(status, err)
 
-    async def _synthesize_inner(self, query: str, user_id: str) -> dict:
+    async def _synthesize_inner(self, query: str, user_id: str, *,
+                                visibility: Optional[str] = None,
+                                owner_id: Optional[str] = None) -> dict:
         """综合报告内层实现（检索素材 → LLM 生成 → 落库索引）。"""
         from app.services.knowledge import KnowledgeService
 
@@ -566,8 +602,8 @@ class WikiService:
         material_parts = []
         source_refs: List[str] = []
         kb_ids = set()
-        visibility = "public"
-        owner_id = ""
+        derived_visibility = "public"
+        derived_owner = ""
         for i, (text, meta, score) in enumerate(results[:12], start=1):
             material_parts.append(f"[来源 {i}] {text}")
             src = meta.get("source_image", "")
@@ -577,8 +613,12 @@ class WikiService:
                 kb_ids.add(meta["kb_id"])
             # 综合报告可见性：只要含私人素材即视为私人，归属首个 owner
             if meta.get("visibility") == "private":
-                visibility = "private"
-                owner_id = meta.get("owner_id", "") or owner_id
+                derived_visibility = "private"
+                derived_owner = meta.get("owner_id", "") or derived_owner
+
+        # 覆盖优先：对话沉淀等场景强制指定归属（私人词条归发起用户）
+        page_visibility = visibility or derived_visibility
+        page_owner = (owner_id or user_id) if visibility else derived_owner
 
         material = "\n\n".join(material_parts)
         kb_id = next(iter(kb_ids)) if len(kb_ids) == 1 else ""
@@ -604,8 +644,8 @@ class WikiService:
             title=title,
             content=report,
             kb_id=kb_id,
-            visibility=visibility,
-            owner_id=owner_id,
+            visibility=page_visibility,
+            owner_id=page_owner,
             source_image="",
             source_refs=source_refs,
             source_hash="",
@@ -748,6 +788,12 @@ class WikiService:
         if page.get("source_image"):
             wiki_store.remove_cache(page["source_image"])
         db.execute("DELETE FROM wiki_pages WHERE id = ?", (page_id,))
+        # 对话沉淀词条被删除时联动清理沉淀日志，允许该主题日后重新沉淀
+        try:
+            from app.services import wiki_conversation
+            wiki_conversation.forget_topic(page_id)
+        except Exception as e:
+            logger.warning("[WIKI] 清理对话沉淀日志失败: %s", e)
         wiki_store.append_log("delete", page["page_type"], page["title"], f"id={page_id[:8]}")
         self._rebuild_views()
         return True
@@ -846,34 +892,40 @@ class WikiService:
         if not wiki_compile_enabled():
             return {"scheduled": 0, "message": "知识编译未开启，请先在系统设置中启用"}
 
-        records, _ = upload_records.list_records(limit=10000, offset=0)
-        meta_map = vector_store._load_metadata()
+        # 扫描存量记录与元数据属同步重活，移出主事件循环，避免入队阶段阻塞其他请求
+        def _schedule_all() -> int:
+            records, _ = upload_records.list_records(limit=10000, offset=0)
+            meta_map = vector_store._load_metadata()
 
-        def _kb_for_source(src: str) -> str:
-            for m in meta_map.values():
-                if m.get("source_image") == src and m.get("kb_id"):
-                    return m.get("kb_id", "")
-            return ""
+            def _kb_for_source(src: str) -> str:
+                for m in meta_map.values():
+                    if m.get("source_image") == src and m.get("kb_id"):
+                        return m.get("kb_id", "")
+                return ""
 
-        scheduled = 0
-        for rec in records:
-            src = rec.get("image_path", "")
-            text = (rec.get("ocr_text") or "").strip()
-            if not src or len(text) < settings.WIKI_MIN_SOURCE_CHARS:
-                continue
-            self.schedule_compile(
-                source_image=src,
-                full_text=text,
-                kb_id=_kb_for_source(src),
-                visibility=rec.get("visibility", "public"),
-                owner_id=rec.get("owner_id", ""),
-                source_type=rec.get("source_type", "image"),
-                title=rec.get("title", "") or rec.get("filename", ""),
-                pdf_preview_path=rec.get("pdf_preview_path"),
-                force=force,
-            )
-            scheduled += 1
-        self._ensure_worker()
+            n = 0
+            for rec in records:
+                src = rec.get("image_path", "")
+                text = (rec.get("ocr_text") or "").strip()
+                if not src or len(text) < settings.WIKI_MIN_SOURCE_CHARS:
+                    continue
+                self.schedule_compile(
+                    source_image=src,
+                    full_text=text,
+                    kb_id=_kb_for_source(src),
+                    visibility=rec.get("visibility", "public"),
+                    owner_id=rec.get("owner_id", ""),
+                    source_type=rec.get("source_type", "image"),
+                    title=rec.get("title", "") or rec.get("filename", ""),
+                    pdf_preview_path=rec.get("pdf_preview_path"),
+                    force=force,
+                )
+                n += 1
+            return n
+
+        scheduled = await asyncio.to_thread(_schedule_all)
+        self._ensure_worker()  # 必须在事件循环内调用
+        logger.info("[WIKI] 存量补编译已入队 %d 条，交由后台 worker 线程处理", scheduled)
         return {"scheduled": scheduled, "message": f"已入队 {scheduled} 条资料后台编译"}
 
     def status(self) -> dict:

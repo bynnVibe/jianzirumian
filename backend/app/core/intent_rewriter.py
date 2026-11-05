@@ -49,7 +49,8 @@ async def rewrite_query(query: str, llm_provider: str = None) -> str:
         llm = LLMFactory.create_for_role("intent_rewrite")
         messages = [
             {"role": "system", "content": REWRITE_SYSTEM_PROMPT},
-            {"role": "user", "content": query},
+            # /no_think：Qwen3 系模型跳过思考链直接输出（其他模型忽略该指令）
+            {"role": "user", "content": f"{query}\n/no_think"},
         ]
 
         collected = ""
@@ -57,6 +58,9 @@ async def rewrite_query(query: str, llm_provider: str = None) -> str:
             collected += chunk
 
         rewritten = collected.strip()
+        # 个别模型会回显指令，剔除避免污染检索查询
+        if rewritten.endswith("/no_think"):
+            rewritten = rewritten[: -len("/no_think")].strip()
         # 保底：如果改写为空或过长，返回原句
         if not rewritten or len(rewritten) > 100:
             logger.warning("意图改写结果异常，使用原句: rewritten=%r", rewritten)

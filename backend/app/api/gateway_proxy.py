@@ -5,6 +5,8 @@
 不校验站点登录态（在 main.py 的 AuthMiddleware 白名单中放行 /v1/）。
 
 - POST /v1/chat/completions  聊天补全（支持 stream 流式）
+- POST /v1/embeddings        向量嵌入（role=embed，经网关代理至 embedding 类上游）
+- POST /v1/reranks           重排序（别名 /v1/rerank；role=rerank，代理至 rerank 类上游）
 - GET  /v1/models            网关聚合的可用模型清单
 """
 import logging
@@ -63,6 +65,63 @@ async def chat_completions(request: Request):
         )
     try:
         status, data = await until_disconnect(request, proxy.json_response(ctx))
+        resp = JSONResponse(status_code=status, content=data)
+    except proxy.GatewayError as e:
+        resp = _err(e.status_code, e.message, e.code)
+    resp.headers["X-Gateway-Risk"] = ctx.risk_level
+    if ctx.audit_action:
+        resp.headers["X-Gateway-Audit"] = ctx.audit_action
+    return resp
+
+
+@router.post("/embeddings")
+async def embeddings(request: Request):
+    raw_key = _extract_key(request)
+    client_ip = request.client.host if request.client else ""
+    try:
+        body = await request.json()
+    except Exception:
+        return _err(400, "请求体不是合法的 JSON", "invalid_request_error")
+    if not isinstance(body, dict) or not body.get("model"):
+        return _err(400, "缺少必填字段 model", "invalid_request_error")
+    if body.get("input") in (None, "", []):
+        return _err(400, "缺少必填字段 input", "invalid_request_error")
+    try:
+        ctx = proxy.prepare(body, raw_key, client_ip, kind="embeddings")
+    except proxy.GatewayError as e:
+        return _err(e.status_code, e.message, e.code)
+    try:
+        status, data = await until_disconnect(request, proxy.json_response_kind(ctx, "embeddings"))
+        resp = JSONResponse(status_code=status, content=data)
+    except proxy.GatewayError as e:
+        resp = _err(e.status_code, e.message, e.code)
+    resp.headers["X-Gateway-Risk"] = ctx.risk_level
+    if ctx.audit_action:
+        resp.headers["X-Gateway-Audit"] = ctx.audit_action
+    return resp
+
+
+@router.post("/reranks")
+@router.post("/rerank")
+async def reranks(request: Request):
+    raw_key = _extract_key(request)
+    client_ip = request.client.host if request.client else ""
+    try:
+        body = await request.json()
+    except Exception:
+        return _err(400, "请求体不是合法的 JSON", "invalid_request_error")
+    if not isinstance(body, dict) or not body.get("model"):
+        return _err(400, "缺少必填字段 model", "invalid_request_error")
+    if not body.get("query"):
+        return _err(400, "缺少必填字段 query", "invalid_request_error")
+    if not isinstance(body.get("documents"), list) or not body.get("documents"):
+        return _err(400, "缺少必填字段 documents（非空数组）", "invalid_request_error")
+    try:
+        ctx = proxy.prepare(body, raw_key, client_ip, kind="rerank")
+    except proxy.GatewayError as e:
+        return _err(e.status_code, e.message, e.code)
+    try:
+        status, data = await until_disconnect(request, proxy.json_response_kind(ctx, "rerank"))
         resp = JSONResponse(status_code=status, content=data)
     except proxy.GatewayError as e:
         resp = _err(e.status_code, e.message, e.code)

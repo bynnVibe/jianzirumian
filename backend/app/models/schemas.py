@@ -40,8 +40,12 @@ class ChatRequest(BaseModel):
     use_knowledge: bool = True
     use_search: bool = False
     llm_provider: Optional[str] = None
-    # 用户在聊天页选择的路由规则（仅启用网关时生效，为空走默认/角色路由）
+    # 用户在聊天页选择的路由规则（旧版下拉；现下拉已改为模型，保留兼容）
     rule_id: Optional[str] = None
+    # 用户在聊天页显式选择的出网模型（仅限匹配路由规则上游模型清单；空=规则内均衡解析）
+    model: Optional[str] = None
+    # HITL：用户在「知识库无结果」卡片上点击「直接回答」时置真，避免再次询问是否联网
+    skip_search_prompt: bool = False
 
 
 class ConfirmChatActionRequest(BaseModel):

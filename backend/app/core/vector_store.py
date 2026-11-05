@@ -128,6 +128,32 @@ class VectorStore:
             return {**result, "status": "error", "available": False, "message": failure}
         return result
 
+    def startup_probe(self) -> dict:
+        """启动期连通检测：直连上游 /embeddings（不经同进程网关，避免 lifespan 自调用挂到超时）。
+
+        结果写入当前 RuntimeEmbeddings 状态，供启动横幅与 /health 展示；不新增文档或保存索引。
+        """
+        from datetime import datetime, timezone
+        from app.core.embeddings import probe_upstream_direct
+        self.initialize()
+        res = probe_upstream_direct()
+        expected = self._store.index.d if self._store is not None else None
+        dim = res.get("dimension")
+        compatible = (dim == expected) if (expected is not None and dim) else None
+        self.embeddings._status = {
+            "status": "ok" if res["ok"] else "error",
+            "available": res["ok"],
+            "connected": res["ok"],
+            "dimension": dim,
+            "index_compatible": compatible,
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+            "message": res["message"],
+            "elapsed": res["elapsed"],
+        }
+        logger.info("Embedding 启动直连探测: ok=%s dimension=%s elapsed=%ss msg=%s",
+                    res["ok"], dim, res["elapsed"], res["message"])
+        return self.embedding_status()
+
     def initialize(self) -> bool:
         """启动时只加载既有本地索引；空库延迟至业务请求创建，不探测模型。"""
         if self._store is not None:

@@ -12,6 +12,8 @@
           <span class="trace-phase">{{ phaseLabel(step.phase) }}</span>
           <span class="trace-name">{{ step.name }}</span>
           <span class="trace-elapsed">{{ step.elapsed_ms }}ms</span>
+          <!-- 环节具体动作：内联单行明细，点击节点可展开完整内容 -->
+          <span v-if="step.detail" class="trace-step-detail" :title="step.detail">{{ step.detail }}</span>
         </div>
       </div>
       <span v-if="idx < steps.length - 1" class="trace-arrow" :class="`ar-${step.status}`">→</span>
@@ -69,6 +71,7 @@ function formatTime(iso) {
 .trace-phase { font-size: 10.5px; color: var(--color-text-secondary); font-weight: 600; }
 .trace-name { font-size: 11.5px; font-weight: 600; max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .trace-elapsed { font-size: 10px; color: var(--color-text-secondary); }
+.trace-step-detail { font-size: 10px; color: var(--color-text-secondary); max-width: 170px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1.4; background: #f6f1e8; border-radius: 5px; padding: 1px 6px; margin-top: 2px; }
 .trace-arrow { align-self: center; font-size: 16px; color: var(--color-border); padding-top: 12px; }
 
 .st-ok .trace-dot { border-color: #4a9d5f; background: #e4f4e8; color: #3d8b52; }

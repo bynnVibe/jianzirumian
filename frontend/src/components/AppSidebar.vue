@@ -44,6 +44,14 @@
         知识库
       </router-link>
 
+      <!-- Skill 配置：管理自己的技能并决定是否应用（运维角色不可见） -->
+      <router-link v-if="auth.isAuthenticated && !auth.isOps" to="/skills" class="btn-upload" :class="{ active: route.name === 'Skills' }" @click="handleNavClick">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="btn-icon">
+          <path d="M13 2L4.5 12.5H11L10 22l8.5-10.5H12L13 2z"/>
+        </svg>
+        Skill 配置
+      </router-link>
+
       <router-link v-if="auth.isAuthenticated && !auth.canOps" to="/observability" class="btn-upload" :class="{ active: route.name === 'MyObservability' }" @click="handleNavClick">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="btn-icon">
           <path d="M3 3v18h18"/><path d="M7 14l4-4 4 3 6-8"/>
@@ -100,6 +108,18 @@
                 <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
               </svg>
               <span class="item-title">{{ session.title }}</span>
+              <button
+                class="btn-delete btn-compact"
+                @click.stop="handleCompactSession(session.session_id)"
+                title="压缩历史（生成结构化摘要，节省上下文）"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+                  <polyline points="4 14 10 14 10 20"/>
+                  <polyline points="20 10 14 10 14 4"/>
+                  <line x1="14" y1="10" x2="21" y2="3"/>
+                  <line x1="3" y1="21" x2="10" y2="14"/>
+                </svg>
+              </button>
               <button
                 class="btn-delete"
                 @click.stop="handleDeleteSession(session.session_id)"
@@ -173,6 +193,20 @@
           </svg>
           查看使用情况
         </button>
+        <button class="user-menu-item" @click="openMemoryModal">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="15" height="15">
+            <path d="M12 2a7 7 0 0 0-7 7c0 2.4 1.2 4.5 3 5.7V17a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2v-2.3c1.8-1.2 3-3.3 3-5.7a7 7 0 0 0-7-7z"/>
+            <line x1="10" y1="22" x2="14" y2="22"/>
+          </svg>
+          我的记忆
+        </button>
+        <button class="user-menu-item" @click="openCacheModal">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="15" height="15">
+            <path d="M13 2L3 14h7l-1 8 10-12h-7l1-8z"/>
+          </svg>
+          语义缓存
+          <span v-if="cacheStats.count" class="user-menu-badge">{{ cacheStats.count }}</span>
+        </button>
       </div>
     </div>
 
@@ -207,6 +241,101 @@
           <button class="modal-btn modal-btn-confirm" :disabled="profileSaving" @click="saveProfile">
             {{ profileSaving ? '保存中...' : '保存' }}
           </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 我的记忆弹窗 -->
+    <div v-if="showMemoryModal" class="modal-overlay" @click.self="showMemoryModal = false">
+      <div class="modal-box memory-box">
+        <h3 class="modal-title">我的记忆</h3>
+        <p class="memory-desc">
+          记忆用于跨会话个性化回答（如饮食偏好、健康目标）。密码、证件号等敏感信息不会被记录，你可随时编辑或删除。
+        </p>
+        <div class="memory-add">
+          <input
+            class="form-input"
+            v-model.trim="memoryNewContent"
+            placeholder="主动记一条，如：记住我对海鲜过敏"
+            @keyup.enter="submitMemoryAdd"
+          />
+          <button class="modal-btn modal-btn-confirm" :disabled="memorySaving" @click="submitMemoryAdd">记住</button>
+        </div>
+        <p v-if="memoryError" class="modal-error">{{ memoryError }}</p>
+        <div v-if="memoryLoading" class="usage-loading">加载中...</div>
+        <div v-else-if="!memories.length" class="memory-empty">暂无记忆。对话中出现的偏好与事实会自动记录，也可在上方主动写入。</div>
+        <ul v-else class="memory-list">
+          <li v-for="m in memories" :key="m.id" class="memory-item">
+            <template v-if="memoryEditingId === m.id">
+              <textarea class="form-input memory-edit-input" v-model.trim="memoryEditContent" rows="2"></textarea>
+              <div class="memory-edit-actions">
+                <select class="form-input memory-type-select" v-model="memoryEditType">
+                  <option v-for="t in memoryTypeOptions" :key="t.value" :value="t.value">{{ t.label }}</option>
+                </select>
+                <button class="modal-btn modal-btn-cancel" @click="memoryEditingId = ''">取消</button>
+                <button class="modal-btn modal-btn-confirm" :disabled="memorySaving" @click="submitMemoryEdit(m)">保存</button>
+              </div>
+            </template>
+            <template v-else>
+              <span class="memory-type" :class="'mt-' + (m.memory_type || 'fact')">{{ memoryTypeLabel(m.memory_type) }}</span>
+              <span class="memory-content" :title="m.content">{{ m.content }}</span>
+              <span class="memory-meta">{{ Math.round((m.importance ?? 0.5) * 100) }}%</span>
+              <span class="memory-meta" title="最近使用">{{ memoryUsedText(m) }}</span>
+              <span class="memory-item-actions">
+                <button class="btn-delete" title="编辑" @click="startMemoryEdit(m)">编辑</button>
+                <button class="btn-delete" title="删除" @click="submitMemoryDelete(m)">删除</button>
+              </span>
+            </template>
+          </li>
+        </ul>
+        <div class="modal-actions">
+          <button class="modal-btn modal-btn-cancel" @click="showMemoryModal = false">关闭</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 语义缓存弹窗（自对话主页面收拢至此） -->
+    <div v-if="showCacheModal" class="modal-overlay" @click.self="showCacheModal = false">
+      <div class="modal-box cache-box">
+        <div class="cache-head">
+          <div class="cache-head-text">
+            <h3 class="modal-title">主问答语义缓存</h3>
+            <p class="cache-desc">相似问题直接回复你之前的答案，绕过知识检索与生成，省时省资源（仅本人可见）</p>
+          </div>
+          <label class="sc-switch" :title="cacheStats.enabled ? '点击关闭语义缓存' : '点击开启语义缓存'">
+            <input type="checkbox" :checked="cacheStats.enabled" @change="onToggleCacheEnabled($event.target.checked)" />
+            <span class="sc-slider"></span>
+          </label>
+        </div>
+        <div class="sc-stats">
+          <span class="sc-stat">相似度阈值 <b>{{ cacheStats.threshold }}</b></span>
+          <span class="sc-stat">缓存条目 <b>{{ cacheStats.count }}</b></span>
+          <span class="sc-stat">累计命中 <b>{{ cacheStats.total_hits }}</b></span>
+          <span class="sc-spacer"></span>
+          <button class="sc-mini-btn" :disabled="cacheLoading" @click="loadCache()">刷新</button>
+          <button class="sc-mini-btn danger" :disabled="cacheLoading || !cacheStats.count" @click="onClearCache">清空</button>
+        </div>
+        <div v-if="cacheMessage" class="sc-message" :class="cacheMessageType">{{ cacheMessage }}</div>
+        <div class="sc-list">
+          <div v-if="cacheLoading" class="sc-empty">加载中…</div>
+          <div v-else-if="!cacheEntries.length" class="sc-empty">暂无缓存。正常作答后会自动沉淀你的问答，后续相似问题即可命中直回。</div>
+          <div v-for="e in cacheEntries" :key="e.id" class="sc-item">
+            <div class="sc-item-main">
+              <div class="sc-q">{{ e.question }}</div>
+              <div class="sc-a">{{ e.answer }}</div>
+            </div>
+            <div class="sc-item-side">
+              <span class="sc-hits" :title="'该缓存已被命中次数'">命中 {{ e.hit_count || 0 }}</span>
+              <button class="sc-del" title="删除该缓存条目" @click="onDeleteEntry(e)">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13">
+                  <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/>
+                </svg>
+              </button>
+            </div>
+          </div>
+        </div>
+        <div class="modal-actions">
+          <button class="modal-btn modal-btn-cancel" @click="showCacheModal = false">关闭</button>
         </div>
       </div>
     </div>
@@ -338,7 +467,7 @@ import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useChatStore } from '@/stores/chat'
 import { useAuthStore } from '@/stores/auth'
-import { healthCheck, updateProfile, getMyUsageStats } from '@/api'
+import { healthCheck, updateProfile, getMyUsageStats, compactSession, listMyMemories, createMyMemory, updateMyMemory, deleteMyMemory, getSemanticCache, toggleSemanticCache, clearSemanticCache, deleteSemanticCacheEntry } from '@/api'
 
 const props = defineProps({
   open: { type: Boolean, default: false },
@@ -473,6 +602,19 @@ async function handleDeleteSession(sessionId) {
   }
 }
 
+// 手动压缩会话历史（/compact 等价物）：可填压缩侧重点，成功后提示统计
+async function handleCompactSession(sessionId) {
+  const focus = window.prompt('压缩该会话的较早历史为结构化摘要（可选填侧重点，留空使用默认策略）：', '')
+  if (focus === null) return
+  try {
+    const res = await compactSession(sessionId, focus.trim())
+    const d = res?.data || res
+    window.alert(`压缩完成：覆盖 ${d.covered_messages} 条历史消息，${d.before_chars} 字 → ${d.after_chars} 字。原始消息仍完整保留在会话记录中。`)
+  } catch (e) {
+    window.alert(e?.response?.data?.detail || e?.message || '压缩失败，请稍后重试')
+  }
+}
+
 const showLogoutConfirm = ref(false)
 
 function handleLogout() {
@@ -513,6 +655,190 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   document.removeEventListener('click', onGlobalClick)
+})
+
+// ============================================
+// 我的记忆（/memory 等价物：浏览/编辑/删除/主动写入）
+// ============================================
+const showMemoryModal = ref(false)
+const memories = ref([])
+const memoryLoading = ref(false)
+const memorySaving = ref(false)
+const memoryError = ref('')
+const memoryNewContent = ref('')
+const memoryEditingId = ref('')
+const memoryEditContent = ref('')
+const memoryEditType = ref('fact')
+const memoryTypeOptions = [
+  { value: 'preference', label: '偏好' },
+  { value: 'fact', label: '事实' },
+  { value: 'goal', label: '目标' },
+  { value: 'feedback', label: '纠正' },
+]
+
+function memoryTypeLabel(t) {
+  return memoryTypeOptions.find((o) => o.value === (t || 'fact'))?.label || '事实'
+}
+
+function memoryUsedText(m) {
+  if (!m.last_used_at) return '未使用'
+  const days = Math.floor((Date.now() - new Date(m.last_used_at).getTime()) / 86400000)
+  if (!Number.isFinite(days)) return '未使用'
+  if (days <= 0) return '今日用过'
+  return `${days} 天前用过`
+}
+
+async function loadMemories() {
+  memoryLoading.value = true
+  memoryError.value = ''
+  try {
+    const res = await listMyMemories()
+    memories.value = res?.data?.memories || []
+  } catch (e) {
+    memoryError.value = e?.response?.data?.detail || e?.message || '加载记忆失败'
+  } finally {
+    memoryLoading.value = false
+  }
+}
+
+function openMemoryModal() {
+  showUserMenu.value = false
+  showMemoryModal.value = true
+  memoryNewContent.value = ''
+  memoryEditingId.value = ''
+  loadMemories()
+}
+
+async function submitMemoryAdd() {
+  if (!memoryNewContent.value || memorySaving.value) return
+  memorySaving.value = true
+  memoryError.value = ''
+  try {
+    await createMyMemory(memoryNewContent.value)
+    memoryNewContent.value = ''
+    await loadMemories()
+  } catch (e) {
+    memoryError.value = e?.response?.data?.detail || e?.message || '写入记忆失败'
+  } finally {
+    memorySaving.value = false
+  }
+}
+
+function startMemoryEdit(m) {
+  memoryEditingId.value = m.id
+  memoryEditContent.value = m.content
+  memoryEditType.value = m.memory_type || 'fact'
+  memoryError.value = ''
+}
+
+async function submitMemoryEdit(m) {
+  if (!memoryEditContent.value || memorySaving.value) return
+  memorySaving.value = true
+  memoryError.value = ''
+  try {
+    await updateMyMemory(m.id, { content: memoryEditContent.value, memory_type: memoryEditType.value })
+    memoryEditingId.value = ''
+    await loadMemories()
+  } catch (e) {
+    memoryError.value = e?.response?.data?.detail || e?.message || '保存失败'
+  } finally {
+    memorySaving.value = false
+  }
+}
+
+async function submitMemoryDelete(m) {
+  if (!window.confirm('确定删除这条记忆？删除后不可恢复。')) return
+  memorySaving.value = true
+  memoryError.value = ''
+  try {
+    await deleteMyMemory(m.id)
+    await loadMemories()
+  } catch (e) {
+    memoryError.value = e?.response?.data?.detail || e?.message || '删除失败'
+  } finally {
+    memorySaving.value = false
+  }
+}
+
+// ============================================
+// 语义缓存（自对话主页面收拢至左下角用户菜单）
+// ============================================
+const showCacheModal = ref(false)
+const cacheLoading = ref(false)
+const cacheStats = ref({ enabled: false, threshold: 0.9, count: 0, total_hits: 0 })
+const cacheEntries = ref([])
+const cacheMessage = ref('')
+const cacheMessageType = ref('info')
+
+async function loadCache() {
+  if (auth.isGuest) return
+  cacheLoading.value = true
+  try {
+    const res = await getSemanticCache(50)
+    const d = res.data || {}
+    cacheStats.value = {
+      enabled: !!d.enabled,
+      threshold: d.threshold ?? 0.9,
+      count: d.count ?? 0,
+      total_hits: d.total_hits ?? 0,
+    }
+    cacheEntries.value = d.entries || []
+  } catch (e) {
+    cacheMessage.value = '加载语义缓存失败：' + (e?.response?.data?.detail || e?.message)
+    cacheMessageType.value = 'error'
+  } finally {
+    cacheLoading.value = false
+  }
+}
+
+function openCacheModal() {
+  showUserMenu.value = false
+  showCacheModal.value = true
+  cacheMessage.value = ''
+  loadCache()
+}
+
+async function onToggleCacheEnabled(enabled) {
+  try {
+    const res = await toggleSemanticCache(enabled)
+    cacheStats.value = { ...cacheStats.value, enabled: !!res.data?.enabled }
+    cacheMessage.value = res.data?.enabled ? '已开启语义缓存' : '已关闭语义缓存'
+    cacheMessageType.value = 'info'
+  } catch (e) {
+    cacheMessage.value = '切换失败：' + (e?.response?.data?.detail || e?.message)
+    cacheMessageType.value = 'error'
+    loadCache()
+  }
+}
+
+async function onClearCache() {
+  if (!cacheStats.value.count) return
+  if (!window.confirm('确定清空当前用户的全部语义缓存？')) return
+  try {
+    const res = await clearSemanticCache()
+    cacheMessage.value = res.data?.message || '已清空'
+    cacheMessageType.value = 'success'
+    await loadCache()
+  } catch (e) {
+    cacheMessage.value = '清空失败：' + (e?.response?.data?.detail || e?.message)
+    cacheMessageType.value = 'error'
+  }
+}
+
+async function onDeleteEntry(entry) {
+  try {
+    await deleteSemanticCacheEntry(entry.id)
+    cacheEntries.value = cacheEntries.value.filter((e) => e.id !== entry.id)
+    cacheStats.value = { ...cacheStats.value, count: Math.max(0, cacheStats.value.count - 1) }
+  } catch (e) {
+    cacheMessage.value = '删除失败：' + (e?.response?.data?.detail || e?.message)
+    cacheMessageType.value = 'error'
+  }
+}
+
+// 登录用户挂载时预拉一次缓存计数，供用户菜单徽章展示
+onMounted(() => {
+  if (auth.isAuthenticated && !auth.isGuest) loadCache()
 })
 
 // ============================================
@@ -879,6 +1205,117 @@ function chartTooltip(row) {
   color: #c98a4b;
 }
 
+.btn-compact:hover {
+  background: #e7eef9;
+  color: #4b7cc9;
+}
+
+/* ---- 我的记忆弹窗 ---- */
+.memory-box {
+  width: min(560px, 92vw);
+  max-height: 80vh;
+  overflow-y: auto;
+}
+
+.memory-desc {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  line-height: 1.6;
+  margin: 4px 0 10px;
+}
+
+.memory-add {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.memory-add .form-input {
+  flex: 1;
+}
+
+.memory-empty {
+  font-size: 13px;
+  color: var(--color-text-secondary);
+  padding: 18px 0;
+  text-align: center;
+}
+
+.memory-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 46vh;
+  overflow-y: auto;
+}
+
+.memory-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 4px;
+  border-bottom: 1px solid #efe8dd;
+  font-size: 13px;
+}
+
+.memory-type {
+  flex-shrink: 0;
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: #eee7db;
+  color: #7a6a55;
+}
+
+.memory-type.mt-preference { background: #e7f1e9; color: #4b7d54; }
+.memory-type.mt-goal { background: #e7eef9; color: #4b6e9d; }
+.memory-type.mt-feedback { background: #f9ecec; color: #9d5a4b; }
+
+.memory-content {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-text);
+}
+
+.memory-meta {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--color-text-secondary);
+}
+
+.memory-item-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.memory-item-actions .btn-delete {
+  opacity: 1;
+  width: auto;
+  height: 22px;
+  padding: 0 6px;
+  font-size: 12px;
+}
+
+.memory-item .memory-edit-input {
+  width: 100%;
+  resize: vertical;
+}
+
+.memory-edit-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 6px;
+}
+
+.memory-type-select {
+  width: auto;
+  padding: 4px 8px;
+}
+
 .empty-history {
   flex: 1;
   display: flex;
@@ -1186,6 +1623,76 @@ function chartTooltip(row) {
   background: var(--color-primary-light, #faf3e8);
   color: var(--color-primary, #c56d23);
 }
+
+.user-menu-badge {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--color-primary, #c98a4b);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+/* ---- 语义缓存弹窗 ---- */
+.cache-box {
+  width: min(560px, 92vw);
+}
+
+.cache-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.cache-head-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.cache-head .modal-title {
+  margin-bottom: 4px;
+}
+
+.cache-desc {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+  margin: 0;
+}
+
+.sc-switch { position: relative; display: inline-block; width: 40px; height: 22px; flex-shrink: 0; cursor: pointer; margin-top: 2px; }
+.sc-switch input { opacity: 0; width: 0; height: 0; }
+.sc-slider { position: absolute; inset: 0; background: #d8cbb8; border-radius: 22px; transition: .2s; }
+.sc-slider::before { content: ''; position: absolute; height: 16px; width: 16px; left: 3px; top: 3px; background: #fff; border-radius: 50%; transition: .2s; }
+.sc-switch input:checked + .sc-slider { background: var(--color-primary, #c98a4b); }
+.sc-switch input:checked + .sc-slider::before { transform: translateX(18px); }
+.sc-stats { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 12px 0; font-size: 12px; color: var(--color-text-secondary); }
+.sc-stat b { color: var(--color-primary, #c56d23); font-weight: 700; }
+.sc-spacer { flex: 1; }
+.sc-mini-btn { padding: 3px 12px; border: 1px solid var(--color-border); border-radius: 14px; background: #fff; color: var(--color-text); font-size: 12px; cursor: pointer; }
+.sc-mini-btn:hover:not(:disabled) { border-color: var(--color-primary); color: var(--color-primary); }
+.sc-mini-btn.danger:hover:not(:disabled) { border-color: #c0392b; color: #c0392b; }
+.sc-mini-btn:disabled { opacity: .5; cursor: not-allowed; }
+.sc-message { padding: 6px 10px; border-radius: 8px; font-size: 12px; margin-bottom: 8px; }
+.sc-message.success { background: #eaf6ec; color: #2e7d32; }
+.sc-message.info { background: #fdf3e0; color: #8a6d3b; }
+.sc-message.error { background: #fdecea; color: #c0392b; }
+.sc-list { max-height: 46vh; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+.sc-empty { padding: 16px; text-align: center; font-size: 12px; color: var(--color-text-secondary); }
+.sc-item { display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px; background: #fff; border: 1px solid var(--color-border); border-radius: 10px; }
+.sc-item-main { flex: 1; min-width: 0; }
+.sc-q { font-size: 13px; font-weight: 600; color: var(--color-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sc-a { font-size: 12px; color: var(--color-text-secondary); line-height: 1.5; margin-top: 3px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.sc-item-side { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; flex-shrink: 0; }
+.sc-hits { font-size: 11px; color: var(--color-text-secondary); background: #f4ede1; border-radius: 8px; padding: 1px 7px; }
+.sc-del { display: inline-flex; padding: 3px; border: none; background: transparent; color: var(--color-text-secondary); cursor: pointer; border-radius: 6px; }
+.sc-del:hover { color: #c0392b; background: #fdecea; }
 
 /* ---- 通用弹窗 ---- */
 .modal-overlay {

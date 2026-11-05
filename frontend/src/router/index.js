@@ -44,6 +44,12 @@ const routes = [
     meta: { requiresAuth: true, allowGuest: true },
   },
   {
+    path: '/skills',
+    name: 'Skills',
+    component: () => import('@/views/SkillsView.vue'),
+    meta: { requiresAuth: true, allowGuest: false },
+  },
+  {
     path: '/ingest-detail/:recordId',
     name: 'IngestDetail',
     component: () => import('@/views/IngestDetailView.vue'),

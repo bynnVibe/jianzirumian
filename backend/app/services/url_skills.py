@@ -59,7 +59,9 @@ def clean_article(node, base):
     return markdownify(str(node), heading_style="ATX", bullets="-", strip=["img"]).strip()
 
 
-def extract_article(html, url):
+def extract_article(html, url, relaxed=False):
+    """提取正文；relaxed=True 为渲染服务不可用时的降级模式：
+    放宽 trafilatura 召回、降低最小正文阈值，并允许整页净化文本兜底（带噪声警告）。"""
     soup = BeautifulSoup(html, "html.parser")
     host = urlsplit(url).hostname or ""
     skill = next((entry for entry in SKILLS if entry.matches(host)), GENERIC)
@@ -85,17 +87,25 @@ def extract_article(html, url):
                 continue
     if not body:
         # 先净化 HTML 并补全链接，再由通用 Skill 去除导航和广告。
-        clean_article(soup, url)
+        sanitized = clean_article(soup, url)
         extracted = trafilatura.extract(str(soup), url=url, output_format="html", include_links=True,
-                                        include_tables=True, include_comments=False, include_images=False)
+                                        include_tables=True, include_comments=False, include_images=False,
+                                        favor_recall=relaxed)
         if extracted:
             body = clean_article(BeautifulSoup(extracted, "html.parser"), url)
         elif node and skill is GENERIC:
             body = clean_article(node, url)
+    degraded = False
+    if not body and relaxed and len(sanitized) >= 200:
+        # 降级兜底：渲染不可用时用整页净化文本（可能含导航噪声），交人工对照确认
+        body = sanitized
+        degraded = True
     body = re.sub(r"\n{3,}", "\n\n", body).strip()
-    if len(body) < 80:
+    if len(body) < (40 if relaxed else 80):
         raise UrlImportError("empty_article", "未提取到足够的正文，网页可能需要渲染；也可手动补充正文")
     warnings = []
+    if degraded:
+        warnings.append("渲染服务不可用，正文为直接抓取的整页降级提取，可能含导航等噪声，请对照原文检查后确认")
     if re.search(r"展开全文|阅读剩余|查看完整|此内容.*付费", body):
         warnings.append("正文可能不完整，请对照原文检查后确认")
     return {"title": title[:300], "body": body[:500000], "source_site": host,

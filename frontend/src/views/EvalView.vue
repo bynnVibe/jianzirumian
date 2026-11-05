@@ -6,12 +6,20 @@
         <div class="header-title">
           <span class="header-eyebrow">Regression Suite</span>
           <h1>回归评测</h1>
-          <p class="header-sub">仿照 Ragas 评估框架对问答主链路跑离线回归，量化忠实度、回答相关性、上下文精确率与上下文召回率，防止优化引入回退</p>
+          <p class="header-sub">
+            {{ mode === 'ragas'
+              ? '仿照 Ragas 评估框架对问答主链路跑离线回归，量化忠实度、回答相关性、上下文精确率与上下文召回率，防止优化引入回退'
+              : '对系统提示词（Prompt）与用户技能（Skill）做专项评测：静态断言 + Rubric 多维打分 + A/B 行为对比，据结果一键优化并上线' }}
+          </p>
         </div>
+        <nav class="mode-tabs">
+          <button class="mode-tab" :class="{ active: mode === 'ragas' }" @click="mode = 'ragas'">问答回归 · Ragas</button>
+          <button class="mode-tab" :class="{ active: mode === 'prompt_skill' }" @click="mode = 'prompt_skill'">Prompt / Skill 评测</button>
+        </nav>
       </div>
     </header>
 
-    <div class="eval-layout">
+    <div v-if="mode === 'ragas'" class="eval-layout">
       <!-- ============ 左栏：评测集 ============ -->
       <aside class="dataset-panel">
         <div class="panel-head">
@@ -318,6 +326,11 @@
       </main>
     </div>
 
+    <!-- ============ Prompt / Skill 专项评测 ============ -->
+    <div v-else class="pse-wrap">
+      <PromptSkillEval />
+    </div>
+
     <!-- 新建评测集弹窗 -->
     <div v-if="showCreateDataset" class="modal-overlay" @click.self="showCreateDataset = false">
       <div class="modal-box">
@@ -349,6 +362,10 @@ import {
   importEvalCases, importEvalCasesFromFeedback,
   startEvalRun, listEvalRuns, getEvalRun,
 } from '@/api'
+import PromptSkillEval from '@/components/PromptSkillEval.vue'
+
+// ---- 顶层模式：ragas 问答回归 | prompt_skill 专项评测 ----
+const mode = ref('ragas')
 
 // ---- 评测集 ----
 const datasets = ref([])
@@ -765,7 +782,7 @@ function fmtTime(iso) {
   top: 0;
   z-index: 20;
 }
-.header-inner { padding: 22px 32px 18px; max-width: 1400px; }
+.header-inner { padding: 22px 32px 18px; max-width: 1400px; display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; flex-wrap: wrap; }
 .header-eyebrow {
   font-size: 11px; letter-spacing: 2.5px; text-transform: uppercase;
   color: var(--color-primary); font-weight: 700;
@@ -773,12 +790,24 @@ function fmtTime(iso) {
 .header-title h1 { font-size: 22px; font-weight: 700; margin: 2px 0 4px; letter-spacing: -0.3px; }
 .header-sub { font-size: 12.5px; color: var(--color-text-secondary); max-width: 720px; line-height: 1.5; }
 
+/* ---- 顶层模式切换 ---- */
+.mode-tabs { display: flex; gap: 6px; flex-shrink: 0; }
+.mode-tab {
+  padding: 7px 16px; font-size: 12.5px; font-weight: 600; border-radius: 999px;
+  border: 1px solid var(--color-border); background: #fff; color: var(--color-text-secondary);
+  cursor: pointer; transition: all .15s; white-space: nowrap;
+}
+.mode-tab:hover { border-color: var(--color-primary); color: var(--color-primary); }
+.mode-tab.active { background: var(--color-primary); border-color: var(--color-primary); color: #fff; }
+
+
 /* ---- 布局 ---- */
 .eval-layout {
   flex: 1; display: grid; grid-template-columns: 264px 1fr;
   gap: 20px; padding: 20px 32px 40px; max-width: 1400px; width: 100%; margin: 0 auto;
   align-items: start;
 }
+.pse-wrap { padding: 20px 32px 40px; max-width: 1400px; width: 100%; margin: 0 auto; }
 
 /* ---- 左栏 ---- */
 .dataset-panel {

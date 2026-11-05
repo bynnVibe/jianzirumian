@@ -115,6 +115,10 @@ class Settings:
     KNOWLEDGE_DIR: str = str(DATA_DIR / "knowledge")
     # llm-wiki 百科镜像目录：编译产物同时以 Markdown 落盘，可浏览/导出为知识站点
     WIKI_DIR: str = os.getenv("WIKI_DIR", str(DATA_DIR / "wiki"))
+    # Skill 文档库：OpenClaw/Anthropic Agent Skills 结构，每个技能一个含 SKILL.md 的目录，
+    # 页面卡片只展示标题+简述，完整说明书与 references 按需（渐进式/懒加载）拉取。
+    # 位于后端项目目录 backend/skills（BASE_DIR 为仓库根）。
+    SKILLS_DIR: str = os.getenv("SKILLS_DIR", str(BASE_DIR / "backend" / "skills"))
 
     # ---- 会话 ----
     # 历史窗口：携带进 LLM 上下文的最近对话轮数（一轮=一问一答）。
@@ -127,6 +131,9 @@ class Settings:
     # 附件（OCR/文档解析原文）是单次请求 Token 尖峰的最大来源，须设硬预算。
     ATTACHMENT_CTX_PER_ITEM_CHARS: int = int(os.getenv("ATTACHMENT_CTX_PER_ITEM_CHARS", "1500"))
     ATTACHMENT_CTX_TOTAL_CHARS: int = int(os.getenv("ATTACHMENT_CTX_TOTAL_CHARS", "4000"))
+    # 截图检索：图片 OCR 文本并入知识检索查询时的字符上限。
+    # 检索查询过长会稀释向量/BM25 信号（完整原文仍注入对话上下文），故单独设更紧的预算。
+    OCR_RETRIEVAL_CHARS: int = int(os.getenv("OCR_RETRIEVAL_CHARS", "300"))
     # 历史消息中「较早」消息的逐条字符上限（最近 KEEP_RECENT_FULL 条不截断，保留完整语境）。
     HISTORY_MSG_MAX_CHARS: int = int(os.getenv("HISTORY_MSG_MAX_CHARS", "800"))
     # 历史窗口内保留完整不截断的最近消息条数。
@@ -134,6 +141,23 @@ class Settings:
     # 会话摘要压缩触发阈值：消息条数或历史总字符数任一超过即触发（下调以更早压缩历史）。
     SUMMARY_TRIGGER_MESSAGE_COUNT: int = int(os.getenv("SUMMARY_TRIGGER_MESSAGE_COUNT", "12"))
     SUMMARY_TRIGGER_CHAR_COUNT: int = int(os.getenv("SUMMARY_TRIGGER_CHAR_COUNT", "6000"))
+    # ---- 记忆与上下文压缩治理（借鉴 Claude Code 设计）----
+    # 常驻「用户画像卡」注入字符预算（高重要度/偏好类记忆，每会话必载）。
+    MEMORY_PROFILE_CHARS: int = int(os.getenv("MEMORY_PROFILE_CHARS", "300"))
+    # 记忆两层加载（画像卡 + 相关检索）合计注入字符预算。
+    MEMORY_CTX_CHARS: int = int(os.getenv("MEMORY_CTX_CHARS", "600"))
+    # 压缩触发：历史 token 估算超过该值即触发（优先于条数/字符阈值）。
+    CONTEXT_COMPACT_TRIGGER_TOKENS: int = int(os.getenv("CONTEXT_COMPACT_TRIGGER_TOKENS", "6000"))
+    # 微压缩分级 clip：中间档逐条字符上限 / 更旧档深度压缩字符上限。
+    CLIP_MID_CHARS: int = int(os.getenv("CLIP_MID_CHARS", "800"))
+    CLIP_OLD_CHARS: int = int(os.getenv("CLIP_OLD_CHARS", "200"))
+    # 结构化摘要正文字符上限（五节 checklist 契约）。
+    SUMMARY_MAX_CHARS: int = int(os.getenv("SUMMARY_MAX_CHARS", "400"))
+    # ---- 用户 Skill 配置（可管理的技能：chat 提示注入 / url_import 站点抓取策略）----
+    # 单用户可创建的自定义 Skill 上限（内置 Skill 不计入）。
+    MAX_SKILLS_PER_USER: int = int(os.getenv("MAX_SKILLS_PER_USER", "50"))
+    # 聊天注入的已启用 prompt 类 Skill 合计字符预算。
+    SKILL_PROMPT_CHARS: int = int(os.getenv("SKILL_PROMPT_CHARS", "1500"))
     # 管理员 Token 告警阈值：单请求平均 prompt+completion token 超过该值即视为「用量偏高」。
     TOKEN_AVG_WARN_PER_REQUEST: int = int(os.getenv("TOKEN_AVG_WARN_PER_REQUEST", "6000"))
     PROXY_REQUEST_TIMEOUT: float = float(os.getenv("PROXY_REQUEST_TIMEOUT", "240"))
@@ -169,6 +193,35 @@ class Settings:
     WIKI_COMPILE_MAX_ATTEMPTS: int = int(os.getenv("WIKI_COMPILE_MAX_ATTEMPTS", "3"))
     # 编译产物语言（影响两步思维链提示词与派生视图措辞）
     WIKI_LANG: str = os.getenv("WIKI_LANG", "zh")
+
+    # ---- llm-wiki 对话/检索历史沉淀（路径A：高频主题 → digest 私人综合词条） ----
+    # 独立开关：周期性从用户对话/检索历史归纳高频主题，自动综合成 visibility=private
+    # 的私人百科词条（复用 digest 编译内核）；关闭后不影响上传编译与问答主链路。
+    WIKI_CONVERSATION_COMPILE_ENABLED: bool = os.getenv("WIKI_CONVERSATION_COMPILE_ENABLED", "true").lower() == "true"
+    # 质量闸门：主题需在窗口内被 ≥N 次不同提问命中才沉淀（过滤一次性提问噪声）
+    WIKI_CONVERSATION_MIN_HITS: int = int(os.getenv("WIKI_CONVERSATION_MIN_HITS", "3"))
+    # 统计回溯窗口（天）
+    WIKI_CONVERSATION_WINDOW_DAYS: int = int(os.getenv("WIKI_CONVERSATION_WINDOW_DAYS", "30"))
+    # 周期任务运行间隔（小时）
+    WIKI_CONVERSATION_INTERVAL_HOURS: float = float(os.getenv("WIKI_CONVERSATION_INTERVAL_HOURS", "24"))
+    # 单用户单次最多沉淀的主题数（控制 LLM 综合成本）
+    WIKI_CONVERSATION_MAX_TOPICS: int = int(os.getenv("WIKI_CONVERSATION_MAX_TOPICS", "3"))
+    # 参与归纳的近期提问条数上限（控制 LLM 输入成本）
+    WIKI_CONVERSATION_MAX_QUERIES: int = int(os.getenv("WIKI_CONVERSATION_MAX_QUERIES", "60"))
+    # 参与主题归纳的单条提问最小长度（过滤「好的」「谢谢」等寒暄）
+    WIKI_CONVERSATION_MIN_QUERY_LEN: int = int(os.getenv("WIKI_CONVERSATION_MIN_QUERY_LEN", "4"))
+
+    # ---- 主问答语义缓存（按用户历史问答，语义相似问题命中直回、绕过检索路由） ----
+    # 总开关（可在系统设置页运行时覆盖）
+    SEMANTIC_CACHE_ENABLED: bool = os.getenv("SEMANTIC_CACHE_ENABLED", "true").lower() == "true"
+    # 命中判定阈值（余弦相似度，越高越严格）
+    SEMANTIC_CACHE_THRESHOLD: float = float(os.getenv("SEMANTIC_CACHE_THRESHOLD", "0.90"))
+    # 单用户缓存条目上限（超出按最近最少使用淘汰）
+    SEMANTIC_CACHE_MAX_ENTRIES: int = int(os.getenv("SEMANTIC_CACHE_MAX_ENTRIES", "200"))
+    # 参与匹配/写入的提问最小长度（过滤过短寒暄）
+    SEMANTIC_CACHE_MIN_QUESTION_CHARS: int = int(os.getenv("SEMANTIC_CACHE_MIN_QUESTION_CHARS", "4"))
+    # 可写入缓存的回答最小长度（过短回答不缓存，避免污染）
+    SEMANTIC_CACHE_MIN_ANSWER_CHARS: int = int(os.getenv("SEMANTIC_CACHE_MIN_ANSWER_CHARS", "30"))
 
 
 settings = Settings()

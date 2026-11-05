@@ -139,6 +139,16 @@ class RuntimeConfig:
     def wiki_priority_enabled(self, value: bool):
         self.set("wiki_priority_enabled", bool(value))
 
+    # ---- 主问答语义缓存 ----
+    @property
+    def semantic_cache_enabled(self):
+        """语义缓存开关（None = 未配置，回退 .env 默认）"""
+        return self._data.get("semantic_cache_enabled")
+
+    @semantic_cache_enabled.setter
+    def semantic_cache_enabled(self, value: bool):
+        self.set("semantic_cache_enabled", bool(value))
+
     # ---- 提供商参数覆盖（页面在线配置，覆盖 .env 默认值） ----
     def get_provider_settings(self, category: str, provider: str) -> dict:
         """获取某类别/提供商的参数覆盖（仅页面保存过的字段）"""

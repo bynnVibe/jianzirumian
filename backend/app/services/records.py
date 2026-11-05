@@ -293,7 +293,9 @@ class UploadRecordService:
         )
 
     def delete_record(self, record_id: str) -> bool:
-        """删除记录"""
+        """删除记录（同步注销来源指纹，保证删除后可重新入库）"""
+        from app.services import ingest_dedup
+        ingest_dedup.unregister_by_record(record_id)
         return db.execute("DELETE FROM upload_records WHERE id = ?", (record_id,)) > 0
 
     def delete_record_by_source(self, source_image: str) -> bool:
@@ -303,6 +305,8 @@ class UploadRecordService:
         )
         if not row:
             return False
+        from app.services import ingest_dedup
+        ingest_dedup.unregister_by_record(row["id"])
         _remove_record_files(_row_to_record(row))
         db.execute("DELETE FROM upload_records WHERE id = ?", (row["id"],))
         return True
@@ -317,10 +321,12 @@ class UploadRecordService:
 
     def delete_all_records(self) -> int:
         """删除全部记录及其物理文件（清空知识库用），返回删除条数"""
+        from app.services import ingest_dedup
         rows = db.query("SELECT * FROM upload_records")
         for row in rows:
             _remove_record_files(_row_to_record(row))
         db.execute("DELETE FROM upload_records")
+        ingest_dedup.unregister_all()
         return len(rows)
 
 

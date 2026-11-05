@@ -16,7 +16,15 @@
       </template>
     </div>
     <div class="content-area">
-      <div class="sender-name">{{ role === 'user' ? '你' : '见字如面' }}</div>
+      <div class="sender-name">{{ role === 'user' ? '你' : '见字如面' }}
+        <span v-if="role === 'assistant' && cacheHit" class="cache-hit-badge"
+              :title="'本回答命中语义缓存，直接回复你之前相似问题的答案（相似度 ' + Math.round((cacheScore || 0) * 100) + '%），未走知识检索'">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="11" height="11">
+            <path d="M13 2L3 14h7l-1 8 10-12h-7l1-8z"/>
+          </svg>
+          语义缓存命中<span v-if="cacheScore"> · {{ Math.round(cacheScore * 100) }}%</span>
+        </span>
+      </div>
       <!-- 用户发送的附件（图片/文档）回显：点击在新页面预览 -->
       <div v-if="role === 'user' && attachments && attachments.length" class="message-attachments">
         <template v-for="(att, idx) in attachments" :key="idx">
@@ -363,6 +371,8 @@ const props = defineProps({
   messageId: { type: String, default: '' },
   feedback: { type: Object, default: null },
   canFeedback: { type: Boolean, default: false },
+  cacheHit: { type: Boolean, default: false },
+  cacheScore: { type: Number, default: 0 },
 })
 
 const emit = defineEmits(['reask', 'feedback'])
@@ -743,6 +753,21 @@ async function saveBookmark() {
   font-weight: 600;
   color: var(--color-text);
   margin-bottom: 6px;
+}
+
+.cache-hit-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: 8px;
+  padding: 1px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #8a6d3b;
+  background: #fdf3e0;
+  border: 1px solid #e8d3ac;
+  border-radius: 10px;
+  vertical-align: middle;
 }
 
 .message-content {

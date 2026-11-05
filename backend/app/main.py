@@ -37,6 +37,8 @@ from app.api import observability as observability_api
 from app.api import pipeline as pipeline_api
 from app.api import gateway as gateway_api
 from app.api import gateway_proxy as gateway_proxy_api
+from app.api import me as me_api
+from app.api import skills as skills_api
 from app.services import auth as auth_service
 from app.config import settings
 from app.core.log_setup import setup_logging, current_username
@@ -96,7 +98,8 @@ async def lifespan(app: FastAPI):
     # 只加载本地索引，不调用 Embedding；本地持久化损坏阻断启动。
     index_loaded = vector_store.initialize()
     if settings.EMBEDDING_STARTUP_PROBE:
-        await asyncio.to_thread(vector_store.probe_embeddings)
+        # 直连上游探测（不经同进程网关自调用，避免 lifespan 未受理入站请求而误报超时）
+        await asyncio.to_thread(vector_store.startup_probe)
     # 存量向量归入默认公共知识库（依赖向量库元数据，不依赖 Embedding 服务）
     from app.services import kb as kb_service
     kb_service.patch_legacy_metadata()
@@ -117,6 +120,9 @@ async def lifespan(app: FastAPI):
         recovered = wiki_service.recover_queue()
         if recovered:
             logger.info("llm-wiki 编译队列恢复：%d 条待处理任务", recovered)
+        # 对话/检索历史沉淀（路径A）：启动周期任务，从高频提问归纳私人综合词条
+        from app.services import wiki_conversation
+        wiki_conversation.start_periodic()
     except Exception as e:
         logger.warning("llm-wiki 初始化/队列恢复失败: %s", e)
     # Agent 可观测性：清理过期 trace/span（保留 30 天，防止完整 prompt 撑大数据库）
@@ -132,6 +138,13 @@ async def lifespan(app: FastAPI):
         gw_logs.purge_old(int(gw_settings.get_settings().get("log_retention_days") or 30))
     except Exception as e:
         logger.warning("模型网关过期日志清理失败: %s", e)
+    # 模型网关：把系统设置里已配置的网络 OCR/Embedding/ReRank provider 幂等迁入网关上游
+    # （「网关唯一来源」：多模态出网配置只存在于网关上游，存量配置不丢失）
+    try:
+        from app.services.gateway import upstreams as gw_upstreams
+        gw_upstreams.seed_network_providers_from_settings()
+    except Exception as e:
+        logger.warning("模型网关多模态上游种子化失败: %s", e)
     print(f"[见字如面] 服务启动完成")
     print(f"  - LLM: {runtime_config.llm_provider or settings.LLM_PROVIDER} (默认: {settings.LLM_PROVIDER})")
     print(f"  - OCR: {runtime_config.ocr_provider or settings.OCR_PROVIDER} (默认: {settings.OCR_PROVIDER})")
@@ -150,6 +163,11 @@ async def lifespan(app: FastAPI):
         runtime.stop()
         from app.services.url_imports import url_imports
         await url_imports.shutdown()
+        try:
+            from app.services import wiki_conversation
+            await wiki_conversation.stop_periodic()
+        except Exception as e:
+            logger.warning("对话沉淀周期任务停止失败: %s", e)
         print("[见字如面] 服务关闭")
 
 
@@ -197,6 +215,8 @@ app.include_router(observability_api.router)
 app.include_router(pipeline_api.router)
 app.include_router(gateway_api.router)
 app.include_router(gateway_proxy_api.router)
+app.include_router(me_api.router)
+app.include_router(skills_api.router)
 
 
 # ---- 鉴权中间件：除 /api/auth/* 和 /api/health 外都需要登录 ----

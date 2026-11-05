@@ -290,6 +290,7 @@ body {
       <div class="chat-scroll">
         <div class="chat-inner">
           <div class="pipeline">
+            <span class="pipe-step done" style="background:#efe0cb;color:#8a6a3f;font-weight:600">复杂度：简单 · 固定流水线</span>
             <span class="pipe-step done">✓ 意图改写</span><span class="pipe-step done">✓ 知识库检索</span>
             <span class="pipe-step done">✓ Rerank 重排</span><span class="pipe-step done">✓ 证据充分性判断</span>
             <span class="pipe-step done">✓ 百科卡片前置 ×5</span><span class="pipe-step done">✓ 生成回答</span>
@@ -344,6 +345,46 @@ body {
                 <button class="chip-btn">📋 复制</button><button class="chip-btn">🔄 重新生成</button>
               </div>
             </div>
+          </div>
+          <!-- 复杂度分流：复杂问题走 Plan&Execute，实时展示解题计划 / 工具调用过程面板 -->
+          <div class="msg msg-user">
+            <div class="msg-body">先检索穴位知识，再为我制定一份针对失眠的综合调理方案并说明每步理由</div>
+          </div>
+          <div class="msg msg-ai">
+            <div class="msg-body">
+              <div class="msg-who"><span class="mini-logo"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" width="13" height="13"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.2 1.8" stroke-linecap="round"/></svg></span>见字如面</div>
+              <div style="border:1px dashed #e0cdb2;border-radius:10px;background:#fffdf9;padding:8px 10px;font-size:12px;color:#4a3f35;margin:6px 0 10px">
+                <div style="color:#c98a4b;font-weight:600;font-size:11px;margin-bottom:5px">复杂度：复杂 · Plan&amp;Execute</div>
+                <div style="font-weight:600;margin-bottom:3px">解题计划</div>
+                <ol style="margin:0 0 6px;padding-left:18px;line-height:1.7">
+                  <li><span style="background:#c98a4b;color:#fff;border-radius:999px;padding:1px 7px;font-size:10.5px">search_knowledge</span> 检索失眠的穴位推拿调理资料</li>
+                  <li><span style="background:#c98a4b;color:#fff;border-radius:999px;padding:1px 7px;font-size:10.5px">search_knowledge</span> 检索食疗与作息调养建议</li>
+                </ol>
+                <div style="border-top:1px solid #f0e4d2;padding-top:5px"><b>工具调用</b>：search_knowledge ✓ 命中 5 条 · search_knowledge ✓ 命中 3 条</div>
+              </div>
+              <p>根据知识库为你整理的失眠综合调理方案如下：第一步穴位推拿（神门穴、安眠穴）<span class="cite">[来源 1]</span>，第二步食疗（百合莲子羹）<span class="cite">[来源 2]</span>……</p>
+            </div>
+          </div>
+          <!-- HITL ①：仅开知识检索、未开联网且知识库无结果 → 询问是否联网搜索（本轮暂停） -->
+          <div class="msg msg-user">
+            <div class="msg-body">量子计算的基本原理是什么？</div>
+          </div>
+          <div style="margin:8px 0 8px 44px;border:1px solid #eed9bb;border-radius:10px;background:#fffdf9;padding:10px 12px;max-width:520px">
+            <span style="font-size:10.5px;font-weight:600;color:#fff;background:#c98a4b;border-radius:999px;padding:2px 8px">需要你的确认</span>
+            <p style="font-size:13px;color:#4a3f35;margin:8px 0 10px;line-height:1.6">知识库中未检索到相关内容，是否联网搜索获取公开资料？</p>
+            <button class="chip-btn" style="background:#c98a4b;color:#fff;border-color:#c98a4b">🌐 联网搜索</button>
+            <button class="chip-btn">直接回答</button>
+          </div>
+          <!-- HITL ②：证据不足且意图模糊 → LLM 生成澄清追问 + 可点选补充方向 -->
+          <div class="msg msg-user">
+            <div class="msg-body">帮我调理一下</div>
+          </div>
+          <div style="margin:8px 0 8px 44px;border:1px solid #eed9bb;border-radius:10px;background:#fffdf9;padding:10px 12px;max-width:520px">
+            <span style="font-size:10.5px;font-weight:600;color:#fff;background:#c98a4b;border-radius:999px;padding:2px 8px">想更懂你的问题</span>
+            <p style="font-size:13px;color:#4a3f35;margin:8px 0 10px;line-height:1.6">你想调理哪方面呢？补充后我能给出更贴合的建议。</p>
+            <button class="chip-btn">改善失眠</button>
+            <button class="chip-btn">调理脾胃</button>
+            <button class="chip-btn">缓解疲劳</button>
           </div>
         </div>
       </div>

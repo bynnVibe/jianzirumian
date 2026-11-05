@@ -34,6 +34,7 @@ from app.models.schemas import (
     UploadRecordUpdate,
     UploadResponse,
 )
+from app.services import ingest_dedup
 from app.services.knowledge import DOC_TYPE_EXTENSIONS, knowledge_service
 from app.services.records import upload_records
 from app.services.upload_pipeline import upload_pipeline
@@ -175,6 +176,16 @@ async def upload_image(
     owner_id = current_user.get("id") or current_user.get("username") or ""
     save_title = title.strip() or Path(file.filename).stem
 
+    # 重复入库校验：入口比对来源指纹，同库已入库直接拦截（409），避免重复 OCR/向量化
+    eff_kb, eff_vis, eff_owner = knowledge_service._resolve_kb(kb_id, visibility, owner_id)
+    fingerprint = ingest_dedup.compute_file_fingerprint(save_path)
+    try:
+        ingest_dedup.ensure_can_ingest(fingerprint, eff_kb, ingest_dedup.KIND_FILE, save_title)
+    except ingest_dedup.DuplicateIngestError as e:
+        if os.path.exists(save_path):
+            os.remove(save_path)
+        raise HTTPException(status_code=409, detail=str(e))
+
     try:
         result = await knowledge_service.process_image(
             image_path=save_path,
@@ -186,7 +197,7 @@ async def upload_image(
         )
 
         # 保存上传记录
-        upload_records.add_record(
+        record = upload_records.add_record(
             filename=file.filename,
             image_path=save_path,
             ocr_text=result["ocr_text"],
@@ -204,8 +215,13 @@ async def upload_image(
             from app.services.usage import record_upload
             record_upload(owner_id)
 
+            # 重复入库校验：入库成功登记来源指纹（幂等），供下次同库入口拦截
+            ingest_dedup.register(
+                fingerprint, ingest_dedup.KIND_FILE, eff_kb, source_type="image",
+                title=save_title, owner_id=owner_id, record_id=record["id"], source_ref=save_path,
+            )
+
             # llm-wiki：后台编译百科卡片（kb 解析与入库保持一致，使卡片能命中知识库路由）
-            eff_kb, eff_vis, eff_owner = knowledge_service._resolve_kb(kb_id, visibility, owner_id)
             wiki_service.schedule_compile(
                 source_image=save_path,
                 full_text=result["ocr_text"],
@@ -253,6 +269,8 @@ async def upload_images_batch(
 ):
     """批量上传图片，通过 SSE 流返回实时进度"""
     owner_id = current_user.get("id") or current_user.get("username") or ""
+    # 目标知识库解析（批量内所有文件同库），供重复入库校验与卡片编译复用
+    eff_kb, eff_vis, eff_owner = knowledge_service._resolve_kb(kb_id, visibility, owner_id)
 
     # 先读入上传内容到内存：StreamingResponse 生成器在请求结束后才执行，
     # 届时上传临时文件已被框架关闭，再读会报 read of closed file
@@ -281,6 +299,19 @@ async def upload_images_batch(
                 _validate_size(content, filename)
                 with open(save_path, "wb") as f:
                     f.write(content)
+
+                # 重复入库校验：同库相同来源已入库则跳过（emit file_duplicate），避免重复处理
+                fingerprint = ingest_dedup.compute_bytes_fingerprint(content)
+                dup = ingest_dedup.find_in_kb(fingerprint, eff_kb)
+                if dup:
+                    dup_title = dup.get("title") or Path(filename).stem
+                    errors.append({"filename": filename, "duplicate": True})
+                    try:
+                        os.remove(save_path)
+                    except OSError:
+                        pass
+                    yield f"data: {json.dumps({'event': 'file_duplicate', 'index': i, 'filename': filename, 'message': f'重复入库：《{dup_title}》已在当前知识库入库，已跳过'}, ensure_ascii=False)}\n\n"
+                    continue
 
                 yield f"data: {json.dumps({'event': 'file_start', 'index': i, 'filename': filename}, ensure_ascii=False)}\n\n"
 
@@ -320,8 +351,11 @@ async def upload_images_batch(
 
                 # llm-wiki：批量上传也逐张后台编译百科卡片
                 if result["chunk_count"] > 0:
-                    eff_kb, eff_vis, eff_owner = knowledge_service._resolve_kb(
-                        kb_id, visibility, owner_id
+                    # 重复入库校验：入库成功登记来源指纹（幂等）
+                    ingest_dedup.register(
+                        fingerprint, ingest_dedup.KIND_FILE, eff_kb, source_type="image",
+                        title=file_title, owner_id=owner_id, record_id=record["id"],
+                        source_ref=str(save_path),
                     )
                     wiki_service.schedule_compile(
                         source_image=str(save_path),
@@ -376,6 +410,16 @@ async def upload_document(
     owner_id = current_user.get("id") or current_user.get("username") or ""
     save_title = title.strip() or Path(file.filename).stem
 
+    # 重复入库校验：入口比对来源指纹，同库已入库直接拦截（409），避免重复解析/向量化
+    eff_kb, eff_vis, eff_owner = knowledge_service._resolve_kb(kb_id, visibility, owner_id)
+    fingerprint = ingest_dedup.compute_file_fingerprint(save_path)
+    try:
+        ingest_dedup.ensure_can_ingest(fingerprint, eff_kb, ingest_dedup.KIND_FILE, save_title)
+    except ingest_dedup.DuplicateIngestError as e:
+        if os.path.exists(save_path):
+            os.remove(save_path)
+        raise HTTPException(status_code=409, detail=str(e))
+
     try:
         result = await knowledge_service.process_document(
             file_path=save_path,
@@ -401,7 +445,11 @@ async def upload_document(
 
         # llm-wiki：后台编译文档百科卡片
         if result["chunk_count"] > 0:
-            eff_kb, eff_vis, eff_owner = knowledge_service._resolve_kb(kb_id, visibility, owner_id)
+            # 重复入库校验：入库成功登记来源指纹（幂等），供下次同库入口拦截
+            ingest_dedup.register(
+                fingerprint, ingest_dedup.KIND_FILE, eff_kb, source_type=doc_type,
+                title=save_title, owner_id=owner_id, record_id=record["id"], source_ref=save_path,
+            )
             wiki_service.schedule_compile(
                 source_image=save_path,
                 full_text=result["text"],
@@ -521,10 +569,17 @@ async def pending_upload_file(
         owner_id=owner_id,
         ocr_provider=ocr_provider,
     )
+    # 重复入库校验：入口即比对来源指纹，命中既有入库则回传预警（不阻断解析，
+    # 用户仍可入库到其他知识库；同库重复入库会在确认入库时被拦截）。
+    duplicate = ingest_dedup.duplicate_hint(ingest_dedup.compute_file_fingerprint(save_path))
+    if duplicate["found"]:
+        item["duplicate"] = duplicate
+        logger.info("知识库上传命中重复来源 [%s] %s：%s",
+                    source_type, file.filename, duplicate["message"])
     # 后台多线程解析，上传接口立即返回（前端轮询状态）
     upload_pipeline.schedule_parse(item["id"])
     logger.info("知识库上传登记 [%s] %s", source_type, file.filename)
-    return {"success": True, "item": item}
+    return {"success": True, "item": item, "duplicate": duplicate}
 
 
 @router.get("/pending")
@@ -608,6 +663,9 @@ async def ingest_pending_file(
             parsed_text=body.parsed_text,
             pages=body.pages,
         )
+    except ingest_dedup.DuplicateIngestError as e:
+        # 重复入库：同一知识库内相同来源已入库，不再重复写入（409）
+        raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -1565,6 +1623,51 @@ async def polish_ocr(body: PolishOCRRequest):
 
     except Exception as e:
         return {"success": False, "message": f"润色失败: {str(e)}", "polished_text": body.ocr_text}
+
+
+class CleanArticleRequest(BaseModel):
+    text: str
+
+
+@router.post("/clean-article")
+async def clean_article(body: CleanArticleRequest, user: dict = Depends(get_current_user)):
+    """链接正文「内容润色」：按 Skill 配置（scope=polish）做确定性清洗。
+
+    只删噪声不新增内容：去角标/页码/版权/关注引导等噪声行与多余空格，
+    保留段落顺序与自然段（单个空行），不重排、不改写句子。
+    """
+    from app.services import article_clean
+    from app.services.skill import skill_service
+
+    text = body.text or ""
+    if not text.strip():
+        return {"success": False, "message": "文本为空", "cleaned_text": ""}
+
+    policy = skill_service.polish_policy(user["id"])
+    if not any(policy.get(k) for k in (
+        "remove_footnote_markers", "remove_noise_lines", "collapse_spaces", "collapse_blank_lines"
+    )) and not policy.get("extra_line_patterns"):
+        return {
+            "success": True, "cleaned_text": text, "stats": {},
+            "message": "未启用任何正文清洗策略，已返回原文；可在「Skill 配置」中开启内置「链接正文清洗策略」或自建技能。",
+        }
+
+    try:
+        result = article_clean.clean_article(text, policy)
+    except Exception as e:
+        logger.warning("正文清洗失败，返回原文: %s", e)
+        return {"success": False, "message": f"润色失败: {e}", "cleaned_text": text}
+
+    stats = result["stats"]
+    parts = []
+    if stats.get("removed_lines"):
+        parts.append(f"移除 {stats['removed_lines']} 处噪声行")
+    if stats.get("removed_footnotes"):
+        parts.append(f"删除 {stats['removed_footnotes']} 个角标")
+    if stats.get("collapsed_spaces"):
+        parts.append(f"压缩 {stats['collapsed_spaces']} 处多余空格")
+    message = "润色完成：" + "、".join(parts) if parts else "润色完成：未发现需要清洗的内容"
+    return {"success": True, "cleaned_text": result["cleaned"], "stats": stats, "message": message}
 
 
 # ============================================

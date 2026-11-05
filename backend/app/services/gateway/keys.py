@@ -173,6 +173,41 @@ def ensure_internal_key() -> str:
     return plain
 
 
+def get_internal_key_meta() -> dict:
+    """系统内部出网密钥的配置现状（供管理页显性化展示，不含明文）。"""
+    from app.services.gateway import settings as settings_svc
+    plain = (settings_svc.get_settings().get("internal_key") or "").strip()
+    meta = {"configured": bool(plain), "prefix": plain[:len(_KEY_PREFIX) + 6] if plain else "",
+            "name": _INTERNAL_KEY_NAME, "key_id": "", "enabled": False,
+            "created_at": "", "request_count": 0, "token_used": 0}
+    if plain:
+        row = db.query_one("SELECT * FROM gateway_keys WHERE key_hash=?", (_hash(plain),))
+        if row:
+            info = _row_to_dict(row)
+            meta.update({"key_id": info["id"], "enabled": info["enabled"],
+                         "created_at": info["created_at"] or "",
+                         "request_count": info["request_count"],
+                         "token_used": info["token_used"]})
+    return meta
+
+
+def rotate_internal_key(created_by: str = "") -> dict:
+    """轮换系统内部出网密钥：新建密钥行 → 更新 settings.internal_key → 删除旧行。
+
+    返回含明文的创建结果（仅此一次展示）；轮换后旧密钥立即失效，
+    业务模块下次出网自动携带新密钥（create_for_role 每次现取）。
+    """
+    from app.services.gateway import settings as settings_svc
+    old = (settings_svc.get_settings().get("internal_key") or "").strip()
+    info = create_key(_INTERNAL_KEY_NAME, created_by=created_by or "system",
+                      token_quota=0, request_quota=0, allowed_models=[])
+    settings_svc.save_settings({"internal_key": info["key"]})
+    if old:
+        db.execute("DELETE FROM gateway_keys WHERE key_hash=?", (_hash(old),))
+    logger.info("已轮换系统内部出网密钥（新 %s…）", info["key"][:len(_KEY_PREFIX) + 6])
+    return info
+
+
 # ---------------------------------------------------------------------------
 # 运行时校验与配额消费（代理链路调用）
 # ---------------------------------------------------------------------------

@@ -177,6 +177,13 @@ class UrlImportService:
             if row["status"] != "done" or row["phase"] != "parse" or not row["parsed_text"].strip():
                 raise HTTPException(409, "当前任务不能确认入库，请先检查正文或核对上次执行结果")
             writable_target(conn, kb_id, user)
+            # 重复入库校验：同一知识库内相同链接已入库则入口拦截，不重放向量化/编译
+            from app.services import ingest_dedup
+            existing = ingest_dedup.find_in_kb(
+                ingest_dedup.compute_url_fingerprint(row["source_url"]), kb_id, conn=conn)
+            if existing:
+                dup_title = existing.get("title") or row["title"] or "该链接"
+                raise HTTPException(409, f"重复入库：该链接已在当前知识库入库（《{dup_title}》），无需重复入库。")
             path = str(Path(settings.UPLOAD_DIR) / f"url-{task_id}.md")
             changed = conn.execute("UPDATE url_imports SET status='ingesting',phase='ingest',kb_id=?,file_path=?,updated_at=? WHERE id=? AND status='done' AND revision=?",
                                    (kb_id, path, now(), task_id, revision)).rowcount
@@ -187,6 +194,7 @@ class UrlImportService:
 
     async def ingest(self, task_id):
         from app.core.vector_store import vector_store
+        from app.services import ingest_dedup
         from app.services.records import upload_records
         from app.services.usage import record_upload
         from app.services.wiki import wiki_service
@@ -219,6 +227,10 @@ class UrlImportService:
                 ocr_provider="url:" + metadata.get("extraction_method", "manual"), chunk_count=len(doc_ids), doc_ids=doc_ids,
                 visibility=target["visibility"], owner_id=row["owner_id"], source_type="url", title=title,
                 source_metadata=provenance, url_import_id=task_id)
+            # 入库成功：登记链接指纹（幂等），供下次同库重复导入时入口拦截
+            ingest_dedup.register(ingest_dedup.compute_url_fingerprint(row["source_url"]),
+                ingest_dedup.KIND_URL, row["kb_id"], source_type="url", title=title,
+                owner_id=row["owner_id"], record_id=record["id"], source_ref=row["source_url"])
             result = {"record_id": record["id"], "chunk_count": len(doc_ids), "doc_ids": doc_ids, "kb_id": row["kb_id"]}
             db.execute("UPDATE url_imports SET result=?,updated_at=? WHERE id=?", (json.dumps(result), now(), task_id))
             record_upload(row["owner_id"])

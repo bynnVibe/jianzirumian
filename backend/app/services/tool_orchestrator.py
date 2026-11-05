@@ -6,6 +6,9 @@
   - 附件 + "总结/提炼/提取重点" 等关键词 → knowledge_summarize（默认不入库）
   - 其余情况（含无法判断意图时的默认动作）→ 仅识别/提取内容，不自动写入知识库，
     避免在用户未明确表达入库意图时误写公共/个人知识库。
+
+图片识别文本除注入对话上下文外，还通过 build_ocr_retrieval_query 并入知识检索查询，
+支持「粘贴截图即检索」：用户只贴图不打字时，以图中文字作为检索问题。
 """
 import json
 import logging
@@ -106,6 +109,43 @@ def _apply_context_budget(summaries: List[str]) -> Tuple[List[str], bool]:
     return clipped, truncated
 
 
+def _ocr_excerpt(records: List[dict], limit: int) -> str:
+    """从附件工具记录中提取图片 OCR 文本，压缩为检索用摘录。
+
+    只取「图片 + 执行成功 + 非入库提案」的记录；多张图片按附件顺序拼接去重。
+    检索查询过长会稀释向量/BM25 信号，故按字符预算截断（完整原文仍在对话上下文中）。
+    """
+    if limit <= 0:
+        limit = 300
+    texts: List[str] = []
+    for rec in records:
+        if rec.get("confirmation") or not rec.get("success"):
+            continue
+        if rec.get("kind") != "image":
+            continue
+        text = (rec.get("text") or "").strip()
+        if text and text not in texts:
+            texts.append(text)
+    return "\n".join(texts)[:limit]
+
+
+def build_ocr_retrieval_query(query: str, records: List[dict]) -> Tuple[str, str]:
+    """截图检索：把图片附件的 OCR 文本并入知识检索查询。
+
+    返回 (检索查询, OCR 摘录)；摘录为空表示本次无可用识别文本，检索查询原样返回
+    用户输入（行为与未贴图时完全一致）。
+      - 用户有文本：文本在前、识别内容在后，检索兼顾「用户想问什么」与「图里写了什么」；
+      - 用户仅粘贴截图（文本为空）：直接以识别内容作为检索查询，实现「截图即问」。
+    """
+    excerpt = _ocr_excerpt(records, getattr(settings, "OCR_RETRIEVAL_CHARS", 300))
+    text_query = (query or "").strip()
+    if not excerpt:
+        return text_query or (query or ""), ""
+    if not text_query:
+        return excerpt, excerpt
+    return f"{text_query}\n{excerpt}", excerpt
+
+
 async def handle_attachments(
     query: str,
     attachments: List[dict],
@@ -174,12 +214,16 @@ async def handle_attachments(
             "success": result.success,
             "chunk_count": result.chunk_count,
             "doc_ids": result.doc_ids,
+            # 附件类型 + 识别/解析原文：供上层做「截图检索」（OCR 文本并入检索查询）
+            "kind": kind,
+            "text": result.text or "",
         }
         records.append(record)
+        # 落库只保留原文摘要，避免 tool_calls 表随附件原文膨胀
         _record_tool_call(
             session_id, message_id, user_id, tool.name,
             {"filename": filename, "kind": kind, "action": action},
-            record, status,
+            {**record, "text": _clip_budget(record["text"], 500)}, status,
         )
 
     clipped, truncated = _apply_context_budget(summaries)

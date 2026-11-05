@@ -17,6 +17,8 @@ from pydantic import BaseModel
 from app.api.deps import require_ops
 from app.core import db
 from app.services import evaluation
+from app.services import prompt_skill_eval
+from app.services import prompt_store
 
 logger = logging.getLogger("jianziruyang.api.eval")
 
@@ -368,3 +370,98 @@ async def get_run(run_id: str, _admin: dict = Depends(require_ops)):
         "prev_run_id": prev["id"] if prev else None,
         "prev_summary": prev_summary,
     }
+
+
+# ---------------------------------------------------------------------------
+# Prompt / Skill 专项评测（静态断言 + Rubric 打分 + A/B + 优化上线）
+# ---------------------------------------------------------------------------
+class PromptSkillEvalCreate(BaseModel):
+    target_type: str            # prompt | skill
+    target_id: str = ""         # skill 时为技能 id；prompt 固定 system_prompt
+
+
+class PromptSkillABCreate(BaseModel):
+    dataset_id: str
+
+
+class PromptSkillPublish(BaseModel):
+    content: Optional[str] = None   # 缺省用建议 optimized 文本；可在建议基础上二次编辑后上线
+
+
+@router.get("/prompt-skill/targets")
+async def list_prompt_skill_targets(admin: dict = Depends(require_ops)):
+    """可评测目标：系统提示词（当前生效）+ 当前管理员的用户技能。"""
+    owner_id = admin.get("id") or ""
+    return {"success": True, "targets": prompt_skill_eval.list_targets(owner_id)}
+
+
+@router.get("/prompt-skill/prompt-versions")
+async def list_prompt_versions(_admin: dict = Depends(require_ops)):
+    """系统提示词版本历史与当前生效版本（「上线」记录）。"""
+    return {
+        "success": True,
+        "active": prompt_store.get_active_version(),
+        "default_body": prompt_store.DEFAULT_BODY,
+        "versions": prompt_store.list_versions(),
+    }
+
+
+@router.post("/prompt-skill/evaluate")
+async def create_prompt_skill_eval(body: PromptSkillEvalCreate, admin: dict = Depends(require_ops)):
+    """发起 Prompt/Skill 评测（后台执行断言 + Rubric 打分 + 优化建议，立即返回 eval_id）。"""
+    owner_id = admin.get("id") or ""
+    try:
+        eval_id = prompt_skill_eval.start_evaluation(
+            body.target_type, body.target_id, owner_id, admin
+        )
+    except prompt_skill_eval.ConcurrentEvalError as e:
+        return JSONResponse(status_code=409,
+                            content={"code": "prompt_eval_in_progress", "message": str(e)})
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"success": True, "eval_id": eval_id, "status": "running"}
+
+
+@router.get("/prompt-skill/evals")
+async def list_prompt_skill_evals(
+    target_type: str = Query(""),
+    target_id: str = Query(""),
+    limit: int = Query(30, ge=1, le=100),
+    _admin: dict = Depends(require_ops),
+):
+    """Prompt/Skill 评测历史（概要，不含长文本正文）。"""
+    return {"success": True, **prompt_skill_eval.list_evals(target_type, target_id, limit)}
+
+
+@router.get("/prompt-skill/evals/{eval_id}")
+async def get_prompt_skill_eval(eval_id: str, _admin: dict = Depends(require_ops)):
+    """评测详情：断言 + Rubric 各维度 + 优化建议 + A/B 结果 + 上线状态。"""
+    data = prompt_skill_eval.get_eval(eval_id)
+    if not data:
+        raise HTTPException(status_code=404, detail="评测记录不存在")
+    return {"success": True, "eval": data}
+
+
+@router.post("/prompt-skill/evals/{eval_id}/ab")
+async def start_prompt_skill_ab(eval_id: str, body: PromptSkillABCreate,
+                                admin: dict = Depends(require_ops)):
+    """对优化候选发起 A/B 行为对比（在真实问答链路上 pairwise 裁判，后台执行）。"""
+    try:
+        result = prompt_skill_eval.start_ab(eval_id, body.dataset_id, admin)
+    except prompt_skill_eval.ConcurrentEvalError as e:
+        return JSONResponse(status_code=409,
+                            content={"code": "prompt_eval_in_progress", "message": str(e)})
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"success": True, **result}
+
+
+@router.post("/prompt-skill/evals/{eval_id}/publish")
+async def publish_prompt_skill(eval_id: str, body: PromptSkillPublish,
+                               admin: dict = Depends(require_ops)):
+    """上线：Prompt 发布为新版本（chat 即刻采用）；Skill 更新内容（重跑安全预审）。"""
+    result = prompt_skill_eval.publish(eval_id, admin, body.content)
+    if result.get("error"):
+        return JSONResponse(status_code=400, content={"success": False, **result})
+    return {"success": True, **result}
+

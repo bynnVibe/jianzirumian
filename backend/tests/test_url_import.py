@@ -123,6 +123,30 @@ def test_extract_empty_article_raises():
     assert exc.value.code == "empty_article"
 
 
+def test_extract_relaxed_low_threshold_passes():
+    # 渲染服务不可用时的降级模式：最小正文阈值由 80 降至 40
+    html = """<html><body><article><p>这段正文超过四十字但不足八十字，严格模式会判正文不足并报错，降级模式应放行交人工确认。</p></article></body></html>"""
+    with pytest.raises(UrlImportError) as exc:
+        extract_article(html, "https://blog.example.com/short")
+    assert exc.value.code == "empty_article"
+    result = extract_article(html, "https://blog.example.com/short", relaxed=True)
+    assert "超过四十字" in result["body"]
+    assert result["warnings"] == []
+
+
+def test_extract_relaxed_fullpage_fallback(monkeypatch):
+    # trafilatura 无结果且无语义容器时：relaxed 用整页净化文本兜底并带噪声警告
+    import app.services.url_skills as skills_mod
+    monkeypatch.setattr(skills_mod.trafilatura, "extract", lambda *a, **k: None)
+    paragraph = "<p>页面没有语义标签，导航与正文混排，渲染服务不可用时只能整页降级提取供人工对照。</p>"
+    html = f"<html><body><div>{paragraph * 6}</div></body></html>"
+    with pytest.raises(UrlImportError):
+        extract_article(html, "https://blog.example.com/plain")
+    result = extract_article(html, "https://blog.example.com/plain", relaxed=True)
+    assert "整页降级提取" in result["body"]
+    assert any("降级" in w for w in result["warnings"])
+
+
 # ============================================
 # 三、确认状态机（隔离、版本、权限、幂等）
 # ============================================
@@ -281,3 +305,41 @@ def test_capacity_limit_returns_429(env):
 async def _confirm(service, task_id, user, revision, kb_id):
     """在事件循环内调用 confirm，使其内部 create_task(ingest) 可用（ingest 已被替换为空桩）。"""
     return service.confirm(task_id, user, revision, kb_id)
+
+
+# ============================================
+# 五、SSL 上下文与 UA 策略（csdn/公众号抓取失败根因回归）
+# ============================================
+
+def test_ssl_context_loads_ca_and_requires_verify():
+    """显式 SSL 上下文必须开启证书校验并加载 CA（根治 macOS/pyenv 默认上下文缺 CA
+    导致所有 HTTPS 直连 CERTIFICATE_VERIFY_FAILED 被误归为“网络超时或站点限制”）。"""
+    import ssl
+    from app.services.url_fetch import ssl_context
+
+    ctx = ssl_context()
+    assert isinstance(ctx, ssl.SSLContext)
+    assert ctx.verify_mode == ssl.CERT_REQUIRED
+    assert ctx.check_hostname is True
+    stats = ctx.cert_store_stats()
+    assert stats.get("x509_ca", 0) > 0
+    # 单例缓存：多次调用返回同一上下文
+    assert ssl_context() is ctx
+
+
+def test_mobile_and_desktop_ua_are_distinct_browser_strings():
+    from app.services.url_fetch import DESKTOP_UA, MOBILE_UA
+
+    assert DESKTOP_UA != MOBILE_UA
+    assert "Mozilla/5.0" in DESKTOP_UA and "Mozilla/5.0" in MOBILE_UA
+    assert "iPhone" in MOBILE_UA
+
+
+def test_fetch_accepts_user_agent_override_kwarg():
+    """SafeFetcher.fetch 必须支持 user_agent 覆盖（供站点 playbook 驱动移动端 UA）。"""
+    import inspect
+    from app.services.url_fetch import SafeFetcher
+
+    params = inspect.signature(SafeFetcher.fetch).parameters
+    assert "user_agent" in params
+    assert params["user_agent"].default is None

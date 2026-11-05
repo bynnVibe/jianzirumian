@@ -7,6 +7,7 @@
 import asyncio
 import json
 import logging
+import random
 import time
 from abc import ABC, abstractmethod
 from typing import AsyncGenerator, List, Optional
@@ -348,12 +349,15 @@ class LLMFactory:
         return LLMFactory._build(provider, cfg)
 
     @staticmethod
-    def create_for_role(role: str, user_id: str = None, rule_id: str = None) -> BaseLLM:
+    def create_for_role(role: str, user_id: str = None, rule_id: str = None,
+                        model: str = None) -> BaseLLM:
         """业务模块统一经模型网关出网：role → 业务路由（规则+模型）→ 代理 /v1。
 
-        - 角色绑定了规则/模型则优先采用；模型名留空时用网关默认模型
-          （gateway_settings.default_model，再回退 .env API_MODEL）；若默认模型
-          无法被命中规则的上游承接，自动回退规则内首个可用模型；
+        - 模型解析优先级：调用方显式 model（如聊天页用户选模型）> 业务路由绑定模型
+          > 网关默认模型（需在命中规则上游模型清单内）> 规则内随机一个模型
+          （不选模型时在指定路由规则内均衡访问，而非固定首个）；
+        - 未绑定业务路由的角色（记忆抽取/会话摘要等后台任务）自动回退全局默认规则
+          并按上述顺序解析模型，避免「默认模型不在任何上游清单」导致选路 503；
         - 出网凭据用系统内部密钥（keys.ensure_internal_key 自动创建，无限配额）；
         - 通过 extra_body 注入 _gw_role/_gw_rule_id/_gw_user_id，供代理选路时
           识别业务角色与授权用户（出网前被剥离）；
@@ -367,31 +371,42 @@ class LLMFactory:
         from app.services.gateway import keys as key_svc
         from app.services.gateway import rules as rule_svc
         from app.services.gateway import settings as settings_svc
-        model_name = ""
+        explicit_model = (model or "").strip()
+        model_name = explicit_model
         resolved_rule = (rule_id or "").strip()
         rule_pattern = ""
-        rule_wildcard, rule_models = True, []
+        rule_models: list = []
         try:
             route = rule_svc.get_role_route(role) or {}
-            model_name = (route.get("model_name") or "").strip()
+            if not model_name:
+                model_name = (route.get("model_name") or "").strip()
             if not resolved_rule and route.get("rule_id"):
                 resolved_rule = route["rule_id"]
+            if not resolved_rule:
+                # 未绑定业务路由：回退全局默认规则（无则首个启用规则），
+                # 使后台角色也能按规则上游模型清单解析出可用模型
+                enabled_rules = [r for r in rule_svc.list_rules() if r.get("enabled")]
+                row = next((r for r in enabled_rules if r.get("is_default")), None) \
+                    or (enabled_rules[0] if enabled_rules else None)
+                if row:
+                    resolved_rule = row["id"]
             if resolved_rule:
                 rule_pattern = ((rule_svc.get_rule(resolved_rule) or {}).get("model_pattern") or "").strip()
-                rule_wildcard, rule_models = rule_svc.resolve_rule_models(resolved_rule)
+                _, rule_models = rule_svc.resolve_rule_models(resolved_rule)
             if not model_name:
                 model_name = (settings_svc.get_settings().get("default_model") or "").strip()
-            # 规则感知：未显式指定模型时，默认模型必须能被命中规则的上游承接
-            # （命中 model_pattern 且在规则上游模型清单内），否则回退规则内首个可用模型
-            if not (route.get("model_name") or "").strip() and resolved_rule and rule_models:
-                usable = (rule_wildcard or rule_svc._matches(rule_pattern, model_name)) and (
-                    rule_wildcard or model_name in rule_models)
-                if model_name and not usable:
+            # 规则感知：未显式指定模型时，默认模型必须在命中规则的上游模型清单内
+            # （业务路由是严格绑定，代理侧只校验「规则上游是否支持该模型」，
+            # 不看 model_pattern——pattern 是规则名/模型模式，不是 role 绑定语义）
+            if not explicit_model and not (route.get("model_name") or "").strip() \
+                    and resolved_rule and rule_models:
+                if model_name and model_name not in rule_models:
+                    picked = random.choice(rule_models)
                     logger.warning("[业务路由] 默认模型「%s」不在规则「%s」上游模型清单内，"
-                                   "回退规则内模型「%s」", model_name, rule_pattern, rule_models[0])
-                    model_name = rule_models[0]
+                                   "规则内随机回退「%s」", model_name, rule_pattern, picked)
+                    model_name = picked
                 elif not model_name:
-                    model_name = rule_models[0]
+                    model_name = random.choice(rule_models)
         except Exception as e:
             logger.warning("role 路由解析失败（回退网关默认模型）: role=%s err=%s", role, e)
         if not model_name:

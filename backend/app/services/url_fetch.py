@@ -3,12 +3,40 @@ import asyncio
 import ipaddress
 import re
 import socket
+import ssl
 import time
 import zlib
 from dataclasses import dataclass, field
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import aiohttp
+
+# 桌面/移动两套真实浏览器标识：降低公众号/CSDN 等站点对机器人 UA 的反爬墙误判。
+# 部分站点（如微信公众号）对移动端 UA 返回更完整的正文，可由站点 Skill playbook 指定。
+DESKTOP_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"
+              " AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+MOBILE_UA = ("Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X)"
+             " AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1")
+
+_SSL_CONTEXT = None
+
+
+def ssl_context():
+    """构建校验用的 SSL 上下文。
+
+    优先用 certifi 的 CA bundle：macOS/pyenv 下 Python 默认 ssl 上下文常缺少系统 CA
+    （cafile=None），会使所有 HTTPS 直连报 CERTIFICATE_VERIFY_FAILED，被上层误归为
+    “网络超时或站点限制”。显式加载 certifi 后可摆脱对启动脚本 SSL_CERT_FILE 环境变量的依赖。
+    生产 Docker python:3.11-slim 自带 ca-certificates，certifi 分支同样适用。
+    """
+    global _SSL_CONTEXT
+    if _SSL_CONTEXT is None:
+        try:
+            import certifi
+            _SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
+        except Exception:
+            _SSL_CONTEXT = ssl.create_default_context()
+    return _SSL_CONTEXT
 
 
 class UrlImportError(ValueError):
@@ -153,9 +181,10 @@ class SafeFetcher:
     def __init__(self, budget=None):
         self.budget = budget or FetchBudget()
 
-    async def fetch(self, url, *, resource=False, follow_redirects=True, method="GET"):
+    async def fetch(self, url, *, resource=False, follow_redirects=True, method="GET", user_agent=None):
         if method not in ("GET", "HEAD"):
             raise UrlImportError("method", "网页解析不允许提交数据")
+        ua = user_agent or DESKTOP_UA
         url = normalize_url(url)
         for hop in range(6):
             self.budget.request()
@@ -164,10 +193,13 @@ class SafeFetcher:
             try:
                 async with aiohttp.ClientSession(connector=connector, timeout=timeout, trust_env=False,
                                                  cookie_jar=aiohttp.DummyCookieJar(), auto_decompress=False) as client:
-                    async with client.request(method, url, allow_redirects=False, headers={
-                        "User-Agent": "Mozilla/5.0 (compatible; JianzirumianKnowledge/1.0)",
-                        "Accept": "text/html,application/xhtml+xml,text/plain,application/json,*/*;q=0.1",
+                    async with client.request(method, url, allow_redirects=False, ssl=ssl_context(), headers={
+                        # 真实浏览器标识：降低公众号/CSDN 等站点对机器人 UA 的反爬墙误判；
+                        # 仍不携带 Cookie/业务凭据（DummyCookieJar）。
+                        "User-Agent": ua,
+                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                         "Accept-Encoding": "gzip, deflate", "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.5",
+                        "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Site": "none", "Upgrade-Insecure-Requests": "1",
                     }) as response:
                         if response.status in (301, 302, 303, 307, 308):
                             location = normalize_url(urljoin(url, response.headers.get("Location", "")))
@@ -195,6 +227,9 @@ class SafeFetcher:
                         return FetchResult(url, body, content_type, response.status)
             except UrlImportError:
                 raise
-            except (asyncio.TimeoutError, aiohttp.ClientError, OSError):
+            except (aiohttp.ClientConnectorCertificateError, ssl.SSLCertVerificationError) as exc:
+                # TLS 证书校验失败单独归类，便于区分“站点限制”与本地证书链问题。
+                raise UrlImportError("tls_failed", f"HTTPS 证书校验失败，无法安全连接站点（{exc.__class__.__name__}）") from None
+            except (asyncio.TimeoutError, aiohttp.ClientError, ssl.SSLError, OSError):
                 raise UrlImportError("fetch_failed", "无法获取网页，可能是网络超时或站点限制") from None
         raise UrlImportError("redirect", "网页重定向次数过多")

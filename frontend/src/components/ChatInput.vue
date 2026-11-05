@@ -3,7 +3,7 @@
     <!-- 模式切换 (DeepSeek 风格) -->
     <div class="mode-bar">
       <label class="mode-toggle">
-        <span class="mode-label" :class="{ active: useKnowledge }">
+        <span class="mode-label" :class="{ active: useKnowledgeLocal }">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
             <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
             <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
@@ -16,7 +16,7 @@
         </div>
       </label>
       <label class="mode-toggle">
-        <span class="mode-label" :class="{ active: useSearch }">
+        <span class="mode-label" :class="{ active: useSearchLocal }">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
             <circle cx="11" cy="11" r="8"/>
             <line x1="21" y1="21" x2="16.65" y2="16.65"/>
@@ -29,18 +29,18 @@
         </div>
       </label>
       <span class="mode-hint" v-if="modeHint">{{ modeHint }}</span>
-      <label v-if="rules.length" class="channel-select" title="选择路由规则（留空走默认）">
+      <label v-if="models.length" class="channel-select" title="选择出网模型（仅限匹配路由规则的上游模型；留空按业务路由/规则内均衡）">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
           <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
         </svg>
-        <select v-model="ruleLocal" :disabled="disabled">
-          <option value="">默认规则</option>
-          <option v-for="r in rules" :key="r.id" :value="r.id">{{ r.model_pattern }}</option>
+        <select v-model="modelLocal" :disabled="disabled">
+          <option value="">{{ defaultModelLabel }}</option>
+          <option v-for="m in models" :key="m" :value="m">{{ m }}</option>
         </select>
       </label>
     </div>
 
-    <!-- 附件 chips （拖入/选择但尚未发送） -->
+    <!-- 附件 chips （拖入/选择/粘贴但尚未发送） -->
     <div v-if="attachments.length" class="attachment-chips">
       <div v-for="att in attachments" :key="att.id" class="attachment-chip">
         <svg v-if="att.kind === 'image'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
@@ -50,6 +50,7 @@
           <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/>
         </svg>
         <span class="attachment-name" :title="att.name">{{ att.name }}</span>
+        <span v-if="att.pasted" class="attachment-tag">截图检索</span>
         <button class="attachment-remove" type="button" @click="removeAttachment(att.id)">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12">
             <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
@@ -57,6 +58,11 @@
         </button>
       </div>
     </div>
+    <p v-if="hasPastedImage" class="attachment-hint">
+      <template v-if="store.useKnowledge">已粘贴截图：发送后自动识别图中文字，并按识别内容检索知识库</template>
+      <template v-else>已粘贴截图：发送后自动识别图中文字作答（未开启「知识检索」，不查知识库）</template>
+      <template v-if="!inputText.trim()">（可直接发送，也可补一句你想问的）</template>
+    </p>
 
     <!-- 输入框 (参考 DeepSeek) -->
     <div
@@ -65,8 +71,9 @@
       @dragover.prevent="isDragOver = true"
       @dragleave.prevent="isDragOver = false"
       @drop.prevent="handleDrop"
+      @paste="handlePaste"
     >
-      <button class="btn-attach" type="button" :disabled="disabled" @click="triggerFilePicker" title="添加图片/文档附件">
+      <button class="btn-attach" type="button" :disabled="disabled" @click="triggerFilePicker" title="添加图片/文档附件（也可直接粘贴截图）">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
           <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
         </svg>
@@ -90,7 +97,6 @@
         @focus="isFocused = true"
         @blur="isFocused = false"
         @keydown="handleKeydown"
-        @paste="handlePaste"
       ></textarea>
       <button
         class="btn-send"
@@ -110,7 +116,7 @@
 <script setup>
 import { ref, computed, watch, nextTick, onMounted } from 'vue'
 import { useChatStore } from '@/stores/chat'
-import { listMyGatewayRules } from '@/api'
+import { getMyChatModels } from '@/api'
 
 const store = useChatStore()
 const emit = defineEmits(['send'])
@@ -132,26 +138,56 @@ const props = defineProps({
 
 const placeholder = computed(() => {
   if (store.isGenerating) return '正在生成回答...'
+  if (hasPastedImage.value) return '可直接发送：将识别截图文字并检索知识库；也可补一句你想问的...'
   if (attachments.value.length) return '给附件补充一句说明，如“帮我识别”“上传到知识库”“总结要点”...'
-  return '输入你的问题，关于健康、养生、中医...'
+  return '输入你的问题，关于健康、养生、中医...（可直接粘贴截图检索）'
 })
 
 const canSend = computed(() => !!inputText.value.trim() || attachments.value.length > 0)
 
-function detectKind(filename) {
-  const idx = filename.lastIndexOf('.')
-  if (idx === -1) return null
-  const ext = filename.slice(idx).toLowerCase()
+// 是否含粘贴进来的截图（决定是否展示「截图检索」提示与占位文案）
+const hasPastedImage = computed(() => attachments.value.some((a) => a.pasted && a.kind === 'image'))
+
+function detectKind(filename, mime) {
+  const name = filename || ''
+  const idx = name.lastIndexOf('.')
+  const ext = idx === -1 ? '' : name.slice(idx).toLowerCase()
   if (ACCEPTED_IMAGE_EXTS.includes(ext)) return 'image'
-  return ACCEPTED_DOC_EXTS[ext] || null
+  if (ACCEPTED_DOC_EXTS[ext]) return ACCEPTED_DOC_EXTS[ext]
+  // 剪贴板截图可能没有扩展名（不同浏览器/系统命名不一），按 MIME 兜底判定
+  if ((mime || '').startsWith('image/')) return 'image'
+  return null
 }
 
-function addFiles(fileList) {
+/** 截图命名：剪贴板图片常为无名或统一 image.png，改成可读名字便于附件回显与历史查看 */
+function pasteImageName(file) {
+  const mime = file.type || 'image/png'
+  const ext = mime === 'image/jpeg' ? '.jpg' : mime === 'image/webp' ? '.webp'
+    : mime === 'image/bmp' ? '.bmp' : '.png'
+  const now = new Date()
+  const pad = (n) => String(n).padStart(2, '0')
+  return `截图_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}${ext}`
+}
+
+/** File.name 只读：需重命名时重建 File（保留内容与 MIME，失败则沿用原对象） */
+function withFileName(file, name) {
+  try {
+    return new File([file], name, { type: file.type, lastModified: file.lastModified })
+  } catch (e) {
+    return file
+  }
+}
+
+function addFiles(fileList, fromPaste = false) {
   const files = Array.from(fileList || [])
-  for (const file of files) {
-    const kind = detectKind(file.name)
+  for (const raw of files) {
+    const kind = detectKind(raw.name, raw.type)
     if (!kind) continue // 忽略不支持的类型，避免上传后端报错
-    attachments.value.push({ id: `att-${++attachmentSeq}`, file, name: file.name, kind })
+    // 粘贴的截图重命名为「截图_时分秒.png」；选择/拖入的文件保留原名
+    const isShot = fromPaste && kind === 'image'
+    const name = isShot ? pasteImageName(raw) : raw.name
+    const file = isShot ? withFileName(raw, name) : raw
+    attachments.value.push({ id: `att-${++attachmentSeq}`, file, name, kind, pasted: isShot })
   }
 }
 
@@ -173,6 +209,10 @@ function handleDrop(e) {
   addFiles(e.dataTransfer?.files)
 }
 
+/**
+ * 粘贴截图检索：剪贴板中的图片转为附件（发送后由后端 OCR 并并入检索查询）。
+ * 监听挂在输入区容器上，覆盖 textarea 与附件区；纯文本粘贴不受影响。
+ */
 function handlePaste(e) {
   const items = e.clipboardData?.items
   if (!items) return
@@ -183,7 +223,10 @@ function handlePaste(e) {
       if (file) files.push(file)
     }
   }
-  if (files.length) addFiles(files)
+  if (!files.length) return
+  // 阻止默认粘贴，避免文件名/二进制占位被当作文本插入输入框
+  e.preventDefault()
+  addFiles(files, true)
 }
 
 // 本地 toggle 状态
@@ -198,18 +241,31 @@ watch(useSearchLocal, (val) => {
   store.useSearch = val
 })
 
-// 路由规则下拉（仅登录用户且启用网关时有数据；游客/未启用时隐藏）
-const rules = ref([])
-const ruleLocal = ref(store.selectedRuleId)
-watch(ruleLocal, (val) => {
-  store.selectedRuleId = val
+// 出网模型下拉：仅列匹配路由规则（chat_answer 绑定 → 默认规则）的上游模型，
+// 选不了其他规则的模型；选中即按该模型出网，留空由网关在规则内解析
+const models = ref([])
+const ruleName = ref('')
+const pinnedModel = ref('')
+const modelLocal = ref(store.selectedModel)
+watch(modelLocal, (val) => {
+  store.selectedModel = val
+})
+const defaultModelLabel = computed(() => {
+  if (pinnedModel.value) return `默认（${pinnedModel.value}）`
+  return ruleName.value ? `默认（规则「${ruleName.value}」内均衡）` : '默认（业务路由）'
 })
 onMounted(async () => {
   try {
-    const res = await listMyGatewayRules()
-    rules.value = res.data.rules || []
+    const res = await getMyChatModels()
+    models.value = res.data.models || []
+    ruleName.value = res.data.rule_name || ''
+    pinnedModel.value = res.data.pinned_model || ''
+    // 规则模型清单变更后，已选模型可能不再可选 → 回落默认
+    if (modelLocal.value && !models.value.includes(modelLocal.value)) {
+      modelLocal.value = ''
+    }
   } catch (e) {
-    rules.value = []
+    models.value = []
   }
 })
 
@@ -392,6 +448,25 @@ defineExpose({ focus })
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 粘贴截图标记：提示该附件会走「OCR → 检索」链路 */
+.attachment-tag {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: #f3e6d5;
+  color: var(--color-primary);
+  font-size: 10.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.attachment-hint {
+  padding: 0 4px 8px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--color-text-secondary);
 }
 
 .attachment-remove {

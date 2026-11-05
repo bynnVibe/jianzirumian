@@ -216,6 +216,44 @@ async def save_wiki_config(body: WikiConfigRequest, _admin: dict = Depends(requi
 
 
 # ============================================
+# 对话/检索历史沉淀（llm-wiki 路径A：高频主题 → digest 私人综合词条）
+# ============================================
+
+@router.get("/conversation/topics")
+async def conversation_topics(
+    refresh: bool = Query(True),
+    current_user: dict = Depends(get_current_user),
+):
+    """当前用户的对话沉淀预览：已沉淀私人词条 + （可选）归纳出的高频候选主题。
+
+    refresh=true 时调用 LLM 从近期提问归纳高频主题（稍慢）；false 仅返回已沉淀日志。
+    """
+    from app.services import wiki_conversation
+
+    data = await wiki_conversation.topics_preview(_user_id(current_user), refresh=refresh)
+    return {"success": True, **data}
+
+
+@router.post("/conversation/compile")
+async def conversation_compile(current_user: dict = Depends(get_current_user)):
+    """手动触发对话沉淀：把当前用户的高频提问主题综合成私人 digest 词条。
+
+    与周期任务同一入口，仅作用范围为当前用户；失败静默降级，返回实际生成明细。
+    """
+    from app.services import wiki_conversation
+
+    if not wiki_conversation.conversation_compile_enabled():
+        raise HTTPException(status_code=400, detail="对话沉淀未开启（需启用知识编译与对话沉淀开关）")
+    result = await wiki_conversation.compile_for_user(_user_id(current_user))
+    if result.get("skipped") == "insufficient_queries":
+        return {"success": True, "generated": 0, "topics": [],
+                "message": f"近期提问不足（{result.get('queries', 0)} 条），暂未达到高频主题沉淀阈值"}
+    return {"success": True, "generated": result.get("generated", 0),
+            "topics": result.get("topics", []),
+            "message": f"已沉淀 {result.get('generated', 0)} 条私人综合词条"}
+
+
+# ============================================
 # 知识助手 Agent（侧栏问答 + 人工确认编辑）
 # ============================================
 

@@ -314,7 +314,29 @@ def test_embedding_invalid_vector_or_dimension_never_changes_index(embedding_sto
     assert before == {p.name: p.read_bytes() for p in Path(store.index_path).iterdir()}
 
 
-def test_embedding_save_rebinds_existing_store_and_business_uses_new_client(embedding_store, monkeypatch):
+def test_embedding_network_save_is_rejected_migrated_to_gateway(embedding_store, monkeypatch):
+    """WS3「网关唯一来源」：embedding 网络 provider 连接配置写入被拒（410），改由网关上游管理。"""
+    from fastapi import HTTPException
+    from app.api import config_api
+    store, client, factory = embedding_store
+    before = _existing_embedding_index(store)
+    original_store = store._store
+    old_embeddings = store.embeddings
+    monkeypatch.setattr(config_api, "vector_store", store)
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(config_api.save_provider_settings(config_api.ProviderSettingsBody(
+            category="embedding", provider="custom", values={"model": "replacement-model"},
+        ), {}))
+    assert exc.value.status_code == 410
+    # 写入被拒：未重绑客户端、未请求模型、未改写索引
+    assert store.embeddings is old_embeddings
+    assert store._store is original_store
+    client.embed_documents.assert_not_called()
+    assert before == {p.name: p.read_bytes() for p in Path(store.index_path).iterdir()}
+
+
+def test_embedding_provider_switch_rebinds_store_and_business_uses_new_client(embedding_store, monkeypatch):
+    """切换 embedding provider 仍重绑 store（不请求模型、不改写索引），业务使用新客户端。"""
     from app.api import config_api
     store, client, factory = embedding_store
     _existing_embedding_index(store)
@@ -322,9 +344,8 @@ def test_embedding_save_rebinds_existing_store_and_business_uses_new_client(embe
     assert store.probe_embeddings()["available"]
     old_embeddings = store.embeddings
     monkeypatch.setattr(config_api, "vector_store", store)
-    response = asyncio.run(config_api.save_provider_settings(config_api.ProviderSettingsBody(
-        category="embedding", provider="custom", values={"model": "replacement-model"},
-    ), {}))
+    response = asyncio.run(config_api.switch_provider(config_api.ProviderSwitch(
+        provider_type="embedding", value="custom"), {}))
     assert response["success"]
     assert store._store is original_store
     assert store.embeddings is not old_embeddings
@@ -333,7 +354,7 @@ def test_embedding_save_rebinds_existing_store_and_business_uses_new_client(embe
     client.embed_documents.assert_not_called()
     # 检索与写入都会调用新配置，不需要清空或重新加载索引。
     store.search_broad("合成问题", k=1)
-    assert factory.call_args.kwargs["config"]["model"] == "replacement-model"
+    assert factory.call_args.args == ("custom",)
     store.add_texts(["新合成知识"], [{"visibility": "public"}])
     assert store.get_document_count() == 2 and store.is_available()
     client.embed_documents.assert_called_once()
@@ -419,6 +440,7 @@ def test_embedding_real_openai_protocol_uses_remote_model_and_batches(monkeypatc
 def test_embedding_startup_probe_reports_effective_remote_configuration(embedding_store, monkeypatch, capsys, enabled, fails):
     from unittest.mock import Mock
     from app import main
+    from app.core import embeddings as engine
     from app.services import kb, upload_pipeline, wiki_store, wiki
     store, client, _ = embedding_store
     monkeypatch.setattr(main, "vector_store", store)
@@ -430,8 +452,16 @@ def test_embedding_startup_probe_reports_effective_remote_configuration(embeddin
     monkeypatch.setattr(wiki_store, "ensure_layout", lambda: None)
     monkeypatch.setattr(wiki_store, "backfill_raw", lambda: None)
     monkeypatch.setattr(wiki.wiki_service, "recover_queue", lambda: 0)
-    if fails:
-        client.embed_query.side_effect = httpx.ReadTimeout("synthetic-secret")
+    # 启动探测已改为「直连上游 /embeddings」（不经同进程网关自调用，避免 lifespan 未受理入站请求而挂到超时），
+    # 故用合成探针替换真实 HTTP；探针内部已对密钥脱敏，返回消息不含明文 secret。
+    probe = Mock(return_value=(
+        {"ok": False, "dimension": None, "status_code": None,
+         "message": "Embedding 请求超时，请检查远程服务及网络连接", "elapsed": 0.1}
+        if fails else
+        {"ok": True, "dimension": 4, "status_code": 200,
+         "message": "text-embedding-v4 连接成功，返回 4 维向量", "elapsed": 0.1}
+    ))
+    monkeypatch.setattr(engine, "probe_upstream_direct", probe)
     async def run():
         async with main.lifespan(main.app):
             assert main.runtime.ready
@@ -441,7 +471,7 @@ def test_embedding_startup_probe_reports_effective_remote_configuration(embeddin
             assert health["embedding_model"] == "text-embedding-v4"
             assert health["embedding_mode"] == "remote"
     asyncio.run(run())
-    assert client.embed_query.call_count == int(enabled)
+    assert probe.call_count == int(enabled)
     output = capsys.readouterr().out
     assert "远程 API / custom / text-embedding-v4" in output
     assert "synthetic-secret" not in output

@@ -216,6 +216,37 @@ def init_db(conn: sqlite3.Connection):
         );
         CREATE INDEX IF NOT EXISTS idx_user_memories_user ON user_memories(user_id, updated_at);
 
+        CREATE TABLE IF NOT EXISTS user_skills (
+            id          TEXT PRIMARY KEY,
+            owner_id    TEXT NOT NULL,
+            name        TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            kind        TEXT NOT NULL DEFAULT 'prompt',
+            scope       TEXT NOT NULL DEFAULT 'chat',
+            content     TEXT NOT NULL DEFAULT '',
+            enabled     INTEGER NOT NULL DEFAULT 1,
+            builtin     INTEGER NOT NULL DEFAULT 0,
+            created_at  TEXT NOT NULL,
+            updated_at  TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_user_skills_owner ON user_skills(owner_id, updated_at);
+
+        CREATE TABLE IF NOT EXISTS skill_review_logs (
+            id              TEXT PRIMARY KEY,
+            user_id         TEXT NOT NULL,
+            username        TEXT NOT NULL DEFAULT '',
+            action          TEXT NOT NULL DEFAULT 'create',
+            skill_name      TEXT NOT NULL DEFAULT '',
+            kind            TEXT NOT NULL DEFAULT '',
+            scope           TEXT NOT NULL DEFAULT '',
+            verdict         TEXT NOT NULL DEFAULT 'pass',
+            risk            TEXT NOT NULL DEFAULT '',
+            reasons         TEXT NOT NULL DEFAULT '[]',
+            content_excerpt TEXT NOT NULL DEFAULT '',
+            created_at      TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_skill_review_logs_created ON skill_review_logs(created_at);
+
         CREATE TABLE IF NOT EXISTS chat_session_summaries (
             session_id               TEXT PRIMARY KEY,
             user_id                  TEXT NOT NULL,
@@ -595,6 +626,7 @@ def init_db(conn: sqlite3.Connection):
             trace_steps       TEXT NOT NULL DEFAULT '[]',
             client_ip         TEXT NOT NULL DEFAULT '',
             error             TEXT NOT NULL DEFAULT '',
+            role              TEXT NOT NULL DEFAULT '',
             created_at        TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_gateway_logs_created ON gateway_logs(created_at);
@@ -854,6 +886,149 @@ def init_db(conn: sqlite3.Connection):
         if "internal_key" not in scols:
             conn.execute("ALTER TABLE gateway_settings ADD COLUMN internal_key TEXT NOT NULL DEFAULT ''")
         conn.execute("INSERT INTO schema_migrations VALUES ('gateway_settings_v2',?)",
+                     (datetime.now().isoformat(),))
+    if not conn.execute("SELECT 1 FROM schema_migrations WHERE version='gateway_logs_v2'").fetchone():
+        # 业务场景（role）：审计页展示链路发起方（记忆抽取/意图改写/聊天回答…）
+        lcols = {r[1] for r in conn.execute("PRAGMA table_info(gateway_logs)")}
+        if "role" not in lcols:
+            conn.execute("ALTER TABLE gateway_logs ADD COLUMN role TEXT NOT NULL DEFAULT ''")
+        conn.execute("INSERT INTO schema_migrations VALUES ('gateway_logs_v2',?)",
+                     (datetime.now().isoformat(),))
+    if not conn.execute("SELECT 1 FROM schema_migrations WHERE version='gateway_upstream_category_v1'").fetchone():
+        # 上游分类：llm(默认) | ocr | embedding | rerank。多模态上游（OCR/Embedding/ReRank）
+        # 收纳进网关后，业务路由按 role→category 过滤候选上游，防 LLM 规则误选 embedding 上游。
+        uccols = {r[1] for r in conn.execute("PRAGMA table_info(gateway_upstreams)")}
+        if "category" not in uccols:
+            conn.execute("ALTER TABLE gateway_upstreams ADD COLUMN category TEXT NOT NULL DEFAULT 'llm'")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_gateway_upstreams_category"
+                     " ON gateway_upstreams(category)")
+        conn.execute("INSERT INTO schema_migrations VALUES ('gateway_upstream_category_v1',?)",
+                     (datetime.now().isoformat(),))
+    if not conn.execute("SELECT 1 FROM schema_migrations WHERE version='ingest_dedup_v1'").fetchone():
+        # 重复入库校验：来源指纹表（文件=内容 sha256，链接=规范化 URL sha256）。
+        # UNIQUE(fingerprint, kb_id)：同一知识库内相同来源只入库一次，入口即拦截；
+        # 跨知识库仍可分别入库（同一份公共资料归入不同主题库是合法场景）。
+        # record_id 关联 upload_records，来源删除时据此注销，保证删除后可重新入库。
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ingest_fingerprints (
+                id          TEXT PRIMARY KEY,
+                fingerprint TEXT NOT NULL,
+                kind        TEXT NOT NULL DEFAULT 'file',
+                kb_id       TEXT NOT NULL DEFAULT '',
+                source_type TEXT NOT NULL DEFAULT '',
+                title       TEXT NOT NULL DEFAULT '',
+                owner_id    TEXT NOT NULL DEFAULT '',
+                record_id   TEXT NOT NULL DEFAULT '',
+                source_ref  TEXT NOT NULL DEFAULT '',
+                created_at  TEXT NOT NULL
+            );
+            """
+        )
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_ingest_fp_kb"
+                     " ON ingest_fingerprints(fingerprint, kb_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ingest_fp_record"
+                     " ON ingest_fingerprints(record_id)")
+        conn.execute("INSERT INTO schema_migrations VALUES ('ingest_dedup_v1',?)",
+                     (datetime.now().isoformat(),))
+    if not conn.execute("SELECT 1 FROM schema_migrations WHERE version='wiki_topic_digest_v1'").fetchone():
+        # 对话/检索历史沉淀（llm-wiki 路径A）：记录已从高频主题综合出的私人 digest 词条，
+        # UNIQUE(user_id, topic_hash) 防止同一用户的同一主题被重复编译；hits 记录沉淀时命中次数，
+        # page_id 关联 wiki_pages，词条删除后可据 topic_hash 清理或允许重新沉淀。
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS wiki_topic_digest_log (
+                id         TEXT PRIMARY KEY,
+                user_id    TEXT NOT NULL,
+                topic      TEXT NOT NULL,
+                topic_hash TEXT NOT NULL,
+                page_id    TEXT NOT NULL DEFAULT '',
+                hits       INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            """
+        )
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_topic_digest_user_hash"
+                     " ON wiki_topic_digest_log(user_id, topic_hash)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_topic_digest_page"
+                     " ON wiki_topic_digest_log(page_id)")
+        conn.execute("INSERT INTO schema_migrations VALUES ('wiki_topic_digest_v1',?)",
+                     (datetime.now().isoformat(),))
+    if not conn.execute("SELECT 1 FROM schema_migrations WHERE version='semantic_cache_v1'").fetchone():
+        # 主问答语义缓存：按用户存储历史问答的问题向量，相似问题命中时直接回复缓存内容、
+        # 绕过检索/生成。embedding 以 JSON 数组存（per-user 条目量小，内存余弦匹配即可）；
+        # UNIQUE(user_id, question_norm) 避免同一用户重复归一化问题重复入库。
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS semantic_cache (
+                id             TEXT PRIMARY KEY,
+                user_id        TEXT NOT NULL,
+                question       TEXT NOT NULL,
+                question_norm  TEXT NOT NULL,
+                answer         TEXT NOT NULL,
+                sources        TEXT NOT NULL DEFAULT '[]',
+                embedding      TEXT NOT NULL DEFAULT '[]',
+                hit_count      INTEGER NOT NULL DEFAULT 0,
+                created_at     TEXT NOT NULL,
+                last_used_at   TEXT NOT NULL
+            );
+            """
+        )
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_semantic_cache_user_norm"
+                     " ON semantic_cache(user_id, question_norm)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_semantic_cache_user_used"
+                     " ON semantic_cache(user_id, last_used_at)")
+        conn.execute("INSERT INTO schema_migrations VALUES ('semantic_cache_v1',?)",
+                     (datetime.now().isoformat(),))
+    if not conn.execute("SELECT 1 FROM schema_migrations WHERE version='prompt_skill_eval_v1'").fetchone():
+        # Prompt/Skill 评测与上线：
+        # - prompt_versions：系统提示词版本库，status=published 的版本被 chat 主流程实际采用（「上线」落地）；
+        #   同一时刻至多一个 published，发布新版本时旧 published 归档为 archived。
+        # - prompt_skill_evals：一次评测 = 一行，target_type=prompt|skill；沉淀静态断言(assertions)、
+        #   Rubric 多维打分(rubric)、可选 A/B 行为对比(ab)、LLM 优化建议(suggestion)与上线状态。
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS prompt_versions (
+                id          TEXT PRIMARY KEY,
+                name        TEXT NOT NULL DEFAULT '',
+                content     TEXT NOT NULL,
+                status      TEXT NOT NULL DEFAULT 'draft',
+                note        TEXT NOT NULL DEFAULT '',
+                created_by  TEXT NOT NULL DEFAULT '',
+                created_at  TEXT NOT NULL,
+                updated_at  TEXT NOT NULL
+            );
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_prompt_versions_status"
+                     " ON prompt_versions(status, updated_at)")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS prompt_skill_evals (
+                id            TEXT PRIMARY KEY,
+                target_type   TEXT NOT NULL,
+                target_id     TEXT NOT NULL DEFAULT '',
+                target_name   TEXT NOT NULL DEFAULT '',
+                owner_id      TEXT NOT NULL DEFAULT '',
+                status        TEXT NOT NULL DEFAULT 'running',
+                baseline_text TEXT NOT NULL DEFAULT '',
+                assertions    TEXT NOT NULL DEFAULT '[]',
+                rubric        TEXT NOT NULL DEFAULT '{}',
+                overall_score REAL,
+                suggestion    TEXT NOT NULL DEFAULT '{}',
+                ab            TEXT NOT NULL DEFAULT '{}',
+                published     INTEGER NOT NULL DEFAULT 0,
+                error         TEXT NOT NULL DEFAULT '',
+                created_by    TEXT NOT NULL DEFAULT '',
+                created_at    TEXT NOT NULL,
+                finished_at   TEXT
+            );
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_prompt_skill_evals_target"
+                     " ON prompt_skill_evals(target_type, target_id, created_at)")
+        conn.execute("INSERT INTO schema_migrations VALUES ('prompt_skill_eval_v1',?)",
                      (datetime.now().isoformat(),))
     conn.commit()
 

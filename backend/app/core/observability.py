@@ -39,7 +39,11 @@ RETENTION_DAYS = 30
 SEGMENT_LABELS = {
     "system": "系统提示",
     "memory": "长期记忆",
+    "memory_profile": "记忆·画像卡",
+    "memory_relevant": "记忆·相关检索",
+    "skills": "用户 Skill",
     "history": "历史对话",
+    "summary": "历史摘要",
     "knowledge": "知识上下文",
     "search": "联网搜索",
     "tool": "附件工具",
@@ -374,6 +378,89 @@ def personal_metrics(user_id: str, days: int = 7) -> dict:
             {"activity": name, **business_values(counts)}
             for name, counts in sorted(activities.items(), key=lambda item: -item[1]["total"])
         ],
+    }
+
+
+def personal_context_overview(user_id: str, days: int = 7) -> dict:
+    """当前用户的「上下文窗口 + 记忆模块」使用概览（可观测性个人面板数据源）。
+
+    - 上下文窗口：按语义段（系统/记忆/历史/知识/搜索/工具…）聚合该用户近期每次请求
+      注入上下文的 token 构成，并给出单请求 prompt token 的均值/峰值与告警水位；
+    - 历史压缩：该用户名下已生成会话摘要的数量与摘要 token 占用（compaction 概览）；
+    - 记忆模块：委托 MemoryService.usage_overview（条数/分类型/画像卡/检索命中/字符与预算）。
+    仅读取当前账号数据；无记录时返回结构完整的空概览。
+    """
+    if not user_id or user_id in {"guest", "system", "-"}:
+        raise ValueError("个人上下文概览需要有效的登录用户")
+    days = max(1, min(days, RETENTION_DAYS))
+    since = _since(days)
+
+    # 上下文窗口：该用户单请求真实 prompt token（= 注入上下文总量）的分布
+    win = db.query_one(
+        "SELECT COUNT(*) AS n,"
+        " COALESCE(AVG(prompt_tokens), 0) AS avg_pt,"
+        " COALESCE(MAX(prompt_tokens), 0) AS peak_pt,"
+        " COALESCE(SUM(prompt_tokens), 0) AS sum_pt"
+        " FROM agent_traces WHERE user_id = ? AND started_at >= ? AND status != 'running'",
+        (user_id, since),
+    ) or {}
+    warn_threshold = int(getattr(settings, "TOKEN_AVG_WARN_PER_REQUEST", 6000))
+    avg_pt = round(float(win.get("avg_pt", 0) or 0), 1)
+    requests = int(win.get("n", 0) or 0)
+
+    # segment 级构成：该用户各语义段占用（定位上下文窗口里哪段最大）
+    seg_rows = db.query(
+        "SELECT s.segment, COALESCE(SUM(s.tokens), 0) AS tokens,"
+        " COALESCE(SUM(s.chars), 0) AS chars, COUNT(*) AS n,"
+        " COALESCE(MAX(s.tokens), 0) AS peak"
+        " FROM agent_token_segments s JOIN agent_traces t ON t.id = s.trace_id"
+        " WHERE t.user_id = ? AND s.created_at >= ?"
+        " GROUP BY s.segment ORDER BY tokens DESC",
+        (user_id, since),
+    )
+    seg_total = sum(int(r["tokens"]) for r in seg_rows)
+    segments = [
+        {
+            "segment": r["segment"],
+            "label": SEGMENT_LABELS.get(r["segment"], r["segment"]),
+            "tokens": int(r["tokens"]),
+            "chars": int(r["chars"]),
+            "count": int(r["n"]),
+            "avg_tokens": round(int(r["tokens"]) / int(r["n"]), 1) if int(r["n"]) else 0.0,
+            "peak_tokens": int(r["peak"]),
+            "share": round(int(r["tokens"]) / seg_total, 4) if seg_total else 0.0,
+        }
+        for r in seg_rows
+    ]
+
+    # 历史压缩（compaction）：该用户名下已生成摘要的会话数量与摘要 token 占用
+    comp = db.query_one(
+        "SELECT COUNT(*) AS n, COALESCE(SUM(token_estimate), 0) AS tokens"
+        " FROM chat_session_summaries WHERE user_id = ?",
+        (user_id,),
+    ) or {}
+
+    from app.services.memory import MemoryService
+
+    return {
+        "days": days,
+        "context_window": {
+            "requests": requests,
+            "avg_prompt_tokens": avg_pt,
+            "peak_prompt_tokens": int(win.get("peak_pt", 0) or 0),
+            "total_prompt_tokens": int(win.get("sum_pt", 0) or 0),
+            "warn_threshold": warn_threshold,
+            "overuse": bool(requests and avg_pt > warn_threshold),
+            "history_rounds": int(getattr(settings, "SESSION_MAX_HISTORY", 8)),
+            "memory_ctx_chars_budget": int(getattr(settings, "MEMORY_CTX_CHARS", 600)),
+            "segments": segments,
+        },
+        "compression": {
+            "sessions_with_summary": int(comp.get("n", 0) or 0),
+            "summary_tokens": int(comp.get("tokens", 0) or 0),
+            "trigger_tokens": int(getattr(settings, "CONTEXT_COMPACT_TRIGGER_TOKENS", 6000)),
+        },
+        "memory": MemoryService.usage_overview(user_id),
     }
 
 

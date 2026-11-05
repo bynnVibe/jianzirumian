@@ -19,7 +19,7 @@
           :key="t.key"
           class="gw-tab"
           :class="{ active: activeTab === t.key }"
-          @click="activeTab = t.key"
+          @click="switchTab(t.key)"
         >
           {{ t.label }}
         </button>
@@ -163,7 +163,7 @@
           <div class="card">
             <div class="card-head">
               <h3 class="card-title">最近风险调用</h3>
-              <button class="btn btn-ghost sm" @click="activeTab = 'logs'">查看全部日志 →</button>
+              <button class="btn btn-ghost sm" @click="switchTab('logs')">查看全部日志 →</button>
             </div>
             <div v-if="overview.recent_risks?.length" class="risk-list">
               <div v-for="r in overview.recent_risks" :key="r.id" class="risk-item">
@@ -198,12 +198,30 @@
       <!-- ============ 安全审计 ============ -->
       <SecurityPanel v-else-if="activeTab === 'security'" />
     </div>
+
+    <!-- ============ 配置未保存离开拦截（业务路由等页内草稿） ============ -->
+    <div v-if="leavePrompt" class="modal-overlay">
+      <div class="modal-box">
+        <h3 class="modal-title">配置未保存</h3>
+        <p class="modal-desc">模型网关的配置已有改动但尚未保存，是否保留配置后离开？</p>
+        <div class="modal-actions">
+          <button class="btn btn-primary" :disabled="leaveSaving" @click="resolveLeave('save')">
+            <span v-if="leaveSaving" class="spinner-xs"></span>
+            {{ leaveSaving ? '保存中...' : '保存配置后离开' }}
+          </button>
+          <button class="btn btn-outline" :disabled="leaveSaving" @click="resolveLeave('leave')">不保留直接离开</button>
+          <button class="btn btn-outline" :disabled="leaveSaving" @click="resolveLeave('stay')">留在本页</button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, provide } from 'vue'
+import { useRoute } from 'vue-router'
 import { getGatewayOverview, getGatewayStats } from '@/api'
+import { useUnsavedLeaveGuard } from '@/composables/useUnsavedLeaveGuard'
 import UpstreamsPanel from '@/components/gateway/UpstreamsPanel.vue'
 import RulesPanel from '@/components/gateway/RulesPanel.vue'
 import RoleRoutesPanel from '@/components/gateway/RoleRoutesPanel.vue'
@@ -220,8 +238,46 @@ const tabs = [
   { key: 'logs', label: '日志 · 审计' },
   { key: 'security', label: '安全审计中心' },
 ]
+const route = useRoute()
 const activeTab = ref('dashboard')
 const dashLoading = ref(true)
+
+// ---- 未保存改动离开拦截（页内草稿源注册表）----
+// 子面板（如业务路由）通过 inject('gwRegisterDirty') 注册 { id, isDirty, save }，卸载时注销；
+// 网关聚合各源脏态，路由离开 / tab 切换 / 浏览器关闭时统一走三选弹窗（复用系统设置交互）。
+const dirtySources = ref([])
+function gwUnregisterDirty(id) {
+  dirtySources.value = dirtySources.value.filter((s) => s.id !== id)
+}
+function gwRegisterDirty(src) {
+  if (!src || !src.id) return
+  gwUnregisterDirty(src.id)
+  dirtySources.value.push(src)
+}
+provide('gwRegisterDirty', gwRegisterDirty)
+provide('gwUnregisterDirty', gwUnregisterDirty)
+
+const gwDirty = computed(() => dirtySources.value.some((s) => {
+  try { return !!s.isDirty() } catch { return false }
+}))
+async function gwSaveAll() {
+  for (const s of [...dirtySources.value]) {
+    try { if (s.isDirty()) await s.save() } catch (e) { console.error('保存草稿失败', s.id, e) }
+  }
+}
+const { leavePrompt, leaveSaving, resolveLeave, confirmLeave } = useUnsavedLeaveGuard({
+  isDirty: () => gwDirty.value,
+  saveAll: gwSaveAll,
+})
+
+// tab 切换同样拦截：v-else-if 会卸载当前面板，切换前若有草稿走同一三选弹窗
+// （save=保存后切 / leave=丢弃切 / stay=取消），避免静默丢草稿
+async function switchTab(key) {
+  if (key === activeTab.value) return
+  const ok = await confirmLeave()
+  if (!ok) return
+  activeTab.value = key
+}
 const statDays = ref(7)
 const overview = reactive({ upstream_health: {}, recent_risks: [] })
 const stats = reactive({ overview: {}, daily: [], by_channel: [], by_model: [], by_risk: [], top_keys: [] })
@@ -262,6 +318,9 @@ async function loadStats() {
 }
 
 onMounted(async () => {
+  // 支持深链：/gateway?tab=upstreams 直接定位到指定 tab（系统设置「前往网关」跳转用）
+  const q = route.query.tab
+  if (q && tabs.some((t) => t.key === q)) activeTab.value = q
   dashLoading.value = true
   await Promise.all([loadOverview(), loadStats()])
   dashLoading.value = false
@@ -387,4 +446,17 @@ onMounted(async () => {
 .btn-ghost { background: transparent; border-color: var(--color-border); color: var(--color-text); }
 .btn-ghost:hover:not(:disabled) { border-color: var(--color-primary); color: var(--color-primary); }
 .mini-loading, .mini-empty { color: var(--color-text-secondary); font-size: 13px; padding: 24px 0; text-align: center; }
+
+/* ---- 未保存离开三选弹窗（照抄系统设置样式）---- */
+.btn-primary { background: var(--color-primary); color: #fff; border-color: var(--color-primary); }
+.btn-primary:hover:not(:disabled) { background: #b0763c; }
+.btn-outline { background: #fff; color: var(--color-text-secondary); border-color: var(--color-border); }
+.btn-outline:hover:not(:disabled) { border-color: var(--color-primary); color: var(--color-primary); }
+.spinner-xs { display: inline-block; width: 12px; height: 12px; border: 2px solid rgba(0,0,0,0.1); border-top-color: #fff; border-radius: 50%; animation: gw-spin 0.7s linear infinite; vertical-align: -1px; margin-right: 4px; }
+@keyframes gw-spin { to { transform: rotate(360deg); } }
+.modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.4); display: flex; align-items: center; justify-content: center; z-index: 100; }
+.modal-box { background: #fff; border-radius: 16px; padding: 28px; max-width: 420px; width: 90%; box-shadow: 0 8px 32px rgba(0,0,0,0.15); }
+.modal-title { font-size: 17px; font-weight: 600; color: var(--color-text); margin-bottom: 12px; }
+.modal-desc { font-size: 14px; color: var(--color-text-secondary); line-height: 1.6; margin-bottom: 20px; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 10px; flex-wrap: wrap; }
 </style>

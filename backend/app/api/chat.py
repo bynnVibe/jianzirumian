@@ -108,7 +108,8 @@ async def send_message(
         async with aclosing(chat_service.chat_stream(
             session_id=session_id, query=body.query, use_knowledge=body.use_knowledge,
             use_search=body.use_search, llm_provider=body.llm_provider, user_id=user_id,
-            rule_id=body.rule_id or "",
+            rule_id=body.rule_id or "", model=body.model or "",
+            skip_search_prompt=body.skip_search_prompt,
         )) as stream:
             async for event in stream:
                 yield f"{event}\n"
@@ -140,6 +141,8 @@ async def send_message_with_files(
     llm_provider: str = Form(""),
     kb_id: str = Form(""),
     rule_id: str = Form(""),
+    model: str = Form(""),
+    skip_search_prompt: bool = Form(False),
     files: list[UploadFile] = File(default=[]),
     user: dict | None = Depends(get_optional_user),
 ):
@@ -180,6 +183,7 @@ async def send_message_with_files(
             session_id=session_id, query=message, use_knowledge=use_knowledge,
             use_search=use_search, llm_provider=llm_provider or None,
             user_id=user_id, attachments=attachments, kb_id=kb_id, rule_id=rule_id,
+            model=model, skip_search_prompt=skip_search_prompt,
         )) as stream:
             async for event in stream:
                 yield f"{event}\n"
@@ -347,6 +351,25 @@ async def delete_session(session_id: str, user: dict = Depends(get_current_user)
     return {"message": "会话已删除"}
 
 
+@router.post("/sessions/{session_id}/compact")
+async def compact_session(session_id: str, request: Request, user: dict = Depends(get_current_user)):
+    """手动压缩会话历史（/compact 等价物）：强制生成/更新结构化摘要，可附压缩侧重点 focus。"""
+    session = chat_service.get_user_session(session_id, user["id"])
+    if not session:
+        raise HTTPException(status_code=404, detail="会话不存在或无权访问")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    focus = str((body or {}).get("focus") or "")[:200]
+    from app.services import session_summary
+
+    stats = await session_summary.maybe_summarize(session, force=True, focus=focus)
+    if not stats:
+        raise HTTPException(status_code=400, detail="会话消息过少，暂无可压缩的历史")
+    return {"success": True, **stats}
+
+
 @router.post("/sessions/{session_id}/switch")
 async def switch_session(session_id: str, user: dict = Depends(get_current_user)):
     """切换会话（仅校验存在性与归属，当前会话状态由前端维护）"""
@@ -360,3 +383,47 @@ async def switch_session(session_id: str, user: dict = Depends(get_current_user)
         updated_at=session.updated_at,
         message_count=len(session.messages),
     )
+
+
+# ---- 主问答语义缓存（当前用户专属） ----
+@router.get("/cache")
+async def get_semantic_cache(limit: int = 50, user: dict = Depends(get_current_user)):
+    """语义缓存面板：开关/阈值/条目数/累计命中 + 当前用户缓存列表。"""
+    from app.services import semantic_cache
+    uid = user["id"]
+    return {
+        "success": True,
+        **semantic_cache.stats(uid),
+        "entries": semantic_cache.list_entries(uid, limit=limit),
+    }
+
+
+@router.post("/cache/toggle")
+async def toggle_semantic_cache(request: Request, user: dict = Depends(get_current_user)):
+    """开/关语义缓存（运行时覆盖，写入 runtime_config）。"""
+    from app.services import semantic_cache
+    from app.services.config_manager import runtime_config
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    enabled = bool((body or {}).get("enabled", True))
+    runtime_config.semantic_cache_enabled = enabled
+    return {"success": True, "enabled": semantic_cache.semantic_cache_enabled()}
+
+
+@router.delete("/cache")
+async def clear_semantic_cache(user: dict = Depends(get_current_user)):
+    """清空当前用户的全部语义缓存。"""
+    from app.services import semantic_cache
+    n = semantic_cache.clear(user["id"])
+    return {"success": True, "deleted": n, "message": f"已清空 {n} 条语义缓存"}
+
+
+@router.delete("/cache/{entry_id}")
+async def delete_semantic_cache_entry(entry_id: str, user: dict = Depends(get_current_user)):
+    """删除当前用户的单条语义缓存。"""
+    from app.services import semantic_cache
+    if not semantic_cache.delete_entry(user["id"], entry_id):
+        raise HTTPException(status_code=404, detail="缓存条目不存在或无权删除")
+    return {"success": True, "message": "缓存条目已删除"}

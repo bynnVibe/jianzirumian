@@ -241,6 +241,65 @@ class AutoLocalOCR(BaseOCR):
         return ""
 
 
+def _image_data_url(image_path: str) -> str:
+    """读取图片并转为 OpenAI chat vision 可用的 data URL（base64）。"""
+    with open(image_path, "rb") as f:
+        img_bytes = f.read()
+    img_b64 = base64.b64encode(img_bytes).decode("utf-8")
+    ext = Path(image_path).suffix.lower()
+    mime = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+            ".bmp": "image/bmp", ".webp": "image/webp"}.get(ext, "image/jpeg")
+    return f"data:{mime};base64,{img_b64}"
+
+
+async def _ocr_via_gateway(data_url: str, prompt: str = "提取图片中所有文字",
+                           fallback_model: str = "") -> Optional[str]:
+    """经模型网关（role=ocr）用多模态 chat 识别图片文字。
+
+    仅当存在启用的 ocr 上游、可解析出模型且选路有候选时走网关；网关未就绪/
+    无 ocr 上游/无模型/异常时返回 None，由调用方回退原生实现。
+    model 解析：ocr 业务路由绑定模型 > ocr 上游模型清单首个 > fallback_model。
+    """
+    try:
+        from app.services.gateway import rules as rule_svc
+        from app.services.gateway import upstreams as up_svc
+        ups = [u for u in up_svc.list_upstreams(category="ocr") if u.get("enabled")]
+        if not ups:
+            return None
+        model = ((rule_svc.get_role_route("ocr") or {}).get("model_name") or "").strip()
+        if not model:
+            names = up_svc.all_model_names(category="ocr")
+            model = names[0] if names else ""
+        if not model:
+            model = (fallback_model or "").strip()
+        if not model:
+            return None
+        _, candidates = rule_svc.select_upstreams(model, role="ocr")
+        if not candidates:
+            return None
+        from app.core.llm import LLMFactory
+        llm = LLMFactory.create_for_role("ocr", model=model)
+        messages = [{
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": data_url}},
+                {"type": "text", "text": prompt},
+            ],
+        }]
+        parts = []
+        async for chunk in llm.chat(messages, stream=False):
+            if chunk:
+                parts.append(chunk)
+        text = "".join(parts).strip()
+        if not text:
+            return None
+        logger.info("[业务路由] OCR 经网关出网: model=%s 识别 %d 字符", model, len(text))
+        return text
+    except Exception as e:
+        logger.warning("[业务路由] OCR 经网关失败，回退原生实现: %s", e)
+        return None
+
+
 class AliyunOCR(BaseOCR):
     """阿里云百炼 OCR (OpenAI 兼容接口)
 
@@ -280,6 +339,11 @@ class AliyunOCR(BaseOCR):
         }.get(ext, "image/jpeg")
 
         data_url = f"data:{mime};base64,{img_b64}"
+
+        # 优先经模型网关（role=ocr，多模态 chat）；网关未就绪回退直连百炼
+        gw_text = await _ocr_via_gateway(data_url, fallback_model=self.model)
+        if gw_text is not None:
+            return gw_text
 
         # 构建 OpenAI 兼容的消息
         payload = {
@@ -348,6 +412,10 @@ class CustomAPIOCR(BaseOCR):
         self.api_key = cfg.get("api_key", "")
 
     async def recognize(self, image_path: str) -> str:
+        # 优先经模型网关（role=ocr，多模态 chat）；网关未就绪/无 ocr 模型时回退原生 multipart
+        gw_text = await _ocr_via_gateway(_image_data_url(image_path))
+        if gw_text is not None:
+            return gw_text
         if not self.api_url:
             raise ValueError("未配置自定义 OCR API URL")
 
