@@ -193,16 +193,34 @@
               >{{ c }}</button>
             </div>
             <div class="input-row">
-              <textarea
-                v-model="draft"
-                ref="inputRef"
-                class="input-box"
-                rows="1"
-                placeholder="向知识助手提问…"
-                :disabled="store.isGenerating"
-                @keydown.enter.exact.prevent="onSend"
-                @input="autoGrow"
-              ></textarea>
+              <div class="mention-wrap">
+                <textarea
+                  v-model="draft"
+                  ref="inputRef"
+                  class="input-box"
+                  rows="1"
+                  placeholder="向知识助手提问… 输入 @ 可引用当前界面文档/片段"
+                  :disabled="store.isGenerating"
+                  @keydown="onInputKeydown"
+                  @input="autoGrow"
+                ></textarea>
+                <!-- @ 引用候选：当前界面正在展示的文档/片段标题 -->
+                <div v-if="mentionOpen" class="mention-pop" role="listbox">
+                  <div class="mention-head">@ 引用当前界面的文档 / 片段</div>
+                  <p v-if="!mentionCandidates.length" class="mention-empty">没有匹配的条目</p>
+                  <button
+                    v-for="(opt, oi) in mentionCandidates"
+                    :key="opt.title"
+                    type="button"
+                    class="mention-item"
+                    :class="{ active: oi === mentionIndex }"
+                    @mousedown.prevent="selectMention(opt)"
+                  >
+                    <span class="mention-title">{{ opt.title }}</span>
+                    <span class="mention-sub">{{ opt.sub }}</span>
+                  </button>
+                </div>
+              </div>
               <!-- 生成中：停止按钮；否则：发送按钮 -->
               <button
                 v-if="store.isGenerating"
@@ -245,9 +263,9 @@ const bodyRef = ref(null)
 const inputRef = ref(null)
 const editBusy = ref('')
 
-// 对话/登录/指南/独立预览页不显示助手（与侧边栏隐藏规则一致，且助手需登录）
-// 系统管理控制台（/admin/*）为管理/运维场景，同样不浮出知识助手
-const HIDDEN_ROUTES = ['Login', 'Register', 'Guide', 'Chat', 'ChatWithSession', 'DocPreview', 'AttachmentPreview', 'AdminSettings', 'UserManagement', 'Pipeline', 'Gateway', 'Eval', 'Observability', 'MyObservability']
+// 知识助手仅在「知识库界面」浮现：知识类页面白名单（/kb 知识库管理/收藏/百科/上传 + 入库详情）。
+// 其余页面（含 Skill 配置、对话、登录、管理控制台、系统管理等）一律不浮出助手。
+const ASSISTANT_ROUTES = ['Wiki', 'KnowledgeBase', 'KnowledgeUpload', 'IngestDetail', 'Bookmarks']
 const ROUTE_LABELS = {
   Wiki: '知识百科',
   KnowledgeBase: '知识库管理',
@@ -259,7 +277,7 @@ const ROUTE_LABELS = {
   Eval: '回归评测',
 }
 
-const visible = computed(() => auth.isAuthenticated && !HIDDEN_ROUTES.includes(route.name))
+const visible = computed(() => auth.isAuthenticated && ASSISTANT_ROUTES.includes(route.name))
 
 const quickChips = computed(() => {
   if (store.context.open_doc_title) {
@@ -324,11 +342,108 @@ function render(text) {
 function onSend() {
   const text = draft.value.trim()
   if (!text || store.isGenerating) return
+  const mentions = extractMentions(text)
   draft.value = ''
   nextTick(() => {
     if (inputRef.value) inputRef.value.style.height = 'auto'
   })
-  store.send(text)
+  store.send(text, mentions)
+}
+
+// ---- @ 引用当前界面文档/片段 ----
+// 候选来自视图写入的界面实时快照（page_state）：知识库管理页的 documents、
+// 收藏/百科页的 items，即用户此刻屏幕上正在展示的文档/片段标题。
+const mentionIndex = ref(0)
+const mentionSuppressed = ref(false) // Esc 关闭后，直到 @ 查询串变化才重新弹出
+
+const mentionMatch = computed(() => {
+  const m = draft.value.match(/@([^@\n《》]*)$/)
+  return m ? m[1] : null
+})
+watch(mentionMatch, () => {
+  mentionSuppressed.value = false
+  mentionIndex.value = 0
+})
+
+const mentionOptions = computed(() => {
+  const ps = store.context.page_state
+  if (!ps) return []
+  const seen = new Set()
+  const out = []
+  for (const d of (ps.documents || [])) {
+    const t = ((d && d.title) || '').trim()
+    if (!t || seen.has(t)) continue
+    seen.add(t)
+    out.push({ title: t, sub: d.kb_name ? `文档 · ${d.kb_name}` : '文档' })
+  }
+  for (const it of (ps.items || [])) {
+    const t = ((it && it.title) || '').trim()
+    if (!t || seen.has(t)) continue
+    seen.add(t)
+    out.push({ title: t, sub: it.type ? `片段 · ${it.type}` : '片段' })
+  }
+  return out
+})
+
+const mentionCandidates = computed(() => {
+  const q = (mentionMatch.value || '').trim().toLowerCase()
+  const list = mentionOptions.value
+  const filtered = q ? list.filter((o) => o.title.toLowerCase().includes(q)) : list
+  return filtered.slice(0, 8)
+})
+
+const mentionOpen = computed(() =>
+  mentionMatch.value !== null && !mentionSuppressed.value && !store.isGenerating && mentionOptions.value.length > 0,
+)
+
+function selectMention(opt) {
+  if (!opt) return
+  // 用 @《标题》 替换尾部的 @查询串，作为可读的引用标记
+  draft.value = draft.value.replace(/@([^@\n《》]*)$/, `@《${opt.title}》 `)
+  mentionSuppressed.value = true
+  nextTick(() => inputRef.value && inputRef.value.focus())
+}
+
+// 从发送文本中提取 @《标题》 引用（去重保序），随请求传给后端做联合分析
+function extractMentions(text) {
+  const titles = []
+  const re = /@《([^》]+)》/g
+  let m
+  while ((m = re.exec(text))) {
+    const t = m[1].trim()
+    if (t && !titles.includes(t)) titles.push(t)
+  }
+  return titles.map((t) => ({ title: t }))
+}
+
+function onInputKeydown(e) {
+  if (mentionOpen.value && mentionCandidates.value.length) {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      mentionIndex.value = (mentionIndex.value + 1) % mentionCandidates.value.length
+      return
+    }
+    if (e.key === 'ArrowUp') {
+      e.preventDefault()
+      mentionIndex.value = (mentionIndex.value - 1 + mentionCandidates.value.length) % mentionCandidates.value.length
+      return
+    }
+    if (e.key === 'Enter' || e.key === 'Tab') {
+      e.preventDefault()
+      selectMention(mentionCandidates.value[mentionIndex.value])
+      return
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault()
+      mentionSuppressed.value = true
+      return
+    }
+  }
+  // 非引用选择态：Enter（不含 Shift 等修饰键）发送
+  if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    e.preventDefault()
+    onSend()
+  }
 }
 
 function sendQuick(text) {
@@ -1304,6 +1419,7 @@ onMounted(() => {
 
 .input-box {
   flex: 1;
+  width: 100%;
   resize: none;
   border: 1px solid #e0d8cc;
   border-radius: 10px;
@@ -1325,6 +1441,77 @@ onMounted(() => {
 .input-box:disabled {
   background: #f6f1e8;
   cursor: not-allowed;
+}
+
+/* ---- @ 引用当前界面文档/片段 ---- */
+.mention-wrap {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+
+.mention-pop {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  max-height: 240px;
+  overflow-y: auto;
+  background: #fff;
+  border: 1px solid #e8dfd2;
+  border-radius: 10px;
+  box-shadow: 0 6px 22px rgba(80, 60, 35, 0.16);
+  padding: 4px;
+  z-index: 20;
+}
+
+.mention-head {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: #b5793c;
+  padding: 5px 8px 6px;
+  border-bottom: 1px dashed #eee4d4;
+  margin-bottom: 3px;
+}
+
+.mention-empty {
+  font-size: 12px;
+  color: #a89a89;
+  text-align: center;
+  padding: 10px 4px;
+  margin: 0;
+}
+
+.mention-item {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  width: 100%;
+  border: none;
+  background: transparent;
+  text-align: left;
+  padding: 6px 8px;
+  border-radius: 7px;
+  cursor: pointer;
+  transition: background 0.12s;
+}
+
+.mention-item:hover,
+.mention-item.active {
+  background: #faf3e8;
+}
+
+.mention-title {
+  font-size: 12.5px;
+  color: #4a3f35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mention-sub {
+  font-size: 10.5px;
+  color: #b3a695;
 }
 
 .send-btn {

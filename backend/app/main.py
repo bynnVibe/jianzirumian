@@ -145,6 +145,13 @@ async def lifespan(app: FastAPI):
         gw_upstreams.seed_network_providers_from_settings()
     except Exception as e:
         logger.warning("模型网关多模态上游种子化失败: %s", e)
+    # 回归评测：幂等预置内置评测集（问答回归基准 + Prompt/Skill A/B 行为对比），
+    # 避免新环境下评测集为空导致回归与 A/B 无法发起
+    try:
+        from app.services import evaluation as eval_service
+        eval_service.seed_builtin_datasets()
+    except Exception as e:
+        logger.warning("回归评测内置评测集种子化失败: %s", e)
     print(f"[见字如面] 服务启动完成")
     print(f"  - LLM: {runtime_config.llm_provider or settings.LLM_PROVIDER} (默认: {settings.LLM_PROVIDER})")
     print(f"  - OCR: {runtime_config.ocr_provider or settings.OCR_PROVIDER} (默认: {settings.OCR_PROVIDER})")

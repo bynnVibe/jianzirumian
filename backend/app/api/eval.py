@@ -60,6 +60,21 @@ class CaseImport(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# 内置基准集接地重建
+# ---------------------------------------------------------------------------
+@router.post("/builtin/refresh")
+async def refresh_builtin(_admin: dict = Depends(require_ops)):
+    """以最新内置用例原地重建内置评测集（知识库内容变化后重新接地基准集）。
+
+    仅重建两个内置评测集的用例行，保留评测集 id 与历史运行记录；不影响用户自建评测集。
+    """
+    refreshed = evaluation.refresh_builtin_datasets()
+    if not refreshed:
+        raise HTTPException(status_code=404, detail="未找到内置评测集，无法重建")
+    return {"refreshed": refreshed}
+
+
+# ---------------------------------------------------------------------------
 # 评测集
 # ---------------------------------------------------------------------------
 @router.get("/datasets")

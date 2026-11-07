@@ -193,6 +193,13 @@ export function deleteMyMemory(memoryId) {
 }
 
 /**
+ * 记忆/技能召回使用与效果度量（近 N 天召回率 + 召回/未召回点赞率对照）
+ */
+export function getModuleRecall(days = 30) {
+  return api.get('/me/module-recall', { params: { days } })
+}
+
+/**
  * Skill 配置：列表 / 新建 / 编辑（含开关） / 删除
  * kind: prompt（对话提示注入） | playbook（链接抓取策略）；内置技能仅可开关
  */
@@ -1038,11 +1045,12 @@ export function getSkillReviews(limit = 30) {
 }
 
 /**
- * 链接正文「内容润色」：按 Skill 配置（scope=polish）做确定性清洗，
- * 去角标/噪声行/多余空格，保留段落顺序与自然段，不新增内容。
+ * 链接正文「内容润色」：先按 Skill 配置（scope=polish）做确定性清洗，
+ * 去角标/噪声行/多余空格，保留段落顺序与自然段，不新增内容；
+ * 传入 direction（润色方向）时再走网关 content_polish 角色做一次 LLM 改写。
  */
-export function cleanArticle(text) {
-  return api.post('/knowledge/clean-article', { text })
+export function cleanArticle(text, direction = '') {
+  return api.post('/knowledge/clean-article', { text, direction })
 }
 
 

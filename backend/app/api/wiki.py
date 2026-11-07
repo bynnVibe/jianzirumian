@@ -269,6 +269,8 @@ class AssistantChatRequest(BaseModel):
     open_doc_content: str = ""
     # 用户当前界面的实时快照（如知识库管理页展示的文档清单/筛选/统计），结构化 dict
     page_state: Optional[dict] = None
+    # 用户在本条消息中通过 @ 引用的当前界面文档/片段（[{title}]），做联合分析
+    mentions: Optional[List[dict]] = None
     # 用户最近的行文/浏览动作轨迹（打开文档、检索、翻页等），提供前后文
     user_actions: Optional[List[str]] = None
     # 助手面板内的历史对话 [{role, content}]，用于多轮上下文
@@ -297,6 +299,7 @@ async def assistant_chat(body: AssistantChatRequest, current_user: dict = Depend
         open_doc_title=body.open_doc_title,
         open_doc_content=body.open_doc_content,
         page_state=body.page_state if isinstance(body.page_state, dict) else None,
+        mentions=body.mentions if isinstance(body.mentions, list) else None,
         user_actions=body.user_actions if isinstance(body.user_actions, list) else None,
     )
     history = body.history if isinstance(body.history, list) else []

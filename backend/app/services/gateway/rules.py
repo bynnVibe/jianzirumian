@@ -38,6 +38,7 @@ ROLES = (
     "chat_answer", "assistant", "intent_rewrite", "evidence_check",
     "wiki_compile", "embed", "rerank", "ocr",
     "memory_extract", "session_summary", "knowledge_summarize", "text_polish",
+    "content_polish",
 )
 
 # role → 上游分类映射：select_upstreams 按此过滤候选上游 category，防跨类误选
@@ -46,6 +47,7 @@ ROLE_CATEGORY = {
     "chat_answer": "llm", "assistant": "llm", "intent_rewrite": "llm",
     "evidence_check": "llm", "wiki_compile": "llm", "memory_extract": "llm",
     "session_summary": "llm", "knowledge_summarize": "llm", "text_polish": "llm",
+    "content_polish": "llm",
     "embed": "embedding", "rerank": "rerank", "ocr": "ocr",
 }
 

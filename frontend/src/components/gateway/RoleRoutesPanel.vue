@@ -104,6 +104,7 @@ const ROLE_CATEGORY = {
   chat_answer: 'llm', assistant: 'llm', intent_rewrite: 'llm',
   evidence_check: 'llm', wiki_compile: 'llm', memory_extract: 'llm',
   session_summary: 'llm', knowledge_summarize: 'llm', text_polish: 'llm',
+  content_polish: 'llm',
   embed: 'embedding', rerank: 'rerank', ocr: 'ocr',
 }
 function categoryOf(row) {

@@ -29,7 +29,7 @@
         </div>
       </label>
       <span class="mode-hint" v-if="modeHint">{{ modeHint }}</span>
-      <label v-if="models.length" class="channel-select" title="选择出网模型（仅限匹配路由规则的上游模型；留空按业务路由/规则内均衡）">
+      <label v-if="models.length" class="channel-select" title="选择出网模型（仅业务规则内模型；留空自动均衡）">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
           <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
         </svg>
@@ -242,9 +242,9 @@ watch(useSearchLocal, (val) => {
 })
 
 // 出网模型下拉：仅列匹配路由规则（chat_answer 绑定 → 默认规则）的上游模型，
-// 选不了其他规则的模型；选中即按该模型出网，留空由网关在规则内解析
+// 选不了其他规则的模型；选中即按该模型出网，留空由网关在规则内解析。
+// 下拉只展示模型本身，不展示规则名（规则属运维概念，不对普通用户暴露）。
 const models = ref([])
-const ruleName = ref('')
 const pinnedModel = ref('')
 const modelLocal = ref(store.selectedModel)
 watch(modelLocal, (val) => {
@@ -252,13 +252,12 @@ watch(modelLocal, (val) => {
 })
 const defaultModelLabel = computed(() => {
   if (pinnedModel.value) return `默认（${pinnedModel.value}）`
-  return ruleName.value ? `默认（规则「${ruleName.value}」内均衡）` : '默认（业务路由）'
+  return '默认（自动均衡）'
 })
 onMounted(async () => {
   try {
     const res = await getMyChatModels()
     models.value = res.data.models || []
-    ruleName.value = res.data.rule_name || ''
     pinnedModel.value = res.data.pinned_model || ''
     // 规则模型清单变更后，已选模型可能不再可选 → 回落默认
     if (modelLocal.value && !models.value.includes(modelLocal.value)) {

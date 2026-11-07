@@ -130,9 +130,11 @@ export const useAssistantStore = defineStore('assistant', () => {
   }
 
   // ---- 对话 ----
-  async function send(text) {
+  // mentions：用户在本条消息中通过 @ 引用的当前界面文档/片段（[{title}]），随请求做联合分析
+  async function send(text, mentions) {
     const message = (text || '').trim()
     if (!message || isGenerating.value) return
+    const refs = Array.isArray(mentions) ? mentions.filter((x) => x && x.title) : []
 
     // 多轮上下文：仅取已完成的 user/assistant 文本，最多最近 6 条
     const history = messages.value
@@ -171,6 +173,7 @@ export const useAssistantStore = defineStore('assistant', () => {
           open_doc_title: context.value.open_doc_title || '',
           open_doc_content: context.value.open_doc_content || '',
           page_state: context.value.page_state || null,
+          mentions: refs,
           user_actions: actionTrail.value.slice(-MAX_ACTIONS),
           history,
           session_id: currentSessionId.value || '',

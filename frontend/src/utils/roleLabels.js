@@ -12,6 +12,7 @@ export const ROLE_LABELS = {
   session_summary: '会话摘要',
   knowledge_summarize: '知识点总结',
   text_polish: 'OCR 润色',
+  content_polish: '内容润色',
 }
 
 export function roleLabel(role) {

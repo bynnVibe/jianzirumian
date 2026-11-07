@@ -252,6 +252,17 @@
         <p class="memory-desc">
           记忆用于跨会话个性化回答（如饮食偏好、健康目标）。密码、证件号等敏感信息不会被记录，你可随时编辑或删除。
         </p>
+        <div v-if="recallStats && recallStats.enabled" class="memory-recall-stats">
+          <div class="mrs-row">
+            <span>近 {{ recallStats.days }} 天对话 {{ recallStats.total_turns }} 轮</span>
+            <span>记忆召回率 {{ pct(recallStats.memory.recall_rate) }}</span>
+            <span>技能应用率 {{ pct(recallStats.skill.apply_rate) }}</span>
+          </div>
+          <div class="mrs-row mrs-effect">
+            <span>记忆：召回时点赞 {{ rate(recallStats.memory.like_rate_with) }} / 未召回 {{ rate(recallStats.memory.like_rate_without) }}</span>
+            <span>技能：应用时点赞 {{ rate(recallStats.skill.like_rate_with) }} / 未应用 {{ rate(recallStats.skill.like_rate_without) }}</span>
+          </div>
+        </div>
         <div class="memory-add">
           <input
             class="form-input"
@@ -467,7 +478,7 @@ import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useChatStore } from '@/stores/chat'
 import { useAuthStore } from '@/stores/auth'
-import { healthCheck, updateProfile, getMyUsageStats, compactSession, listMyMemories, createMyMemory, updateMyMemory, deleteMyMemory, getSemanticCache, toggleSemanticCache, clearSemanticCache, deleteSemanticCacheEntry } from '@/api'
+import { healthCheck, updateProfile, getMyUsageStats, compactSession, listMyMemories, createMyMemory, updateMyMemory, deleteMyMemory, getModuleRecall, getSemanticCache, toggleSemanticCache, clearSemanticCache, deleteSemanticCacheEntry } from '@/api'
 
 const props = defineProps({
   open: { type: Boolean, default: false },
@@ -665,6 +676,7 @@ const memories = ref([])
 const memoryLoading = ref(false)
 const memorySaving = ref(false)
 const memoryError = ref('')
+const recallStats = ref(null)
 const memoryNewContent = ref('')
 const memoryEditingId = ref('')
 const memoryEditContent = ref('')
@@ -688,6 +700,23 @@ function memoryUsedText(m) {
   return `${days} 天前用过`
 }
 
+function pct(v) {
+  return v == null ? '-' : `${Math.round(v * 100)}%`
+}
+
+function rate(v) {
+  return v == null ? '暂无反馈' : `${Math.round(v * 100)}%`
+}
+
+async function loadModuleRecall() {
+  try {
+    const res = await getModuleRecall(30)
+    recallStats.value = res?.data || null
+  } catch (e) {
+    recallStats.value = null
+  }
+}
+
 async function loadMemories() {
   memoryLoading.value = true
   memoryError.value = ''
@@ -707,6 +736,7 @@ function openMemoryModal() {
   memoryNewContent.value = ''
   memoryEditingId.value = ''
   loadMemories()
+  loadModuleRecall()
 }
 
 async function submitMemoryAdd() {
@@ -1222,6 +1252,23 @@ function chartTooltip(row) {
   color: var(--color-text-secondary);
   line-height: 1.6;
   margin: 4px 0 10px;
+}
+.memory-recall-stats {
+  background: var(--color-bg-soft, rgba(0, 0, 0, 0.03));
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin: 0 0 10px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+.memory-recall-stats .mrs-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+}
+.memory-recall-stats .mrs-effect {
+  margin-top: 4px;
+  opacity: 0.85;
 }
 
 .memory-add {

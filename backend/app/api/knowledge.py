@@ -1627,47 +1627,125 @@ async def polish_ocr(body: PolishOCRRequest):
 
 class CleanArticleRequest(BaseModel):
     text: str
+    # 润色方向（可选）：非空时在确定性清洗之后追加一次 LLM 改写，
+    # 走网关业务路由 content_polish 角色；留空则仅做 Skill 配置的确定性清洗。
+    direction: str = ""
+
+
+def _extract_article_polished(text: str) -> str:
+    """提取 LLM 返回的正文改写结果，保留段落空行（不似 OCR 润色那样折叠空行）。"""
+    text = text.strip()
+    if not text:
+        return text
+    tagged = re.findall(r"<polished>([\s\S]*?)</polished>", text)
+    if tagged:
+        return max(tagged, key=len).strip()
+    # 去除首尾 Markdown 代码块标记
+    if text.startswith("```"):
+        text = text[3:].strip()
+        if "\n" in text:
+            text = text.split("\n", 1)[1]
+        if text.endswith("```"):
+            text = text[:-3].strip()
+    return text.strip()
+
+
+async def _polish_article_with_direction(text: str, direction: str) -> str:
+    """按用户给定的润色方向用 LLM 改写正文（content_polish 角色）。
+
+    保留原意与 Markdown 段落结构，仅按方向调整表达；失败时抛异常由调用方兜底原文。
+    """
+    llm = LLMFactory.create_for_role("content_polish")
+    system_prompt = {
+        "role": "system",
+        "content": (
+            "你是文章润色助手。请按照用户给定的「润色方向」对正文进行改写。\n\n"
+            "要求：\n"
+            "- 保持原文核心信息与事实不变，不新增虚构内容。\n"
+            "- 保留 Markdown 结构（标题、列表、表格）与自然段顺序、段落空行。\n"
+            "- 仅按润色方向调整表达、语气、篇幅或结构重点。\n\n"
+            "输出格式（必须遵守）：\n"
+            "- 只输出改写后的正文，包裹在 '<polished>...</polished>' 中。\n"
+            "- 严禁输出任何解释、分析、备注或 Markdown 代码块。\n"
+            "- 严禁输出思考过程。"
+        ),
+    }
+    user_prompt = {
+        "role": "user",
+        "content": (
+            f"润色方向：{direction}\n\n"
+            f"正文：\n{text}\n\n"
+            "输出："
+        ),
+    }
+    collected = ""
+    async for chunk in llm.chat([system_prompt, user_prompt], stream=True):
+        collected += chunk
+    return _extract_article_polished(collected)
 
 
 @router.post("/clean-article")
 async def clean_article(body: CleanArticleRequest, user: dict = Depends(get_current_user)):
-    """链接正文「内容润色」：按 Skill 配置（scope=polish）做确定性清洗。
+    """链接正文「内容润色」：先按 Skill 配置（scope=polish）做确定性清洗，
+    若提供润色方向则再走网关 content_polish 角色做一次 LLM 改写。
 
-    只删噪声不新增内容：去角标/页码/版权/关注引导等噪声行与多余空格，
+    确定性清洗只删噪声不新增内容：去角标/页码/版权/关注引导等噪声行与多余空格，
     保留段落顺序与自然段（单个空行），不重排、不改写句子。
     """
     from app.services import article_clean
     from app.services.skill import skill_service
 
     text = body.text or ""
+    direction = (body.direction or "").strip()
     if not text.strip():
         return {"success": False, "message": "文本为空", "cleaned_text": ""}
 
     policy = skill_service.polish_policy(user["id"])
-    if not any(policy.get(k) for k in (
+    policy_on = any(policy.get(k) for k in (
         "remove_footnote_markers", "remove_noise_lines", "collapse_spaces", "collapse_blank_lines"
-    )) and not policy.get("extra_line_patterns"):
+    )) or bool(policy.get("extra_line_patterns"))
+
+    cleaned = text
+    stats = {}
+    parts = []
+    if policy_on:
+        try:
+            result = article_clean.clean_article(text, policy)
+            cleaned = result["cleaned"]
+            stats = result["stats"]
+            if stats.get("removed_lines"):
+                parts.append(f"移除 {stats['removed_lines']} 处噪声行")
+            if stats.get("removed_footnotes"):
+                parts.append(f"删除 {stats['removed_footnotes']} 个角标")
+            if stats.get("collapsed_spaces"):
+                parts.append(f"压缩 {stats['collapsed_spaces']} 处多余空格")
+        except Exception as e:
+            logger.warning("正文清洗失败，返回原文: %s", e)
+            return {"success": False, "message": f"润色失败: {e}", "cleaned_text": text}
+    elif not direction:
         return {
             "success": True, "cleaned_text": text, "stats": {},
-            "message": "未启用任何正文清洗策略，已返回原文；可在「Skill 配置」中开启内置「链接正文清洗策略」或自建技能。",
+            "message": "未启用任何正文清洗策略，已返回原文；可在「Skill 配置」中开启内置「链接正文清洗策略」或自建技能，或填写润色方向。",
         }
 
-    try:
-        result = article_clean.clean_article(text, policy)
-    except Exception as e:
-        logger.warning("正文清洗失败，返回原文: %s", e)
-        return {"success": False, "message": f"润色失败: {e}", "cleaned_text": text}
+    # 润色方向：追加 LLM 改写（content_polish 业务路由）
+    if direction:
+        try:
+            polished = await _polish_article_with_direction(cleaned, direction)
+            if polished:
+                cleaned = polished
+                parts.append("按方向完成 LLM 润色")
+            else:
+                parts.append("LLM 未返回有效结果，保留清洗文本")
+        except Exception as e:
+            logger.warning("内容润色（LLM）失败，保留清洗文本: %s", e)
+            return {
+                "success": True, "cleaned_text": cleaned, "stats": stats,
+                "message": f"LLM 润色失败（{e}），已返回清洗后文本。",
+            }
 
-    stats = result["stats"]
-    parts = []
-    if stats.get("removed_lines"):
-        parts.append(f"移除 {stats['removed_lines']} 处噪声行")
-    if stats.get("removed_footnotes"):
-        parts.append(f"删除 {stats['removed_footnotes']} 个角标")
-    if stats.get("collapsed_spaces"):
-        parts.append(f"压缩 {stats['collapsed_spaces']} 处多余空格")
     message = "润色完成：" + "、".join(parts) if parts else "润色完成：未发现需要清洗的内容"
-    return {"success": True, "cleaned_text": result["cleaned"], "stats": stats, "message": message}
+    return {"success": True, "cleaned_text": cleaned, "stats": stats, "message": message}
 
 
 # ============================================

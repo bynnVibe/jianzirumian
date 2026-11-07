@@ -54,6 +54,9 @@ _MAX_ACTIONS = 8
 # 界面实时快照（page_state）注入上下文的文档条数上限与文本上限
 _MAX_PAGE_STATE_DOCS = 30
 _MAX_PAGE_STATE_CHARS = 4000
+# 用户 @ 引用的当前界面文档/片段：注入上下文的最大条数与单标题长度
+_MAX_MENTIONS = 10
+_MAX_MENTION_TITLE = 80
 # 单次助手请求的整体熔断时限（秒）：超时仍未产出结果则中止，避免用户长时间等待
 # （ReAct 多轮工具调用链路较长，预留 150 秒）
 ASSISTANT_TIMEOUT_SECONDS = 150
@@ -91,6 +94,9 @@ _DECISION_SYSTEM = (
     '"options":["可选的下一步动作1","可选的下一步动作2"]}\n'
     "  · options 给 2~4 个供用户点选的下一步动作（如「联网搜索相关资料」「换个关键词重检」「不用了，直接总结现有内容」）。\n\n"
     "# 行为准则\n"
+    "- 若用户在本条提问中通过 @ 显式引用了当前界面的文档/片段（见「当前界面上下文」），"
+    "必须优先围绕被引用对象作答：先用 search_knowledge(query=引用标题) 检索其片段（若为整篇文档可再用 get_source_text 取全文），"
+    "再结合用户问题做联合分析，不得忽略 @ 引用而泛泛回答。\n"
     "- 先判断是否需要工具：分析/解释当前页面通常先 read_current_page；泛问知识库用 search_knowledge；"
     "总结整体文档用 list_wiki_pages 配合 get_source_text 或 read_wiki_page。\n"
     "- 若「当前界面上下文」中给出了界面实时快照（如知识库管理页正在展示的文档清单），"
@@ -256,6 +262,37 @@ def _format_page_state(page_state: Optional[dict]) -> str:
     return _clip("\n".join(lines), _MAX_PAGE_STATE_CHARS)
 
 
+def _sanitize_mentions(mentions: Optional[List[dict]]) -> List[dict]:
+    """校验/裁剪前端传来的 @ 引用列表，只保留标题，去重保序并限条数/长度。
+
+    非法/空列表返回 []。
+    """
+    if not isinstance(mentions, list) or not mentions:
+        return []
+    seen: set = set()
+    out: List[dict] = []
+    for m in mentions:
+        title = ""
+        if isinstance(m, dict):
+            title = str(m.get("title") or "").strip()
+        elif isinstance(m, str):
+            title = m.strip()
+        if not title or title in seen:
+            continue
+        seen.add(title)
+        out.append({"title": title[:_MAX_MENTION_TITLE]})
+        if len(out) >= _MAX_MENTIONS:
+            break
+    return out
+
+
+def _format_mentions(mentions: List[dict]) -> str:
+    """将 @ 引用渲染为紧凑的中文文本块，供注入模型上下文。"""
+    if not mentions:
+        return ""
+    return "、".join(f"《{m['title']}》" for m in mentions)
+
+
 class AssistantContext:
     """一次助手会话的上下文（用户身份 + 当前界面 + 正在查看的文档）。"""
 
@@ -271,6 +308,7 @@ class AssistantContext:
         open_doc_content: str = "",
         page_state: Optional[dict] = None,
         user_actions: Optional[List[str]] = None,
+        mentions: Optional[List[dict]] = None,
     ):
         self.user_id = user_id or ""
         self.is_admin = bool(is_admin)
@@ -285,6 +323,8 @@ class AssistantContext:
         self.page_state = _sanitize_page_state(page_state)
         # 最近的行文/浏览动作轨迹（打开文档、检索、翻页等），仅保留最近若干条
         self.user_actions = [str(a).strip() for a in (user_actions or []) if str(a).strip()][-_MAX_ACTIONS:]
+        # 用户在本条消息中通过 @ 引用的当前界面文档/片段标题（去重保序，限条数/长度）
+        self.mentions = _sanitize_mentions(mentions)
 
     @property
     def has_open_doc(self) -> bool:
@@ -295,6 +335,11 @@ class AssistantContext:
     def has_page_state(self) -> bool:
         """是否携带当前界面实时快照。"""
         return bool(self.page_state)
+
+    @property
+    def has_mentions(self) -> bool:
+        """用户是否通过 @ 显式引用了当前界面的文档/片段。"""
+        return bool(self.mentions)
 
 
 # ---------------------------------------------------------------------------
@@ -718,6 +763,16 @@ def _build_decision_messages(ctx: AssistantContext, message: str, history: List[
         f"- 用户所在页面：{ctx.route_label}（路由 {ctx.route_name or '-'}）",
         f"- 当前查看的百科词条：{page_title}",
     ]
+    # 用户通过 @ 显式引用的当前界面文档/片段（最高优先级：回答应围绕这些对象展开）
+    if ctx.has_mentions:
+        context_lines.append(
+            "- 用户在本条提问中通过 @ 显式引用了以下当前界面的文档/片段（请重点围绕它们联合分析）："
+            + _format_mentions(ctx.mentions)
+        )
+        context_lines.append(
+            "- 说明：处理 @ 引用时，应先取得被引用对象的正文——优先 search_knowledge(query=引用标题) 检索其片段；"
+            "若引用的是当前界面清单中的整篇文档，可再用 get_source_text 取全文；随后结合用户问题做联合分析，不要泛泛而谈。"
+        )
     # 用户当前界面的实时快照（知识库管理页展示的文档清单/筛选/统计），直接注入无需重新检索
     if ctx.has_page_state:
         context_lines.append("- 用户当前界面的实时快照（这就是用户此刻屏幕上看到的内容）：")
@@ -762,6 +817,12 @@ def _build_answer_messages(
 ) -> List[dict]:
     messages = [{"role": "system", "content": _ANSWER_SYSTEM}]
     context_block = ""
+    # 用户通过 @ 显式引用的当前界面文档/片段（回答必须围绕这些对象联合展开）
+    if ctx.has_mentions:
+        context_block += (
+            "【用户 @ 引用的当前界面文档/片段（重点围绕它们回答）】"
+            + _format_mentions(ctx.mentions) + "\n\n"
+        )
     if ctx.page_id and ctx.page_title:
         context_block += f"【用户当前正在查看的百科词条】《{ctx.page_title}》\n\n"
     # 用户当前界面的实时快照（知识库管理页展示的文档清单）

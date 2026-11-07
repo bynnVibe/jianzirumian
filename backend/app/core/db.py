@@ -216,6 +216,19 @@ def init_db(conn: sqlite3.Connection):
         );
         CREATE INDEX IF NOT EXISTS idx_user_memories_user ON user_memories(user_id, updated_at);
 
+        CREATE TABLE IF NOT EXISTS turn_module_usage (
+            id                TEXT PRIMARY KEY,
+            message_id        TEXT NOT NULL,
+            session_id        TEXT NOT NULL DEFAULT '',
+            user_id           TEXT NOT NULL,
+            memory_profile_n  INTEGER NOT NULL DEFAULT 0,
+            memory_relevant_n INTEGER NOT NULL DEFAULT 0,
+            skill_chars       INTEGER NOT NULL DEFAULT 0,
+            memory_chars      INTEGER NOT NULL DEFAULT 0,
+            created_at        TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_turn_module_user ON turn_module_usage(user_id, created_at);
+
         CREATE TABLE IF NOT EXISTS user_skills (
             id          TEXT PRIMARY KEY,
             owner_id    TEXT NOT NULL,

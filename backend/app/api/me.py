@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 from app.api.deps import get_current_user
 from app.services.memory import MEMORY_TYPES, memory_service
+from app.services import module_recall
 
 router = APIRouter(prefix="/api/me", tags=["me"])
 
@@ -80,3 +81,10 @@ async def delete_my_memory(memory_id: str, user: dict = Depends(get_current_user
     if not memory_service.delete_memory(user["id"], memory_id):
         raise HTTPException(status_code=404, detail="记忆不存在或无权删除")
     return {"success": True, "message": "记忆已删除"}
+
+
+@router.get("/module-recall")
+async def my_module_recall(days: int = 30, user: dict = Depends(get_current_user)):
+    """记忆/技能召回使用与效果度量：近 N 天召回率 + 召回/未召回两组点赞率对照。"""
+    days = max(1, min(365, int(days or 30)))
+    return module_recall.recall_overview(user["id"], days=days)

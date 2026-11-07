@@ -32,6 +32,7 @@ from app.services.config_manager import runtime_config
 from app.services.knowledge import knowledge_service
 from app.services.memory import memory_service
 from app.services.skill import skill_service
+from app.services import module_recall
 from app.services.records import upload_records
 from app.services import session_summary
 from app.services import tool_orchestrator
@@ -532,6 +533,14 @@ class ChatService:
                 "role": "system",
                 "content": f"【用户已启用的技能要求，请在回答中遵循】\n{skills_text}",
             })
+        # 记忆/技能召回度量：记录本轮实际注入量，待助手消息落库时绑定 message_id 写库
+        module_recall.note_turn_modules(
+            user_id, session.session_id,
+            memory_profile_n=len(profile_memories),
+            memory_relevant_n=len(relevant_lines),
+            skill_chars=len(skills_text or ""),
+            memory_chars=len(memory_text),
+        )
 
         history_messages = session_summary.build_context_messages(
             session, settings.SESSION_MAX_HISTORY
@@ -942,6 +951,10 @@ class ChatService:
 
     async def _post_turn_background(self, session, user_msg, assistant_msg, llm_provider):
         """在当前请求总预算内完成摘要与记忆；普通错误降级，取消继续传播。"""
+        try:
+            module_recall.flush_turn_modules(assistant_msg.message_id)
+        except Exception as e:
+            logger.warning("模块召回度量落库异常: %s", e)
         try:
             await session_summary.maybe_summarize(session, llm_provider)
         except Exception as e:

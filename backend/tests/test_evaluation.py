@@ -1,4 +1,4 @@
-"""Agent 回归评测模块单元测试（纯函数，不依赖 DB / LLM / 向量库）"""
+"""Agent 回归评测模块单元测试（纯函数为主；内置评测集种子为幂等 DB 操作，需在隔离环境运行）"""
 from app.services.evaluation import (
     _compute_retrieval_hit,
     _compute_summary,
@@ -170,3 +170,26 @@ def test_cosine():
 def test_split_sentences():
     assert _split_sentences("黄芪补气。固表！\n止汗") == ["黄芪补气", "固表", "止汗"]
     assert _split_sentences("") == []
+
+
+# ============================================
+# 内置评测集种子（幂等 DB 操作，隔离环境）
+# ============================================
+def test_seed_builtin_datasets_creates_and_idempotent():
+    from app.core import db
+    from app.services import evaluation as ev
+    # 首次：创建两个内置评测集（问答回归基准 + Prompt/Skill A/B 行为对比）
+    assert ev.seed_builtin_datasets() == 2
+    for spec in (ev.BUILTIN_RAGAS_DATASET, ev.BUILTIN_AB_DATASET):
+        row = db.query_one("SELECT id FROM eval_datasets WHERE name = ?", (spec["name"],))
+        assert row, spec["name"]
+        n = db.query_one(
+            "SELECT COUNT(*) AS c FROM eval_cases WHERE dataset_id = ?", (row["id"],)
+        )["c"]
+        assert n == len(spec["cases"])
+    # 幂等：再次调用不重复创建
+    assert ev.seed_builtin_datasets() == 0
+    total = db.query_one(
+        "SELECT COUNT(*) AS c FROM eval_datasets WHERE name LIKE '%（内置）'"
+    )["c"]
+    assert total == 2
