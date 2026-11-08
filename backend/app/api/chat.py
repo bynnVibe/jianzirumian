@@ -16,6 +16,7 @@ from app.core.request_budget import ClosingStreamingResponse as StreamingRespons
 from app.api.deps import get_current_user, get_optional_user
 from app.config import settings
 from app.core import db
+from app.core import observability as obs
 from app.models.schemas import (
     ChatHistoryResponse,
     ConfirmChatActionRequest,
@@ -368,6 +369,15 @@ async def compact_session(session_id: str, request: Request, user: dict = Depend
     if not stats:
         raise HTTPException(status_code=400, detail="会话消息过少，暂无可压缩的历史")
     return {"success": True, **stats}
+
+
+@router.get("/sessions/{session_id}/context-usage")
+async def get_session_context_usage(session_id: str, user: dict = Depends(get_current_user)):
+    """对话窗口上下文用量：最近一次真实请求各语义段 token 构成（缩略图+明细弹层数据源）"""
+    session = chat_service.get_user_session(session_id, user["id"])
+    if not session:
+        raise HTTPException(status_code=404, detail="会话不存在或无权访问")
+    return {"success": True, **obs.session_context_usage(session_id)}
 
 
 @router.post("/sessions/{session_id}/switch")

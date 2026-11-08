@@ -5,7 +5,7 @@
 历史压缩统计与记忆概览组合，以及用户隔离与非法用户拒绝。全部仅操作隔离 SQLite，不出网。
 """
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -160,3 +160,102 @@ def test_personal_context_overview_isolates_users_and_rejects_guest():
         _cleanup(other, [t2])
     with pytest.raises(ValueError):
         obs.personal_context_overview("guest", 7)
+
+
+# ============================================
+# 对话窗口上下文用量（聊天页缩略图数据源）
+# ============================================
+
+def _add_trace_with_session(user_id, session_id, prompt_tokens, started_at=None, status="ok"):
+    tid = str(uuid.uuid4())
+    db.execute(
+        "INSERT INTO agent_traces (id, agent, user_id, input, status, started_at,"
+        " prompt_tokens, completion_tokens, session_id)"
+        " VALUES (?,?,?,?,?,?,?,?,?)",
+        (tid, "chat", user_id, "hi", status, started_at or _now(), prompt_tokens, 10, session_id),
+    )
+    return tid
+
+
+def test_session_context_usage_latest_trace_and_shares():
+    uid = _uid()
+    sid = f"s-{uuid.uuid4().hex[:8]}"
+    old = _add_trace_with_session(uid, sid, 500, started_at="2020-01-01T00:00:00")
+    latest = _add_trace_with_session(uid, sid, 2000)
+    other = _add_trace_with_session(uid, f"s-{uuid.uuid4().hex[:8]}", 9000)
+    _add_segment(latest, "history", 1200, 2400)
+    _add_segment(latest, "system", 400, 800)
+    _add_segment(latest, "knowledge", 400, 800)
+    _add_segment(old, "system", 500, 1000)
+    try:
+        data = obs.session_context_usage(sid)
+        assert data["has_data"] is True
+        # 取最近一条 trace 的真实 prompt_tokens，而非旧 trace/其他会话
+        assert data["total_tokens"] == 2000
+        assert data["segments"][0]["segment"] == "history"
+        shares = {s["segment"]: s["share"] for s in data["segments"]}
+        assert shares["history"] == 0.6 and shares["system"] == 0.2
+        assert sum(s["tokens"] for s in data["segments"]) == 2000
+        assert data["context_window"] > 0
+        assert data["used_pct"] == round(2000 / data["context_window"] * 100, 1)
+        assert data["trace_at"]
+    finally:
+        _cleanup(uid, [old, latest, other])
+
+
+def test_session_context_usage_empty_and_running_excluded():
+    uid = _uid()
+    sid = f"s-{uuid.uuid4().hex[:8]}"
+    running = _add_trace_with_session(uid, sid, 0, status="running")
+    try:
+        # 仅 running 的 trace 不计入：新会话展示空概览
+        data = obs.session_context_usage(sid)
+        assert data["has_data"] is False and data["segments"] == []
+        assert data["total_tokens"] == 0 and data["used_pct"] == 0.0
+        assert data["context_window"] > 0
+        assert obs.session_context_usage("")["has_data"] is False
+    finally:
+        _cleanup(uid, [running])
+
+
+# ============================================
+# 按对话窗口下钻（观测性页子集切片）
+# ============================================
+
+def test_personal_session_contexts_groups_and_drills_down():
+    uid = _uid()
+    sid = f"s-{uuid.uuid4().hex[:8]}"
+    other = f"s-{uuid.uuid4().hex[:8]}"
+    db.execute(
+        "INSERT INTO chat_sessions (session_id, user_id, title, created_at, updated_at)"
+        " VALUES (?,?,?,?,?)",
+        (sid, uid, "血压饮食咨询", _now(), _now()),
+    )
+    t1 = _add_trace_with_session(uid, sid, 1000, started_at=(datetime.now() - timedelta(hours=1)).isoformat())
+    t2 = _add_trace_with_session(uid, sid, 3000)
+    t3 = _add_trace_with_session(uid, other, 700)
+    # 未关联会话的历史存量 trace：不计入下钻列表
+    t4 = _add_trace(uid, 999)
+    _add_segment(t2, "knowledge", 1800, 3600)
+    _add_segment(t2, "history", 1200, 2400)
+    try:
+        data = obs.personal_session_contexts(uid, 7, 20)
+        by_sid = {s["session_id"]: s for s in data["sessions"]}
+        assert set(by_sid) == {sid, other}
+        s = by_sid[sid]
+        assert s["title"] == "血压饮食咨询"
+        assert s["requests"] == 2
+        assert s["avg_prompt_tokens"] == 2000.0 and s["peak_prompt_tokens"] == 3000
+        assert s["total_prompt_tokens"] == 4000
+        # 展开即该会话最近一次请求的 segment 构成（与聊天页缩略图同口径）
+        assert [x["segment"] for x in s["latest_segments"]] == ["knowledge", "history"]
+        assert s["latest_segments"][0]["share"] == 0.6
+        assert by_sid[other]["title"] == "新对话"
+    finally:
+        db.execute("DELETE FROM chat_sessions WHERE session_id = ?", (sid,))
+        _cleanup(uid, [t1, t2, t3, t4])
+
+
+def test_personal_session_contexts_rejects_guest():
+    with pytest.raises(ValueError):
+        obs.personal_session_contexts("guest", 7)

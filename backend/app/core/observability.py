@@ -102,8 +102,11 @@ def mark_failed(error: str = "") -> None:
 # Tracing：trace / span 生命周期
 # ---------------------------------------------------------------------------
 
-def start_trace(agent: str, user_id: str = "", input_text: str = "") -> str:
-    """开启一条 trace（一次用户请求 / 一次 Agent 运行），返回 trace_id。"""
+def start_trace(agent: str, user_id: str = "", input_text: str = "", session_id: str = "") -> str:
+    """开启一条 trace（一次用户请求 / 一次 Agent 运行），返回 trace_id。
+
+    session_id 可选：聊天主链传入会话 ID，使 trace（及其 segment 构成）可按对话窗口聚合。
+    """
     tid = str(uuid.uuid4())
     _trace_id.set(tid)
     _trace_agent.set(agent or "")
@@ -115,9 +118,9 @@ def start_trace(agent: str, user_id: str = "", input_text: str = "") -> str:
     _pending_segments.set(None)
     try:
         db.execute(
-            "INSERT INTO agent_traces (id, agent, user_id, input, status, started_at)"
-            " VALUES (?,?,?,?, 'running', ?)",
-            (tid, agent or "", user_id or "", _clip(input_text or "", 2000), _now()),
+            "INSERT INTO agent_traces (id, agent, user_id, input, status, started_at, session_id)"
+            " VALUES (?,?,?,?, 'running', ?,?)",
+            (tid, agent or "", user_id or "", _clip(input_text or "", 2000), _now(), session_id or ""),
         )
     except Exception as e:  # 可观测性不阻断主流程
         logger.warning("trace 落库失败: %s", e)
@@ -462,6 +465,121 @@ def personal_context_overview(user_id: str, days: int = 7) -> dict:
         },
         "memory": MemoryService.usage_overview(user_id),
     }
+
+
+def session_context_usage(session_id: str) -> dict:
+    """单个对话窗口的上下文用量：该会话最近一次已完成 chat 请求的各语义段 token 构成。
+
+    数据源与管理员/个人面板的上下文构成同口径（agent_token_segments，按最终生成调用
+    真实 prompt_tokens 分摊），但按会话取最近一条 trace，供聊天页「上下文用量」缩略图
+    与明细弹层展示；总量取 trace 真实 prompt_tokens（缺失时退化为段合计）。
+    无记录（新会话/未发起问答）时返回结构完整的空概览。
+    """
+    window = int(getattr(settings, "CHAT_CONTEXT_WINDOW", 131072))
+    empty = {
+        "has_data": False, "segments": [], "total_tokens": 0,
+        "context_window": window, "used_pct": 0.0, "trace_at": "",
+    }
+    if not session_id:
+        return empty
+    trace = db.query_one(
+        "SELECT id, prompt_tokens, started_at FROM agent_traces"
+        " WHERE session_id = ? AND agent = 'chat' AND status != 'running'"
+        " ORDER BY started_at DESC LIMIT 1",
+        (session_id,),
+    )
+    if not trace:
+        return empty
+    rows = db.query(
+        "SELECT segment, COALESCE(SUM(tokens), 0) AS tokens"
+        " FROM agent_token_segments WHERE trace_id = ?"
+        " GROUP BY segment ORDER BY tokens DESC",
+        (trace["id"],),
+    )
+    seg_total = sum(int(r["tokens"]) for r in rows)
+    total = int(trace["prompt_tokens"] or 0) or seg_total
+    segments = [
+        {
+            "segment": r["segment"],
+            "label": SEGMENT_LABELS.get(r["segment"], r["segment"]),
+            "tokens": int(r["tokens"]),
+            "share": round(int(r["tokens"]) / seg_total, 4) if seg_total else 0.0,
+        }
+        for r in rows
+    ]
+    return {
+        "has_data": True,
+        "segments": segments,
+        "total_tokens": total,
+        "context_window": window,
+        "used_pct": round(total / window * 100, 1) if window else 0.0,
+        "trace_at": trace["started_at"],
+    }
+
+
+def personal_session_contexts(user_id: str, days: int = 7, limit: int = 20) -> dict:
+    """按对话窗口下钻的上下文构成（个人面板总集口径的会话级子集切片）。
+
+    个人面板的「上下文构成」是周期内该用户全部请求的按段累计（总集）；本函数按
+    session_id 切片为逐对话窗口的子集：每会话的请求数/均值/峰值/最近活跃时间，
+    及该会话最近一次已完成请求的 segment 构成（与聊天页缩略图同口径）。
+    未关联会话的历史存量 trace（session_id 为空）不计入。
+    """
+    if not user_id or user_id in {"guest", "system", "-"}:
+        raise ValueError("按对话下钻上下文需要有效的登录用户")
+    days = max(1, min(days, RETENTION_DAYS))
+    limit = max(1, min(limit, 50))
+    since = _since(days)
+    rows = db.query(
+        "SELECT t.session_id, COUNT(*) AS n,"
+        " COALESCE(AVG(t.prompt_tokens), 0) AS avg_pt,"
+        " COALESCE(MAX(t.prompt_tokens), 0) AS peak_pt,"
+        " COALESCE(SUM(t.prompt_tokens), 0) AS sum_pt,"
+        " MAX(t.started_at) AS last_at"
+        " FROM agent_traces t"
+        " WHERE t.user_id = ? AND t.started_at >= ? AND t.status != 'running'"
+        " AND t.session_id != ''"
+        " GROUP BY t.session_id ORDER BY last_at DESC LIMIT ?",
+        (user_id, since, limit),
+    )
+    items = []
+    for r in rows:
+        sid = r["session_id"]
+        meta = db.query_one(
+            "SELECT title FROM chat_sessions WHERE session_id = ?", (sid,),
+        )
+        trace = db.query_one(
+            "SELECT id FROM agent_traces"
+            " WHERE session_id = ? AND status != 'running'"
+            " ORDER BY started_at DESC LIMIT 1",
+            (sid,),
+        )
+        seg_rows = db.query(
+            "SELECT segment, COALESCE(SUM(tokens), 0) AS tokens"
+            " FROM agent_token_segments WHERE trace_id = ?"
+            " GROUP BY segment ORDER BY tokens DESC",
+            (trace["id"],),
+        ) if trace else []
+        seg_total = sum(int(x["tokens"]) for x in seg_rows)
+        items.append({
+            "session_id": sid,
+            "title": (meta or {}).get("title") or "新对话",
+            "requests": int(r["n"]),
+            "avg_prompt_tokens": round(float(r["avg_pt"] or 0), 1),
+            "peak_prompt_tokens": int(r["peak_pt"] or 0),
+            "total_prompt_tokens": int(r["sum_pt"] or 0),
+            "last_at": r["last_at"],
+            "latest_segments": [
+                {
+                    "segment": x["segment"],
+                    "label": SEGMENT_LABELS.get(x["segment"], x["segment"]),
+                    "tokens": int(x["tokens"]),
+                    "share": round(int(x["tokens"]) / seg_total, 4) if seg_total else 0.0,
+                }
+                for x in seg_rows
+            ],
+        })
+    return {"days": days, "sessions": items}
 
 
 def metrics(days: int = 7) -> dict:

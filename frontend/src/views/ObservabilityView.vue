@@ -422,6 +422,36 @@
         </table>
         <p v-else class="empty-hint">这段时间还没有上下文构成记录。发起一次问答后即可看到各段 Token 占用。</p>
 
+        <div class="ctx-sub-title">按对话窗口的上下文构成（总集下钻·近{{ myContext.days }}天）</div>
+        <div v-if="mySessions.length" class="sess-list">
+          <div v-for="s in mySessions" :key="s.session_id" class="sess-item">
+            <button class="sess-head" @click="openSession = openSession === s.session_id ? '' : s.session_id">
+              <span class="sess-caret">{{ openSession === s.session_id ? '▾' : '▸' }}</span>
+              <span class="sess-title" :title="s.title">{{ s.title }}</span>
+              <span class="sess-meta">{{ s.requests }} 次请求 · 均 {{ formatNum(s.avg_prompt_tokens) }} · 峰 {{ formatNum(s.peak_prompt_tokens) }} Token</span>
+              <span class="sess-time">{{ s.last_at.slice(5, 16).replace('T', ' ') }}</span>
+            </button>
+            <table v-if="openSession === s.session_id && s.latest_segments.length" class="obs-table sess-seg-table">
+              <thead><tr><th>上下文段（该会话最近一次请求）</th><th>Token</th><th>占比</th></tr></thead>
+              <tbody>
+                <tr v-for="seg in s.latest_segments" :key="seg.segment">
+                  <td>{{ seg.label }}</td>
+                  <td>{{ formatNum(seg.tokens) }}</td>
+                  <td class="share-cell">
+                    <div class="share-bar"><span :style="{ width: (seg.share * 100).toFixed(1) + '%' }"></span></div>
+                    {{ (seg.share * 100).toFixed(1) }}%
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+            <p v-else-if="openSession === s.session_id" class="empty-hint">该会话暂无段构成记录。</p>
+          </div>
+        </div>
+        <p v-else class="empty-hint">近段时间暂无按对话窗口的上下文记录（仅统计已关联会话的请求）。</p>
+        <p class="ctx-hint">
+          与上方总集表的关系：总集表 = 周期内本人全部请求按语义段累计；本列表按会话切片（子集），展开为各会话最近一次请求的构成，与聊天页输入框旁的上下文缩略图同口径，两者同源可互相核对。
+        </p>
+
         <div class="ctx-sub-title">记忆模块概览</div>
         <div class="cards mem-cards">
           <div class="metric-card"><span class="metric-num">{{ myContext.memory.total }}</span><span class="metric-label">记忆条数 / 上限 {{ myContext.memory.storage_limit }}</span></div>
@@ -538,12 +568,14 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { useAuthStore } from '@/stores/auth'
-import { getMyObservabilityMetrics, getMyContextOverview, getObservabilityMetrics, getObservabilityTraces, getObservabilityTrace, getObservabilityTraceLogs, getSkillReviews } from '@/api'
+import { getMyObservabilityMetrics, getMyContextOverview, getMyContextSessions, getObservabilityMetrics, getObservabilityTraces, getObservabilityTrace, getObservabilityTraceLogs, getSkillReviews } from '@/api'
 
 const auth = useAuthStore()
 const canOps = computed(() => auth.canOps)
 const businessMetrics = ref(null)
 const myContext = ref(null)
+const mySessions = ref([])
+const openSession = ref('')
 
 const days = ref(7)
 const loading = ref(false)
@@ -591,12 +623,19 @@ async function loadAll() {
 
 // 当前用户上下文窗口 + 记忆模块概览：仅登录用户可见，加载失败不阻断其余面板
 async function loadMyContext() {
-  if (!auth.isAuthenticated || auth.isGuest) { myContext.value = null; return }
+  if (!auth.isAuthenticated || auth.isGuest) { myContext.value = null; mySessions.value = []; return }
   try {
     const res = await getMyContextOverview(days.value)
     myContext.value = res.data
   } catch {
     myContext.value = null
+  }
+  // 按对话窗口下钻：总集口径的会话级子集切片，拉取失败不阻断主面板
+  try {
+    const res = await getMyContextSessions(days.value)
+    mySessions.value = res.data.sessions || []
+  } catch {
+    mySessions.value = []
   }
 }
 
@@ -1715,4 +1754,43 @@ function toggleSegment(seg) {
 }
 .mem-type-bar span { display: block; height: 100%; background: var(--color-primary); border-radius: 4px; }
 .mem-type-count { width: 32px; text-align: right; font-size: 12px; font-weight: 600; color: var(--color-text); }
+
+/* 按对话窗口下钻列表 */
+.sess-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.sess-item {
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.sess-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  border: none;
+  background: #fdfbf7;
+  cursor: pointer;
+  padding: 9px 12px;
+  font-size: 13px;
+  color: var(--color-text);
+  text-align: left;
+}
+.sess-head:hover { background: var(--color-primary-light); }
+.sess-caret { color: var(--color-primary); font-size: 11px; flex: none; }
+.sess-title {
+  flex: 1;
+  min-width: 0;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sess-meta { font-size: 12px; color: var(--color-text-secondary); flex: none; }
+.sess-time { font-size: 12px; color: var(--color-text-secondary); flex: none; font-variant-numeric: tabular-nums; }
+.sess-seg-table { margin: 0; border: none; border-top: 1px dashed var(--color-border); }
 </style>

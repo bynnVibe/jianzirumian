@@ -53,6 +53,25 @@ def get_my_context(
     return {"success": True, **data}
 
 
+@router.get("/my-context/sessions")
+def get_my_context_sessions(
+    response: Response,
+    days: int = Query(7, ge=1, le=30),
+    limit: int = Query(20, ge=1, le=50),
+    user: dict = Depends(get_current_user),
+):
+    """按对话窗口下钻的上下文构成：个人面板总集口径的会话级子集切片。"""
+    user_id = user.get("id")
+    if user.get("role") not in ("user", "admin", "ops") or not user_id or user_id in ("guest", "system", "-"):
+        raise HTTPException(status_code=403, detail="请使用正式账号查看按对话的上下文下钻")
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        data = obs.personal_session_contexts(user_id, days, limit)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"success": True, **data}
+
+
 @router.get("/metrics")
 async def get_metrics(days: int = Query(7, ge=1, le=90), _admin: dict = Depends(require_ops)):
     """聚合指标：总览 + 每日趋势 + 按 Agent + 按工具（监控与告警数据源）"""

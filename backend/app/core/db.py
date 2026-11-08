@@ -917,6 +917,16 @@ def init_db(conn: sqlite3.Connection):
                      " ON gateway_upstreams(category)")
         conn.execute("INSERT INTO schema_migrations VALUES ('gateway_upstream_category_v1',?)",
                      (datetime.now().isoformat(),))
+    if not conn.execute("SELECT 1 FROM schema_migrations WHERE version='ctx_session_v1'").fetchone():
+        # trace 关联对话窗口：agent_traces 增加 session_id，使上下文构成可按会话聚合
+        # （聊天页「上下文用量」缩略图/弹层的数据源）；存量 trace 空值=未关联。
+        tcols = {r[1] for r in conn.execute("PRAGMA table_info(agent_traces)")}
+        if "session_id" not in tcols:
+            conn.execute("ALTER TABLE agent_traces ADD COLUMN session_id TEXT NOT NULL DEFAULT ''")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_traces_session"
+                     " ON agent_traces(session_id, started_at)")
+        conn.execute("INSERT INTO schema_migrations VALUES ('ctx_session_v1',?)",
+                     (datetime.now().isoformat(),))
     if not conn.execute("SELECT 1 FROM schema_migrations WHERE version='ingest_dedup_v1'").fetchone():
         # 重复入库校验：来源指纹表（文件=内容 sha256，链接=规范化 URL sha256）。
         # UNIQUE(fingerprint, kb_id)：同一知识库内相同来源只入库一次，入口即拦截；

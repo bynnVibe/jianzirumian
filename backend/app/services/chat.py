@@ -312,7 +312,7 @@ class ChatService:
         Yields:
             SSE 格式的事件流
         """
-        obs.start_trace("chat", user_id, query)
+        obs.start_trace("chat", user_id, query, session_id=session_id)
         deadline = time.monotonic() + max(0.01, settings.CHAT_REQUEST_TIMEOUT)
         tasks, partial = set(), []
         current_task = asyncio.current_task()

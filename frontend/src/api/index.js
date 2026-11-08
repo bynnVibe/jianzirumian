@@ -132,6 +132,13 @@ export function getChatHistory(sessionId) {
 }
 
 /**
+ * 对话窗口上下文用量：最近一次真实请求各语义段 token 构成（缩略图+明细弹层数据源）
+ */
+export function getSessionContextUsage(sessionId) {
+  return api.get(`/chat/sessions/${encodeURIComponent(sessionId)}/context-usage`)
+}
+
+/**
  * 清空聊天历史
  */
 export function clearChatHistory(sessionId) {
@@ -1016,6 +1023,11 @@ export function getMyObservabilityMetrics(days = 7) {
 /** 当前登录用户的「上下文窗口 + 记忆模块」使用概览。 */
 export function getMyContextOverview(days = 7) {
   return api.get('/observability/my-context', { params: { days } })
+}
+
+/** 按对话窗口下钻的上下文构成：个人面板总集口径的会话级子集切片。 */
+export function getMyContextSessions(days = 7, limit = 20) {
+  return api.get('/observability/my-context/sessions', { params: { days, limit } })
 }
 
 /**

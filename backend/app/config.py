@@ -124,6 +124,9 @@ class Settings:
     # 历史窗口：携带进 LLM 上下文的最近对话轮数（一轮=一问一答）。
     # 收紧窗口是 Token 优化的 P0 手段之一，过大会显著放大每次请求的 prompt token。
     SESSION_MAX_HISTORY: int = int(os.getenv("SESSION_MAX_HISTORY", "8"))
+    # 聊天页「上下文用量」展示口径：默认假定的模型上下文窗口大小（token），
+    # 用于缩略图/弹层的占用百分比计算；部署模型窗口不同可以环境变量覆盖。
+    CHAT_CONTEXT_WINDOW: int = int(os.getenv("CHAT_CONTEXT_WINDOW", "131072"))
     CHAT_REQUEST_TIMEOUT: float = float(os.getenv("CHAT_REQUEST_TIMEOUT", "300"))
 
     # ---- 上下文预算（Token 优化 P0）----

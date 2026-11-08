@@ -28,6 +28,11 @@
           <span class="toggle-slider"></span>
         </div>
       </label>
+      <ContextUsageBadge
+        ref="ctxBadgeRef"
+        class="ctx-badge-slot"
+        :session-id="store.currentSessionId || ''"
+      />
       <span class="mode-hint" v-if="modeHint">{{ modeHint }}</span>
       <label v-if="models.length" class="channel-select" title="选择出网模型（仅业务规则内模型；留空自动均衡）">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
@@ -117,6 +122,7 @@
 import { ref, computed, watch, nextTick, onMounted } from 'vue'
 import { useChatStore } from '@/stores/chat'
 import { getMyChatModels } from '@/api'
+import ContextUsageBadge from '@/components/ContextUsageBadge.vue'
 
 const store = useChatStore()
 const emit = defineEmits(['send'])
@@ -268,6 +274,12 @@ onMounted(async () => {
   }
 })
 
+// 上下文用量缩略图：每轮回答结束后刷新当前窗口水位（切换会话由组件自行 watch prop）
+const ctxBadgeRef = ref(null)
+watch(() => store.isGenerating, (v) => {
+  if (!v) ctxBadgeRef.value?.refresh()
+})
+
 // 消费再编辑草稿：历史问题回填输入框并聚焦
 watch(
   () => store.editingDraft,
@@ -371,6 +383,10 @@ defineExpose({ focus })
   font-size: 12px;
   color: var(--color-text-secondary);
   opacity: 0.7;
+}
+
+/* 上下文用量缩略图槽位：领衔右侧组（auto 外边距把剩余空间留在它前面） */
+.ctx-badge-slot {
   margin-left: auto;
 }
 
