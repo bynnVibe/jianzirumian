@@ -9,6 +9,8 @@
           <p class="header-sub">
             面向 Agent 系统的评估驱动部署：代码提交 → 单元测试 → 评估回归 → 构建镜像 → 灰度发布 → 全量上线。
             评估回归阶段以 Ragas 四指标均值作为质量分，低于阈值将自动阻断后续发布。
+            确定性操作（离线隔离回归、前端测试构建、部署快照一致性、镜像构建导出）已沉淀为 GitHub Actions 工作流
+            （<span class="mono">.github/workflows/ci.yml</span>、<span class="mono">docker-images.yml</span>），本页负责评估回归与发布编排。
           </p>
         </div>
       </div>
@@ -82,15 +84,15 @@
           </label>
           <label class="field span-2">
             <span class="field-label">构建镜像命令（留空则用默认 docker build）</span>
-            <input v-model.trim="settingsForm.build_cmd" class="field-input mono" placeholder="docker build -f Dockerfile.backend -t app:latest ." />
+            <input v-model.trim="settingsForm.build_cmd" class="field-input mono" placeholder="bash scripts/deploy-aliyun.sh build" />
           </label>
           <label class="field span-2">
-            <span class="field-label">灰度发布命令（留空则跳过该阶段）</span>
-            <input v-model.trim="settingsForm.canary_cmd" class="field-input mono" placeholder="./scripts/deploy-aliyun.sh canary" />
+            <span class="field-label">灰度发布命令（留空则跳过该阶段；示例：导出并推送镜像包到 ECS，不触碰运行中服务）</span>
+            <input v-model.trim="settingsForm.canary_cmd" class="field-input mono" placeholder="bash scripts/deploy-aliyun.sh save && bash scripts/deploy-aliyun.sh upload" />
           </label>
           <label class="field span-2">
-            <span class="field-label">全量上线命令（留空则跳过该阶段）</span>
-            <input v-model.trim="settingsForm.full_cmd" class="field-input mono" placeholder="./scripts/deploy-aliyun.sh prod" />
+            <span class="field-label">全量上线命令（留空则跳过该阶段；示例：ECS 侧预检后更新）</span>
+            <input v-model.trim="settingsForm.full_cmd" class="field-input mono" placeholder="ssh root@ECS 'cd /opt/jianziruyang && bash deploy-aliyun.sh server-update'" />
           </label>
         </div>
         <div class="settings-actions">

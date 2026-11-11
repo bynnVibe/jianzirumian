@@ -103,6 +103,7 @@ def _builtin_id(owner_id: str, builtin_key: str) -> str:
 def _row_to_dict(row: dict) -> dict:
     return {
         "id": row["id"],
+        "owner_id": row.get("owner_id", ""),
         "name": row["name"],
         "description": row["description"],
         "kind": row["kind"],
@@ -110,6 +111,7 @@ def _row_to_dict(row: dict) -> dict:
         "content": row["content"],
         "enabled": bool(row["enabled"]),
         "builtin": bool(row["builtin"]),
+        "visibility": row.get("visibility") or "personal",
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
@@ -209,6 +211,22 @@ class SkillService:
         for r in rows:
             item = _row_to_dict(r)
             item["doc_slug"] = slug_by_id.get(item["id"]) if item["builtin"] else None
+            item["is_shared"] = False
+            item["owner_name"] = ""
+            result.append(item)
+        # 他人公开（visibility=public）的技能：全员可见，只读引用（不可编辑/删除）。
+        shared = db.query(
+            "SELECT s.*, u.username AS owner_name FROM user_skills s"
+            " LEFT JOIN users u ON u.id = s.owner_id"
+            " WHERE s.visibility = 'public' AND s.owner_id != ?"
+            " ORDER BY s.updated_at DESC",
+            (owner_id,),
+        )
+        for r in shared:
+            item = _row_to_dict(r)
+            item["doc_slug"] = None
+            item["is_shared"] = True
+            item["owner_name"] = r.get("owner_name") or ""
             result.append(item)
         return result
 
@@ -221,11 +239,13 @@ class SkillService:
     # ---- 写入 ----
     def create_skill(self, owner_id: str, name: str, kind: str, content: str,
                      description: str = "", enabled: bool = True,
-                     scope: Optional[str] = None, actor_name: str = "") -> dict:
+                     scope: Optional[str] = None, actor_name: str = "",
+                     visibility: str = "personal") -> dict:
         """创建自定义技能；先做安全/能力预审，通过后落库。返回 {'error': ...} 表示失败。"""
         name = (name or "").strip()
         description = (description or "").strip()
         content = content or ""
+        visibility = visibility if visibility in ("personal", "public") else "personal"
         if not name or len(name) > _MAX_NAME:
             return {"error": f"技能名称必填且不超过 {_MAX_NAME} 字"}
         if len(description) > _MAX_DESC:
@@ -263,10 +283,10 @@ class SkillService:
         sid = str(uuid.uuid4())
         db.execute(
             "INSERT INTO user_skills (id, owner_id, name, description, kind, scope,"
-            " content, enabled, builtin, created_at, updated_at)"
-            " VALUES (?,?,?,?,?,?,?,?,0,?,?)",
+            " content, enabled, builtin, visibility, created_at, updated_at)"
+            " VALUES (?,?,?,?,?,?,?,?,0,?,?,?)",
             (sid, owner_id, name, description, kind, scope, content,
-             1 if enabled else 0, now, now),
+             1 if enabled else 0, visibility, now, now),
         )
         return {"skill": self.get_skill(owner_id, sid)}
 
@@ -344,7 +364,10 @@ class SkillService:
 
     # ---- 消费侧 ----
     def active_prompt_skills(self, owner_id: str) -> List[dict]:
-        """已启用的 chat 作用域 prompt 技能（用于对话系统提示注入）。"""
+        """已启用的 chat 作用域 prompt 技能（用于对话系统提示注入）。
+
+        包含本人启用的 + 他人公开（visibility=public）且启用的，使「公共技能」全员生效。
+        """
         if not owner_id:
             return []
         self.ensure_builtin(owner_id)
@@ -354,7 +377,19 @@ class SkillService:
             " ORDER BY builtin DESC, updated_at DESC",
             (owner_id,),
         )
-        return [{"name": r["name"], "content": r["content"]} for r in rows]
+        shared = db.query(
+            "SELECT name, content FROM user_skills"
+            " WHERE visibility = 'public' AND owner_id != ? AND enabled = 1"
+            " AND scope = 'chat' AND kind = 'prompt' ORDER BY updated_at DESC",
+            (owner_id,),
+        )
+        out = [{"name": r["name"], "content": r["content"]} for r in rows]
+        seen = {r["name"] for r in rows}
+        for r in shared:
+            if r["name"] not in seen:
+                out.append({"name": r["name"], "content": r["content"]})
+                seen.add(r["name"])
+        return out
 
     def build_prompt_text(self, owner_id: str) -> str:
         """在字符预算内拼接已启用 prompt 技能，供 chat 注入。"""

@@ -1,6 +1,6 @@
 <template>
-  <div class="bookmarks-page">
-    <div class="page-header">
+  <div class="bookmarks-page" :class="{ embedded }">
+    <div v-if="!embedded" class="page-header">
       <h2>知识收藏</h2>
       <span class="bookmark-count" v-if="allBookmarks.length">共 {{ allBookmarks.length }} 条</span>
     </div>
@@ -243,6 +243,10 @@ import { useAssistantStore } from '@/stores/assistant'
 
 const md = new MarkdownIt({ html: false, linkify: true, breaks: true })
 const assistant = useAssistantStore()
+
+defineProps({
+  embedded: { type: Boolean, default: false },
+})
 
 const PAGE_SIZE = 8
 
@@ -517,6 +521,14 @@ async function handleDelete() {
   padding: 28px 32px;
   max-width: 1100px;
   margin: 0 auto;
+}
+
+.bookmarks-page.embedded {
+  padding: 20px 24px;
+  max-width: none;
+  height: 100%;
+  overflow-y: auto;
+  box-sizing: border-box;
 }
 
 .page-header {

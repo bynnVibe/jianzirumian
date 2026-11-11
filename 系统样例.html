@@ -232,13 +232,84 @@ body {
 .demo-role-tabs button[aria-pressed="true"] { color: #fff; background: var(--color-primary); }
 .demo-help-links { display: flex; justify-content: center; gap: 18px; margin-top: 12px; }
 .demo-help-links button { border: 0; background: transparent; color: #8a7e72; cursor: pointer; white-space: nowrap; }
-@media (max-width: 720px) { .setting-grid { grid-template-columns: 1fr; } .page-wrap { padding: 16px; } }
+/* ---------- 可观测性四模块样例 ---------- */
+.aspect-title { margin: 18px 0 10px; font-size: 13px; font-weight: 700; color: #8a6a3f; border-left: 3px solid var(--color-primary); padding-left: 8px; }
+.level-badge { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 11px; font-weight: 600; background: rgba(0,0,0,.06); color: #8a7e72; }
+.level-badge.info { background: #e8f1e8; color: #3c6e3c; }
+.level-badge.warning { background: #fff4e0; color: #a06a00; }
+.level-badge.error, .level-badge.critical { background: #fdecea; color: #c62828; }
+.merge-badge { display: inline-block; margin-left: 6px; padding: 0 6px; border-radius: 999px; background: rgba(138,90,43,.12); color: #8a5a2b; font-size: 11px; font-weight: 600; }
+.status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; background: #9ca3af; vertical-align: 1px; }
+.status-dot.ok { background: #7cb26e; } .status-dot.error { background: #c62828; } .status-dot.timeout { background: #a06a00; }
+.status-dot.cancelled { background: #b3a798; } .status-dot.running { background: #4c6b8f; } .status-dot.interrupted { background: #8f6b4c; }
+.agent-badge { font-size: 11px; padding: 2px 8px; border-radius: 999px; background: #f0e9df; color: #8d6a3f; white-space: nowrap; }
+.agent-badge.agent-chat { background: #f9eddb; color: #a45420; }
+.agent-badge.agent-wiki_assistant { background: #e7eef7; color: #4c6b8f; }
+.agent-badge.agent-wiki_compile { background: #e8f0e8; color: #4f7a4f; }
+.log-table td { vertical-align: top; }
+.log-table tr[data-level] { cursor: pointer; }
+.log-table tr[data-level]:hover { background: rgba(138,90,43,.05); }
+.msg-text { margin: 0; white-space: pre-wrap; word-break: break-all; font-family: inherit; font-size: 12px; max-height: 72px; overflow-y: auto; }
+.pager-row { display: flex; gap: 10px; align-items: center; margin-top: 10px; font-size: 12px; color: #8a7e72; flex-wrap: wrap; }
+.kv-list { list-style: none; }
+.kv-list li { display: flex; justify-content: space-between; gap: 10px; padding: 7px 2px; border-bottom: 1px dashed var(--color-border); font-size: 12.5px; }
+.kv-list li:last-child { border-bottom: none; }
+.kv-list li.drillable { cursor: pointer; }
+.kv-list li.drillable:hover .kv-value { color: var(--color-primary); text-decoration: underline; }
+.kv-value { font-weight: 600; color: #4a4137; }
+.kv-value.warn { color: #b05555; }
+.share-bar { display: inline-block; width: 64px; height: 6px; background: #f0e9df; border-radius: 999px; overflow: hidden; vertical-align: middle; margin-right: 6px; }
+.share-bar span { display: block; height: 100%; background: var(--color-primary); }
+.seg-delta.down { color: #4f7a4f; } .seg-delta.up { color: #b05555; } .seg-delta.flat { color: #b3a798; }
+.seg-drill-row td { background: #fffdf9; }
+.segment-item { display: flex; gap: 10px; align-items: center; padding: 6px 8px; border-radius: 8px; font-size: 12px; cursor: pointer; }
+.segment-item:hover { background: var(--color-primary-light); }
+.segment-item .seg-item-input { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #6b6156; }
+.segment-item .seg-item-tok { color: var(--color-primary); font-weight: 600; white-space: nowrap; }
+.token-compare { display: flex; align-items: center; gap: 22px; padding: 10px 4px; flex-wrap: wrap; }
+.compare-num { display: block; font-size: 22px; font-weight: 700; color: var(--color-primary); }
+.compare-label { font-size: 11.5px; color: #8a7e72; }
+.compare-arrow { font-size: 14px; font-weight: 700; }
+.compare-arrow.down { color: #4f7a4f; } .compare-arrow.up { color: #b05555; } .compare-arrow.flat { color: #b3a798; }
+.compare-hint { display: block; font-size: 10.5px; color: #b3a798; font-weight: 400; }
+.range-switch { display: inline-flex; gap: 4px; margin-left: 10px; }
+.range-btn { border: 1px solid var(--color-border); background: #fff; border-radius: 999px; padding: 2px 10px; font-size: 11px; color: #8a7e72; cursor: pointer; }
+.range-btn.active { background: var(--color-primary); border-color: var(--color-primary); color: #fff; }
+.demo-trend i { position: relative; }
+.demo-trend i em { position: absolute; bottom: 0; left: 0; right: 0; background: rgba(198,40,40,.55); border-radius: 0 0 5px 5px; }
+.trend-val { font-size: 10.5px; color: #8a7e72; }
+.trend-foot { display: flex; gap: 18px; margin-top: 10px; font-size: 12px; color: #8a7e72; flex-wrap: wrap; }
+.span-list { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+.span-item { border: 1px solid var(--color-border); border-radius: 10px; overflow: hidden; background: #fff; }
+.span-head { width: 100%; display: flex; align-items: center; gap: 8px; padding: 8px 10px; border: none; background: #faf8f5; cursor: pointer; font-size: 12px; color: var(--color-text); }
+.span-head:hover { background: var(--color-primary-light); }
+.span-seq { color: #8a7e72; font-weight: 600; }
+.span-kind-badge { padding: 1px 8px; border-radius: 10px; font-size: 10px; font-weight: 700; text-transform: uppercase; }
+.span-kind-badge.llm { background: #e8ecf7; color: #3b4f8f; }
+.span-kind-badge.tool { background: #e3f0e6; color: #2e6b3e; }
+.span-kind-badge.step { background: #ede6dc; color: #6b5b45; }
+.span-name { font-weight: 600; flex: 1; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.span-bar { flex: 1; min-width: 40px; height: 6px; background: rgba(0,0,0,.06); border-radius: 3px; overflow: hidden; }
+.span-bar i { display: block; height: 100%; border-radius: 3px; background: #9ca3af; }
+.span-bar i.llm { background: #3b82f6; } .span-bar i.tool { background: #8b5cf6; }
+.span-meta { color: #8a7e72; white-space: nowrap; }
+.span-arrow { color: #8a7e72; transition: transform .2s; font-size: 11px; }
+.span-arrow.open { transform: rotate(180deg); }
+.span-body { padding: 10px 12px; border-top: 1px solid var(--color-border); background: #fff; }
+.span-io-label { display: block; font-size: 10px; font-weight: 700; letter-spacing: 1px; color: #8a7e72; margin: 6px 0 4px; }
+.span-text { margin: 0; padding: 10px 12px; background: #fffdf9; border: 1px solid var(--color-border); border-radius: 8px; white-space: pre-wrap; word-break: break-all; font-family: inherit; font-size: 12px; line-height: 1.6; max-height: 180px; overflow-y: auto; }
+.trace-meta { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; color: #6b6156; margin: 10px 0; }
+.trace-answer-head { display: flex; justify-content: space-between; align-items: center; }
+.trace-log-actions { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin: 12px 0 4px; flex-wrap: wrap; }
+.log-entry { margin-bottom: 8px; }
+.inline-error { color: #c62828; font-size: 12px; margin: 8px 0; }
+@media (max-width: 720px) { .setting-grid { grid-template-columns: 1fr; } .page-wrap { padding: 16px; } .upload-grid { grid-template-columns: 1fr; } }
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-thumb { background: #d4c9bd; border-radius: 4px; }
 </style>
 </head>
 <body>
-<div class="demo-banner">📌 本页面是「见字如面」的<b>静态视觉样例</b>（展示内容仅作演示，不连接真实服务；网关与可观测性指标均为模拟数据）。真实系统：<b>Vue 3 + FastAPI + FAISS 混合检索 + llm-wiki 知识编译</b> —— 点击左侧导航浏览各功能界面 ↓</div>
+<div class="demo-banner">📌 本页面是「见字如面」的<b>静态视觉样例</b>（不连接真实服务，所有数据均为模拟；可切换侧栏、角色视图、可观测性四模块页签，日志/链路支持模拟筛选与全链路弹窗，其余操作控件仅作布局展示）。真实系统：<b>Vue 3 + FastAPI + FAISS 混合检索 + llm-wiki 知识编译</b> —— 点击左侧导航浏览各功能界面 ↓</div>
 <div class="app">
   <!-- ================= 侧边栏 ================= -->
   <aside class="sidebar">
@@ -252,14 +323,8 @@ body {
       </div>
     </div>
     <button class="nav-new" onclick="openChat(null)">＋ 新对话</button>
-    <button class="nav-btn" data-view="upload" onclick="switchView('upload', this)">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>知识库上传</button>
     <button class="nav-btn" data-view="knowledge" onclick="switchView('knowledge', this)">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>知识库管理</button>
-    <button class="nav-btn" data-view="bookmarks" onclick="switchView('bookmarks', this)">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>知识收藏</button>
-    <button class="nav-btn" data-view="wiki" onclick="switchView('wiki', this)">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l3 6 7 1-5 5 1 7-6-3-6 3 1-7-5-5 7-1z"/></svg>知识百科</button>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>知识库</button>
     <button class="nav-btn" data-view="settings" onclick="switchView('settings', this)">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-2.83 1.17V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68h.08a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>系统管理</button>
     <button class="nav-btn" data-view="eval" onclick="switchView('eval', this)">
@@ -312,6 +377,9 @@ body {
                 <li><b>取穴</b>：小腿外侧，外踝尖与外膝眼连线的中点<span class="cite">[来源 1]</span></li>
                 <li><b>手法</b>：拇指指腹按揉，酸胀为度，每次 3~5 分钟，两侧交替<span class="cite">[来源 2]</span></li>
               </ul>
+              <h4>按摩参数速览（Markdown 表格渲染）</h4>
+              <div class="demo-table-wrap"><table class="demo-table"><thead><tr><th>项目</th><th>参数</th><th>说明</th></tr></thead>
+                <tbody><tr><td>每次时长</td><td>3~5 分钟</td><td>酸胀为度</td></tr><tr><td>频率</td><td>每日 1~2 次</td><td>两侧交替</td></tr><tr><td>手法</td><td>拇指指腹按揉</td><td>可配伍足三里</td></tr></tbody></table></div>
               <div class="sources">
                 <div class="sources-head" onclick="toggleSources(this)">📄 知识来源 (6) <span style="font-weight:400;font-size:11px">▼ 点击展开</span></div>
                 <div class="sources-list">
@@ -455,32 +523,50 @@ body {
     </section>
 
 
-    <!-- ================= 知识库管理 ================= -->
+    <!-- ================= 知识库工作台（总览 + 详情） ================= -->
     <section class="view" id="view-knowledge">
       <div class="page-wrap">
-        <div class="page-head"><div><h2>知识库管理</h2><div class="page-desc">两级筛选（公共/个人 → 具体库）；输入关键词实时过滤标题，按 Enter 触发语义检索</div></div></div>
-        <div class="filter-row">
-          <select><option>个人知识库</option><option>公共知识库</option></select>
-          <select><option>我的笔记</option><option>中医养生</option></select>
-          <input style="flex:1" placeholder="搜索标题（或直接回车进行语义检索）… 已输入：丰隆">
-          <button class="btn btn-outline btn-sm">返回全部</button>
+        <div class="page-head"><div><h2>知识库 · 工作台</h2><div class="page-desc">真实系统先显示公共 / 个人知识库总览，点击库名进入独立详情页；本样例将总览与「我的笔记」详情布局并列展示。</div></div><span class="tag">布局示意</span></div>
+        <div class="upload-grid">
+          <div class="panel">
+            <h3>公共知识库</h3>
+            <div class="file-row"><span class="tag green">公共</span><span class="fname">财税知识库 · 42 文档 / 380 分片</span><span class="tag">示例</span></div>
+            <div class="file-row"><span class="tag green">公共</span><span class="fname">中医养生 · 18 文档 / 156 分片</span><span class="tag">示例</span></div>
+          </div>
+          <div class="panel">
+            <h3>个人知识库</h3>
+            <div class="file-row"><span class="tag blue">私人</span><span class="fname">我的笔记 · 6 文档 / 47 分片</span><button class="btn btn-outline btn-sm" onclick="document.getElementById('kb-detail-mock').scrollIntoView({behavior:'smooth'})">查看详情示例</button></div>
+            <p class="note">个人库仅本人可见；公共库的创建与维护仅管理员可操作。</p>
+          </div>
         </div>
-        <div class="item-card"><div class="item-head"><div class="thumb"></div><span class="tag">图片笔记</span><span class="item-title">丰隆穴按摩笔记</span><span class="tag blue">我的笔记 · 私人</span></div>
-          <div class="item-excerpt">丰隆：在小腿外侧，外踝尖上八寸……古人奉为祛痰至宝，痰多宜向丰隆寻……</div>
-          <div class="item-foot"><span>2026-07-26 21:14 · 1 页</span><span><a style="color:var(--color-primary);cursor:pointer">查看原图</a> · <a style="color:#b05555;cursor:pointer">删除</a></span></div></div>
-        <div class="item-card"><div class="item-head"><span class="tag">PDF · 表格已转 Markdown</span><span class="item-title">第二章 增值税</span><span class="tag green">公共库 · 财税</span></div>
-          <div class="item-excerpt">（二）年应征增值税销售额的确定方式 1. 年应征增值税销售额是指纳税人在连续不超过12个……| 项目 | 税率 | 说明 |</div>
-          <div class="item-foot"><span>2026-07-25 09:32 · 128 页</span><span><a style="color:var(--color-primary);cursor:pointer">预览原文 · 按页码跳转</a> · <a style="color:#b05555;cursor:pointer">删除</a></span></div></div>
-        <div class="item-card"><div class="item-head"><span class="tag">Word</span><span class="item-title">第八章 环境保护税</span><span class="tag green">公共库 · 财税</span></div>
-          <div class="item-excerpt">环境保护税的纳税人，指在中华人民共和国领域和依法划定的其他管辖区域直接…</div>
-          <div class="item-foot"><span>2026-07-24 18:02 · 36 页</span><span><a style="color:var(--color-primary);cursor:pointer">预览原文 · 按页码跳转</a></span></div></div>
+        <div class="panel demo-section" id="kb-detail-mock">
+          <h3>知识库详情 · 我的笔记 <span class="tag blue" style="margin-left:6px">私人</span> <button class="btn btn-outline btn-sm" style="float:right" onclick="switchView('upload', document.querySelector('[data-view=knowledge]'))">上传文档</button></h3>
+          <p class="note" style="margin-top:0">真实系统点击「上传文档」打开弹窗并锁定当前库；本样例跳转上传说明页。以下为七选项卡的布局示意，仅「知识收藏」「知识百科」可切换预览，其他选项不执行操作。</p>
+          <div class="demo-role-tabs" aria-label="详情选项卡">
+            <button class="btn btn-outline" aria-pressed="true">文档</button>
+            <button class="btn btn-outline" aria-pressed="false">检索测试</button>
+            <button class="btn btn-outline" aria-pressed="false">思维导图</button>
+            <button class="btn btn-outline" aria-pressed="false">知识图谱</button>
+            <button class="btn btn-outline" aria-pressed="false" onclick="switchView('bookmarks', document.querySelector('[data-view=knowledge]'))">知识收藏</button>
+            <button class="btn btn-outline" aria-pressed="false" onclick="switchView('wiki', document.querySelector('[data-view=knowledge]'))">知识百科</button>
+            <button class="btn btn-outline" aria-pressed="false">RAG评估</button>
+          </div>
+          <div class="filter-row">
+            <input style="flex:1" placeholder="搜索标题（或直接回车进行语义检索）… 已输入：丰隆">
+            <button class="btn btn-outline btn-sm">返回全部</button>
+          </div>
+          <div class="item-card"><div class="item-head"><div class="thumb"></div><span class="tag">图片笔记</span><span class="item-title">丰隆穴按摩笔记</span><span class="tag blue">我的笔记 · 私人</span></div>
+            <div class="item-excerpt">丰隆：在小腿外侧，外踝尖上八寸……古人奉为祛痰至宝，痰多宜向丰隆寻……</div>
+            <div class="item-foot"><span>2026-07-26 21:14 · 1 页</span><span><a style="color:var(--color-primary);cursor:pointer">查看原图</a> · <a style="color:#b05555;cursor:pointer">删除</a></span></div></div>
+          <p class="note">思维导图由后台生成、可重建并跳转文档；知识图谱由 llm-wiki 百科生成（力导向图 + 语义搜索 + 溯源），与「知识百科」选项卡同源绑定；RAG评估针对本库自动生成用例并计算 Ragas 四指标。游客仅可见「文档 / 检索测试」。</p>
+        </div>
       </div>
     </section>
 
     <!-- ================= 收藏 ================= -->
     <section class="view" id="view-bookmarks">
       <div class="page-wrap">
-        <div class="page-head"><div><h2>知识收藏</h2><div class="page-desc">沉淀对话中有价值的回答与片段；支持标签筛选、详情查看与来源跳转</div></div><span class="tag">共 12 条</span></div>
+        <div class="page-head"><div><h2>知识收藏</h2><div class="page-desc">已整合为知识库详情「知识收藏」选项卡；沉淀对话中有价值的回答与片段，支持标签筛选、详情查看与来源跳转</div></div><span class="tag">共 12 条</span></div>
         <div class="filter-row">
           <input style="flex:1" placeholder="搜索收藏标题或内容…">
           <button class="chip-btn" style="background:var(--color-primary);color:#fff;border:none">全部</button>
@@ -526,8 +612,8 @@ body {
             <div class="setting-row"><span>LLM 语言模型</span><span>→ 网关「业务路由」chat_answer 角色 + 「网关默认模型」；上游地址/密钥在「上游管理」配置</span></div>
             <div class="setting-row"><span>知识助手模型</span><span>→ 网关「业务路由」assistant 角色（可单独绑定规则与模型）</span></div>
             <div class="setting-row"><span>OpenRouter 免费模型</span><span>→ 网关「上游管理」→「导入免费模型」（勾选后并入免费层级上游）</span></div>
-            <div class="setting-row"><span>Embedding</span><span>aliyun · text-embedding-v3（仍在系统设置）</span></div>
-            <div class="setting-row"><span>Rerank</span><span>dashscope · gte-rerank（仍在系统设置）</span></div>
+            <div class="setting-row"><span>Embedding</span><span>text-embedding-v4 · 连接参数在模型网关配置，系统设置只读展示</span></div>
+            <div class="setting-row"><span>Rerank</span><span>网络模型在网关配置；本地 CrossEncoder 参数仍在系统设置</span></div>
             <div class="note">每次调用的「路由规则 → 模型 → 上游」全链路可在网关「日志·审计」查看；后端日志同步显性记录 <code>[业务路由]</code>/<code>[网关选路]</code>/<code>[网关出网]</code> 三段。</div></div>
           <div class="panel"><h3>检索参数</h3>
             <div class="setting-row"><span>稠密召回 top-k</span><b>6</b></div>
@@ -555,10 +641,15 @@ body {
     <!-- ================= 回归评测 ================= -->
     <section class="view" id="view-eval">
       <div class="page-wrap">
-        <div class="page-head"><div><h2>回归评测 <span class="badge-admin">仅管理员</span></h2><div class="page-desc">对问答主链路跑离线回归：检索命中 / 引用忠实度 / 答案质量，防止优化引入回退</div></div></div>
+        <div class="page-head"><div><h2>回归评测 <span class="badge-admin">管理员 / 运维</span></h2><div class="page-desc">三页签评测平台：评测集（测什么）· 评估器（怎么测）· 实验（测得怎样）；防止优化引入回退</div></div></div>
+        <div class="demo-role-tabs" aria-label="评测页签">
+          <button class="btn btn-outline" aria-pressed="true">评测集</button>
+          <button class="btn btn-outline" aria-pressed="false">评估器</button>
+          <button class="btn btn-outline" aria-pressed="false">实验</button>
+        </div>
         <div class="upload-grid">
           <div class="panel">
-            <h3>📚 评测集 · 核心问答集（12 用例）</h3>
+            <h3>评测集 · 核心问答集（12 用例）</h3>
             <div class="file-row"><span class="tag blue">用例</span><span class="fname">丰隆穴有什么功效？（期望来源：丰隆穴按摩笔记.jpg）</span><button class="btn btn-outline btn-sm">编辑</button></div>
             <div class="file-row"><span class="tag blue">用例</span><span class="fname">增值税的纳税人包括哪些？（期望关键词：纳税人）</span><button class="btn btn-outline btn-sm">编辑</button></div>
             <div class="zone-row">
@@ -566,18 +657,19 @@ body {
               <div class="mini-zone"><b>批量导入</b>JSON 批量导入，或从聊天「点踩」反馈一键去重导入</div>
             </div>
             <div class="flowbar">
-              <span class="flow-step cur">一键回归</span><span class="flow-step">重放检索 → 生成</span><span class="flow-step">聚合 run 级指标</span>
+              <span class="flow-step cur">一键回归</span><span class="flow-step">重放检索 → 生成</span><span class="flow-step">Ragas 四指标 + 命中率</span>
             </div>
-            <div class="note">同一评测集同时只允许一个 run 运行；可选指定 LLM provider 对比不同模型。</div>
+            <div class="note">同一评测集同时只允许一个 run 运行；运行明细支持与上一次 run 环比。</div>
           </div>
           <div class="panel">
-            <h3>📊 运行历史（跨 run 对比指标）</h3>
-            <div class="file-row"><span class="tag green">已完成</span><span class="fname">run-0902 · 命中 91.7% · 忠实 83.3% · judge 4.2 · 均耗 4.1s</span><button class="btn btn-outline btn-sm">明细</button></div>
-            <div class="file-row"><span class="tag green">已完成</span><span class="fname">run-0825 · 命中 75.0% · 忠实 75.0% · judge 3.6 · 均耗 5.8s</span><button class="btn btn-outline btn-sm">明细</button></div>
-            <h3 style="margin-top:16px">用例结果明细（run-0902）</h3>
-            <div class="file-row"><span class="tag green">命中</span><span class="fname">丰隆穴有什么功效？ · 忠实度 ✓ · judge 5 · 3.2s</span></div>
-            <div class="file-row"><span class="tag pink">未命中</span><span class="fname">健脾药膳怎么做？ · 检索未命中期望来源 · judge 2 · 4.4s</span></div>
-            <div class="note">调整 prompt / 检索 / 重排后再跑一次，对比两次 run 的指标变化即可判断优化是否引入回退。</div>
+            <h3>评估器 · 可复用评估工作流</h3>
+            <div class="file-row"><span class="tag green">评估器</span><span class="fname">核心问答回归 · 绑定「核心问答集」</span><button class="btn btn-outline btn-sm">编辑</button><button class="btn btn-outline btn-sm">运行</button></div>
+            <div class="file-row"><span class="tag">进行中</span><span class="fname">页内实时监控 · 8 / 12 用例 · 2.5s 轮询</span></div>
+            <div class="note" style="margin-bottom:10px">Prompt / Skill 专项评测工作台整合于此页签：静态断言 + Rubric 多维打分 + A/B 对比，优化文本可一键上线。</div>
+            <h3 style="margin-top:16px">实验 · 跨评测集运行总表</h3>
+            <div class="file-row"><span class="tag green">已完成</span><span class="fname">run-0902 · 核心问答集 · 命中 91.7% · 忠实 83.3% · 均耗 4.1s</span><button class="btn btn-outline btn-sm">明细</button></div>
+            <div class="file-row"><span class="tag green">已完成</span><span class="fname">run-0825 · 核心问答集 · 命中 75.0% · 忠实 75.0% · 均耗 5.8s</span><button class="btn btn-outline btn-sm">明细</button></div>
+            <div class="note">点击任一行进入该运行明细；调整 prompt / 检索 / 重排后重跑，对比指标变化判断是否回退。</div>
           </div>
         </div>
       </div>
@@ -623,7 +715,7 @@ body {
     <!-- ================= 可观测性（模拟数据） ================= -->
     <section class="view" id="view-observability">
       <div class="page-wrap">
-        <div class="page-head"><div><h2>Agent 可观测性 · 界面样例</h2><p class="page-desc">切换下方角色预览不同界面；仅为静态演示，真实系统由服务端校验权限</p></div></div>
+        <div class="page-head"><div><h2>Agent 可观测性 · 界面样例</h2><p class="page-desc">真实系统分 DashBoard / 日志记录 / 指标监控 / 链路追踪四大模块；切换角色与下方模块页签预览对应界面，日志/链路可模拟筛选、点击行打开全链路弹窗，均为模拟数据</p></div></div>
         <div class="demo-role-tabs" aria-label="演示角色">
           <button class="btn btn-outline" data-obs-mode="business" aria-pressed="true" onclick="setObservationMode('business')">普通用户 · 我的使用概览</button>
           <button class="btn btn-outline" data-obs-mode="technical" aria-pressed="false" onclick="setObservationMode('technical')">管理员 / 运维 · 技术视图</button>
@@ -638,12 +730,313 @@ body {
           <div class="panel demo-section"><h3>业务功能使用情况</h3><div class="demo-table-wrap"><table class="demo-table"><thead><tr><th>功能</th><th>使用次数</th><th>成功完成</th><th>平均等待</th></tr></thead>
             <tbody><tr><td>智能问答</td><td>16</td><td>15</td><td>2.6 秒</td></tr><tr><td>知识助手</td><td>8</td><td>7</td><td>3.2 秒</td></tr></tbody></table></div>
             <p class="note">仅展示自己的业务指标，无其他用户记录或技术调用详情。完成率不计进行中和主动取消的操作，不代表答案准确率。</p></div>
+          <div class="panel demo-section"><h3>我的上下文 & 记忆概览（点数值钻取）</h3>
+            <div class="demo-stats"><div class="demo-stat"><strong>6 / 200</strong><span>记忆条数 / 上限</span></div><div class="demo-stat"><strong>3</strong><span>画像卡候选</span></div><div class="demo-stat"><strong>4</strong><span>被检索命中</span></div><div class="demo-stat"><strong>2</strong><span>从未使用</span></div><div class="demo-stat"><strong>0.692</strong><span>平均重要度</span></div></div>
+            <div class="demo-table-wrap"><table class="demo-table"><thead><tr><th>类型</th><th>条数</th><th>钻取</th></tr></thead>
+              <tbody><tr><td>偏好</td><td>1</td><td><a href="#">查看明细</a></td></tr><tr><td>事实</td><td>5</td><td><a href="#">查看明细</a></td></tr><tr><td>目标</td><td>0</td><td><a href="#">查看明细</a></td></tr><tr><td>纠正</td><td>0</td><td><a href="#">查看明细</a></td></tr></tbody></table></div>
+            <details class="demo-section"><summary>记忆钻取弹窗示例（从未使用 · 2 条）</summary>
+              <div class="demo-table-wrap"><table class="demo-table"><thead><tr><th>类型</th><th>内容</th><th>重要度</th><th>最近使用</th></tr></thead>
+                <tbody><tr><td>事实</td><td>用户关注睡眠质量改善</td><td>0.6</td><td>—</td></tr><tr><td>事实</td><td>用户习惯晚间散步</td><td>0.5</td><td>—</td></tr></tbody></table></div>
+              <p class="note"><b>口径说明：</b>从未使用 = last_used_at 为空的记忆条数；与概览卡「从未使用」同源。真实系统点击数值卡或类型条即打开钻取弹窗，底部附口径说明。</p>
+            </details>
+          </div>
         </div>
         <div id="demo-obs-technical" hidden>
-          <div class="demo-stats"><div class="demo-stat"><strong>120</strong><span>已结束请求</span></div><div class="demo-stat"><strong>95.0%</strong><span>成功率</span></div><div class="demo-stat"><strong>86k</strong><span>Token 消耗</span></div><div class="demo-stat"><strong>2.8s</strong><span>平均延迟</span></div></div>
-          <div class="panel"><h3>请求追踪（模拟数据）</h3><div class="demo-table-wrap"><table class="demo-table"><thead><tr><th>时间</th><th>用户</th><th>Agent</th><th>状态</th><th>耗时</th><th>工具调用</th></tr></thead>
-            <tbody><tr><td>10:26:18</td><td>演示用户甲</td><td>chat</td><td><span class="tag green">成功</span></td><td>2.6s</td><td>1</td></tr><tr><td>10:24:02</td><td>演示用户乙</td><td>wiki_assistant</td><td><span class="tag pink">失败</span></td><td>5.0s</td><td>2</td></tr></tbody></table></div></div>
-          <details class="panel demo-section"><summary>展开成功请求的示例时间线</summary><p>接收问题 → 知识检索 → 文档重排 → 生成答案 → 返回正文</p><p class="note">真实技术视图可查看调用与日志；此处仅展示模拟流程，不含实际问题、回答或私密配置。</p></details>
+          <div class="demo-role-tabs" aria-label="可观测性模块">
+            <button class="btn btn-outline" data-obs-tab="dashboard" aria-pressed="true" onclick="switchObsTab('dashboard', this)">DashBoard</button>
+            <button class="btn btn-outline" data-obs-tab="logs" aria-pressed="false" onclick="switchObsTab('logs', this)">日志记录</button>
+            <button class="btn btn-outline" data-obs-tab="metrics" aria-pressed="false" onclick="switchObsTab('metrics', this)">指标监控</button>
+            <button class="btn btn-outline" data-obs-tab="traces" aria-pressed="false" onclick="switchObsTab('traces', this)">链路追踪</button>
+          </div>
+
+          <!-- ===== 模块一：DashBoard ===== -->
+          <div id="obs-tab-dashboard">
+            <div class="demo-stats">
+              <div class="demo-stat" style="cursor:pointer" onclick="openDrillExample('请求总数')"><strong>120</strong><span>已结束请求</span></div>
+              <div class="demo-stat" style="cursor:pointer" onclick="openDrillExample('成功率')"><strong>95.0%</strong><span>成功率</span></div>
+              <div class="demo-stat" style="cursor:pointer" onclick="openDrillExample('Token 消耗')"><strong>86k</strong><span>Token 消耗</span></div>
+              <div class="demo-stat"><strong>2.8s</strong><span>平均延迟</span></div>
+              <div class="demo-stat"><strong>6.4s</strong><span>P95 延迟</span></div>
+              <div class="demo-stat"><strong>717</strong><span>平均 Token/请求</span></div>
+            </div>
+            <p class="note">DashBoard 指标卡可编辑（按用户保存偏好）、支持 7/14/30 天趋势与点击钻取（钻取表格分页、表下附口径计算说明）；下方三栏概况与真实系统「业务 / 质量与安全 / 模型与调用资源」一致，可点击行钻取。</p>
+            <div class="panel"><h3>对话趋势 · 每日查询数
+              <span class="range-switch"><button class="range-btn active" onclick="renderTrend(7, this)">7天</button><button class="range-btn" onclick="renderTrend(14, this)">14天</button><button class="range-btn" onclick="renderTrend(30, this)">30天</button></span></h3>
+              <div class="demo-trend" id="dashTrend" aria-label="每日查询数趋势"></div>
+              <div class="trend-foot"><span>区间查询：<b id="trendTotal">120</b></span><span>区间 Token：<b id="trendTokens">86k</b></span><span id="trendRangeLabel">近 7 天 · 红色段为当日失败请求占比</span></div>
+            </div>
+            <div class="upload-grid demo-section" style="grid-template-columns:repeat(3,1fr)">
+              <div class="panel"><h3>业务概况</h3><ul class="kv-list">
+                <li class="drillable" onclick="openDrillExample('会话总数')"><span>会话总数</span><span class="kv-value">42</span></li>
+                <li class="drillable" onclick="openDrillExample('消息总数')"><span>消息总数</span><span class="kv-value">316</span></li>
+                <li class="drillable" onclick="openDrillExample('活跃用户')"><span>活跃用户</span><span class="kv-value">5</span></li>
+                <li class="drillable" onclick="openDrillExample('上传记录')"><span>上传记录</span><span class="kv-value">29</span></li>
+                <li class="drillable" onclick="openDrillExample('知识库')"><span>知识库 / 百科页面</span><span class="kv-value">3 / 26</span></li>
+              </ul></div>
+              <div class="panel"><h3>质量与安全概况</h3><ul class="kv-list">
+                <li class="drillable" onclick="openDrillExample('点赞')"><span>点赞 / 点踩</span><span class="kv-value">18 / 2</span></li>
+                <li class="drillable" onclick="openDrillExample('回归评测运行')"><span>最近回归·答案相关度</span><span class="kv-value">83.3%</span></li>
+                <li class="drillable" onclick="openDrillExample('网关安全事件')"><span>网关安全事件</span><span class="kv-value warn">3</span></li>
+                <li class="drillable" onclick="openDrillExample('工具约束拦截')"><span>工具约束拦截</span><span class="kv-value warn">2</span></li>
+                <li class="drillable" onclick="openDrillExample('Skill 预审（高危）')"><span>Skill 预审高危</span><span class="kv-value warn">1</span></li>
+              </ul></div>
+              <div class="panel"><h3>模型与调用资源</h3><ul class="kv-list">
+                <li class="drillable" onclick="openDrillExample('LLM 调用')"><span>LLM 调用</span><span class="kv-value">214</span></li>
+                <li class="drillable" onclick="openDrillExample('工具调用')"><span>工具调用</span><span class="kv-value">103</span></li>
+                <li><span>Schema Token 估算</span><span class="kv-value">4.2k</span></li>
+                <li><span>网关默认模型</span><span class="kv-value">openrouter/free</span></li>
+                <li><span>平均 Token/请求</span><span class="kv-value">717（水位 36%）</span></li>
+              </ul></div>
+            </div>
+            <details class="panel demo-section" id="drillDetails" open><summary><span id="drillTitle">指标钻取弹窗（分页表格 + 口径计算说明）</span></summary>
+              <div class="demo-table-wrap"><table class="demo-table"><thead><tr><th>Trace</th><th>工具</th><th>状态</th><th>耗时</th></tr></thead>
+                <tbody><tr><td>t-1026</td><td>search_knowledge</td><td><span class="tag green">ok</span></td><td>320ms</td></tr><tr><td>t-1024</td><td>web_search</td><td><span class="tag pink">error</span></td><td>1.1s</td></tr></tbody></table></div>
+              <p class="note">第 1 / 6 页 · 每页 20 条 · 共 103 条　<a href="#">上一页</a>　<a href="#">下一页</a></p>
+              <p class="note"><b>口径计算说明：</b>该数值 = 统计区间内 <code>tool_spans</code> 表中 kind=tool 的 span 条数（按 trace 汇总），筛选条件：状态≠cancelled、时间∈所选窗口；与概况卡「工具调用」计数同源。</p>
+            </details>
+          </div>
+
+          <!-- ===== 模块二：日志记录 ===== -->
+          <div id="obs-tab-logs" hidden>
+            <div class="filter-row">
+              <select id="logDate" onchange="filterLogs()"><option>2026-11-12</option><option>2026-11-11</option></select>
+              <select id="logUser" onchange="filterLogs()"><option value="">全部用户</option><option>admin</option><option>演示用户甲</option><option>演示用户乙</option><option>system</option></select>
+              <select id="logLevel" onchange="filterLogs()"><option value="">全部级别</option><option>DEBUG</option><option>INFO</option><option>WARNING</option><option>ERROR</option><option>CRITICAL</option></select>
+              <input id="logKeyword" style="flex:1;min-width:180px" type="search" placeholder="关键词（消息 / 模块名）· Enter 查询" onkeyup="if(event.key==='Enter')filterLogs()">
+              <button class="btn btn-outline btn-sm" onclick="filterLogs()">查询</button>
+            </div>
+            <div class="panel" style="padding:0;overflow:hidden"><div class="demo-table-wrap"><table class="demo-table log-table" id="logTable">
+              <thead><tr><th>时间</th><th>级别</th><th>用户</th><th>模块</th><th>日志内容</th><th>Trace</th></tr></thead>
+              <tbody>
+                <tr data-date="2026-11-12" data-user="admin" data-level="INFO" data-ts="10:26:18" data-logger="jianziruyang" data-trace="t-1026" onclick="openLogDetail(this)"><td>10:26:18</td><td><span class="level-badge info">INFO</span></td><td>admin</td><td>jianziruyang</td><td><pre class="msg-text">&lt;&lt;&lt; POST /api/chat/send-with-files -&gt; 200 | 2.6s</pre></td><td><a style="color:var(--color-primary);cursor:pointer" onclick="event.stopPropagation();jumpToTrace('t-1026')">查看链路</a></td></tr>
+                <tr data-date="2026-11-12" data-user="演示用户甲" data-level="INFO" data-ts="10:26:16" data-logger="app.core.vector_store" data-trace="t-1026" data-count="3" onclick="openLogDetail(this)"><td>10:26:16<span class="merge-badge" title="同一分钟内合并了 3 条日志">×3</span></td><td><span class="level-badge info">INFO</span></td><td>演示用户甲</td><td>app.core.vector_store</td><td><pre class="msg-text">混合检索命中 6 条（FAISS 4 + BM25 2 → RRF → Rerank 保留 5） …[同分钟 3 条，点击展开]</pre></td><td><a style="color:var(--color-primary);cursor:pointer" onclick="event.stopPropagation();jumpToTrace('t-1026')">查看链路</a></td></tr>
+                <tr data-date="2026-11-12" data-user="演示用户乙" data-level="ERROR" data-ts="10:24:02" data-logger="jianziruyang.wiki_assistant" data-trace="t-1024" onclick="openLogDetail(this)"><td>10:24:02</td><td><span class="level-badge error">ERROR</span></td><td>演示用户乙</td><td>jianziruyang.wiki_assistant</td><td><pre class="msg-text">工具调用失败：web_search 上游超时（1.1s），fail-fast 短路</pre></td><td><a style="color:var(--color-primary);cursor:pointer" onclick="event.stopPropagation();jumpToTrace('t-1024')">查看链路</a></td></tr>
+                <tr data-date="2026-11-12" data-user="演示用户甲" data-level="WARNING" data-ts="10:22:47" data-logger="app.core.request_budget" data-trace="t-1023" onclick="openLogDetail(this)"><td>10:22:47</td><td><span class="level-badge warning">WARNING</span></td><td>演示用户甲</td><td>app.core.request_budget</td><td><pre class="msg-text">请求预算耗尽，统一转 timeout 终态（重试不重置预算）</pre></td><td><a style="color:var(--color-primary);cursor:pointer" onclick="event.stopPropagation();jumpToTrace('t-1023')">查看链路</a></td></tr>
+                <tr data-date="2026-11-12" data-user="system" data-level="INFO" data-ts="10:20:13" data-logger="jianziruyang.wiki.compile" data-trace="t-1022" onclick="openLogDetail(this)"><td>10:20:13</td><td><span class="level-badge info">INFO</span></td><td>system</td><td>jianziruyang.wiki.compile</td><td><pre class="msg-text">[WIKI] 编译完成：丰隆穴 → 2 chunks 入向量库 + data/wiki 镜像</pre></td><td><a style="color:var(--color-primary);cursor:pointer" onclick="event.stopPropagation();jumpToTrace('t-1022')">查看链路</a></td></tr>
+                <tr data-date="2026-11-12" data-user="演示用户乙" data-level="WARNING" data-ts="10:18:36" data-logger="app.services.chat" data-trace="t-1021" onclick="openLogDetail(this)"><td>10:18:36</td><td><span class="level-badge warning">WARNING</span></td><td>演示用户乙</td><td>app.services.chat</td><td><pre class="msg-text">用户主动取消，SSE 流关闭（状态 cancelled）</pre></td><td><a style="color:var(--color-primary);cursor:pointer" onclick="event.stopPropagation();jumpToTrace('t-1021')">查看链路</a></td></tr>
+                <tr data-date="2026-11-12" data-user="admin" data-level="DEBUG" data-ts="10:18:02" data-logger="app.core.file_cache" data-trace="" onclick="openLogDetail(this)"><td>10:18:02</td><td><span class="level-badge">DEBUG</span></td><td>admin</td><td>app.core.file_cache</td><td><pre class="msg-text">Redis 文件缓存命中：文字记录2.jpg（512MB allkeys-lru）</pre></td><td>-</td></tr>
+                <tr data-date="2026-11-11" data-user="admin" data-level="INFO" data-ts="21:40:12" data-logger="jianziruyang" data-trace="" onclick="openLogDetail(this)" hidden><td>21:40:12</td><td><span class="level-badge info">INFO</span></td><td>admin</td><td>jianziruyang</td><td><pre class="msg-text">服务启动完成 · FAISS 索引已加载（1,284 向量）· 独占锁获取成功</pre></td><td>-</td></tr>
+                <tr data-date="2026-11-11" data-user="system" data-level="WARNING" data-ts="21:40:15" data-logger="app.core.ocr" data-trace="" onclick="openLogDetail(this)" hidden><td>21:40:15</td><td><span class="level-badge warning">WARNING</span></td><td>system</td><td>app.core.ocr</td><td><pre class="msg-text">OCR 提供商降级探测：aliyun 可达；本地兜底不可用时拒绝动态执行</pre></td><td>-</td></tr>
+                <tr id="logEmpty" hidden><td colspan="6" style="color:#8a7e72">该条件下暂无日志记录（切换日期 / 用户 / 级别或清空关键词后重试）。</td></tr>
+              </tbody>
+            </table></div></div>
+            <div class="pager-row"><button class="btn btn-outline btn-sm" disabled>上一页</button><span id="logPager">1-7 / 7</span><button class="btn btn-outline btn-sm" disabled>下一页</button><span class="note" style="margin:0">真实系统单页 50 行（同分钟后端已合并）；此处为模拟筛选。</span></div>
+            <details class="panel demo-section"><summary>日志详情弹窗示例（同分钟合并 ×3 · 点击行打开）</summary>
+              <div class="trace-meta"><span>时间：10:26:16</span><span>级别：<span class="level-badge info">INFO</span></span><span>用户：演示用户甲</span><span>模块：app.core.vector_store</span><span>Trace：<a style="color:var(--color-primary);cursor:pointer" onclick="jumpToTrace('t-1026')">t-1026</a></span><span>合并：同一分钟内共 3 条</span></div>
+              <div class="span-list">
+                <div class="span-item"><div class="span-head" style="cursor:default"><span class="level-badge info">INFO</span><span class="span-meta">10:26:16 · app.core.vector_store</span></div><div class="span-body"><pre class="span-text">FAISS 稠密召回 4 条（IndexFlatL2 · top-k 6）</pre></div></div>
+                <div class="span-item"><div class="span-head" style="cursor:default"><span class="level-badge info">INFO</span><span class="span-meta">10:26:16 · app.core.sparse_retriever</span></div><div class="span-body"><pre class="span-text">BM25 稀疏召回 2 条 → RRF 融合 6 候选</pre></div></div>
+                <div class="span-item"><div class="span-head" style="cursor:default"><span class="level-badge info">INFO</span><span class="span-meta">10:26:16 · app.core.reranker</span></div><div class="span-body"><pre class="span-text">Rerank（qwen3-rerank）保留 5 条，最低相关度 40%</pre></div></div>
+              </div>
+              <p class="note">真实系统点击日志行打开详情弹窗：元信息 + 全文（单条过长截断标记）；同分钟合并行逐条展开原始日志，每条可跳链路。</p>
+            </details>
+            <p class="note">「查看链路」跳转链路追踪页签并打开该请求的全链路弹窗；日志按日期文件读取，级别 DEBUG/INFO/WARNING/ERROR/CRITICAL，关键词匹配消息与模块名。</p>
+          </div>
+
+          <!-- ===== 模块三：指标监控 ===== -->
+          <div id="obs-tab-metrics" hidden>
+            <div class="aspect-title">性能指标（请求 / 延迟 / Token / 黄金信号）</div>
+            <div class="demo-stats">
+              <div class="demo-stat" style="cursor:pointer" onclick="openDrillExample('请求总数')"><strong>120</strong><span>请求总数</span></div>
+              <div class="demo-stat"><strong>95.0%</strong><span>成功率</span></div>
+              <div class="demo-stat"><strong style="color:#b05555">6</strong><span>失败请求</span></div>
+              <div class="demo-stat"><strong>2.8s</strong><span>平均延迟</span></div>
+              <div class="demo-stat"><strong>6.4s</strong><span>P95 延迟</span></div>
+              <div class="demo-stat" style="cursor:pointer" onclick="openDrillExample('Token 消耗')"><strong>86k</strong><span>Token 消耗</span></div>
+              <div class="demo-stat"><strong>717</strong><span>平均 Token/请求</span></div>
+              <div class="demo-stat" style="cursor:pointer" onclick="openDrillExample('LLM 调用')"><strong>214</strong><span>LLM 调用</span></div>
+              <div class="demo-stat" style="cursor:pointer" onclick="openDrillExample('工具调用')"><strong>103</strong><span>工具调用</span></div>
+            </div>
+            <div class="panel"><h3>黄金信号（近 7 天 · Google SRE 四大信号 + RED 口径）</h3>
+              <div class="demo-stats">
+                <div class="demo-stat"><strong>17.1</strong><span>流量 Rate（请求/天）</span></div>
+                <div class="demo-stat"><strong>5.0%</strong><span>错误 Errors（失败/超时/中断）</span></div>
+                <div class="demo-stat"><strong>2.8s</strong><span>延迟 Duration（平均）</span></div>
+                <div class="demo-stat"><strong>6.4s</strong><span>延迟 P95</span></div>
+                <div class="demo-stat"><strong>717</strong><span>饱和度 Saturation（Token/请求 · 水位 36%）</span></div>
+              </div>
+            </div>
+            <div class="aspect-title">质量指标（反馈 / 回归 / Skill 预审 / 沉淀建议）</div>
+            <div class="demo-stats">
+              <div class="demo-stat"><strong>18</strong><span>点赞</span></div>
+              <div class="demo-stat"><strong style="color:#b05555">2</strong><span>点踩</span></div>
+              <div class="demo-stat"><strong>83.3%</strong><span>最近回归·答案相关度</span></div>
+              <div class="demo-stat"><strong style="color:#b05555">1</strong><span>Skill 预审高危</span></div>
+            </div>
+            <details class="panel demo-section" open><summary>技能沉淀建议（高频能力缺口 → 进化为 Skill/工具）</summary>
+              <div class="file-row"><span class="tag">实时天气查询 · 近30天5次</span><span class="fname">“查询今天梅州的天气”等高频缺口</span><button class="btn btn-primary btn-sm">同意沉淀</button></div>
+              <p class="note">点「同意沉淀」弹出编辑弹窗：选择归属<b>公共/个人</b>、填写名称/描述/指令内容、补充<b>其他需求</b>（合并进指令）、可勾选立即启用；确认后一键沉淀为可用技能（经与新建技能相同的安全预审）。公共技能全员可见可用，个人技能仅属主可见。弹窗「市场相似 Skill」面板自动从 Skills.sh / ClawHub 等主流市场搜寻类似技能（不可达源自动降级），以卡片呈现，点「应用」一键填充表单。</p>
+            </details>
+            <div class="panel"><h3>Skill 安全预审（添加/修改技能时的安全与能力可行性评审）</h3>
+              <div class="demo-stats">
+                <div class="demo-stat"><strong>6</strong><span>评审次数</span></div>
+                <div class="demo-stat"><strong style="color:#b05555">1</strong><span>拒绝次数</span></div>
+                <div class="demo-stat"><strong style="color:#b05555">1</strong><span>高危安全风险</span></div>
+                <div class="demo-stat"><strong>1</strong><span>能力不支持</span></div>
+              </div>
+              <div class="demo-table-wrap"><table class="demo-table"><thead><tr><th>时间</th><th>用户</th><th>操作</th><th>技能</th><th>结果</th><th>风险</th><th>原因</th></tr></thead>
+                <tbody><tr><td>11-12 09:12</td><td>admin</td><td>新建</td><td>实时天气查询</td><td><span class="tag pink">已拒绝</span></td><td>高</td><td>涉及外发请求且缺参数契约，需白名单与参数校验</td></tr>
+                <tr><td>11-11 20:41</td><td>演示用户甲</td><td>编辑</td><td>失眠调理助手</td><td><span class="tag green">通过</span></td><td>低</td><td>-</td></tr></tbody></table></div>
+            </div>
+            <div class="aspect-title">安全指标（网关安全事件 / 工具约束拦截）</div>
+            <div class="demo-stats">
+              <div class="demo-stat"><strong style="color:#b05555">3</strong><span>网关安全事件</span></div>
+              <div class="demo-stat"><strong style="color:#b05555">1</strong><span>待处置</span></div>
+              <div class="demo-stat"><strong style="color:#b05555">1</strong><span>高危/极高事件</span></div>
+              <div class="demo-stat"><strong style="color:#b05555">2</strong><span>工具约束拦截</span></div>
+            </div>
+            <div class="aspect-title">业务指标（资产存量 / 活跃用户 / 上下文与 Token 用量 / 记忆）</div>
+            <div class="demo-stats">
+              <div class="demo-stat"><strong>42</strong><span>会话总数</span></div>
+              <div class="demo-stat"><strong>316</strong><span>消息总数</span></div>
+              <div class="demo-stat"><strong>5</strong><span>活跃用户</span></div>
+              <div class="demo-stat"><strong>29</strong><span>上传记录</span></div>
+              <div class="demo-stat"><strong>3</strong><span>知识库</span></div>
+              <div class="demo-stat"><strong>26</strong><span>百科页面</span></div>
+              <div class="demo-stat"><strong>18</strong><span>记忆条数</span></div>
+            </div>
+            <div class="panel"><h3>Token 用量分析 <span class="tag green" style="margin-left:6px">▼ 12% 较前期</span></h3>
+              <div class="token-compare">
+                <div><span class="compare-num">717</span><span class="compare-label">近期平均 Token/请求</span></div>
+                <div class="compare-arrow down">▼ 12%<span class="compare-hint">近期 vs 前期（本周期内）</span></div>
+                <div><span class="compare-num">815</span><span class="compare-label">前期平均 Token/请求</span></div>
+              </div>
+              <p class="note" style="color:#4f7a4f">✓ 平均用量较前期下降 12%，优化见效（历史窗口与附件上下文预算收紧后）。</p>
+              <p class="note" style="margin-top:2px"><b>上下文构成 · 按语义段</b>（全站累计 × 本人累计 合并视图；点击行在被点击行正下方展开最近会话明细）</p>
+              <div class="demo-table-wrap"><table class="demo-table"><thead><tr><th>上下文段</th><th>全站累计 Token</th><th>全站占比</th><th>本人累计</th><th>本人平均/次</th><th>本人峰值</th><th>较前期</th></tr></thead>
+                <tbody>
+                  <tr><td>系统提示词</td><td>9.6k</td><td><span class="share-bar"><span style="width:15.7%"></span></span>15.7%</td><td>1.9k</td><td>317</td><td>320</td><td><span class="seg-delta flat">—0%</span></td></tr>
+                  <tr><td>会话历史</td><td>18.3k</td><td><span class="share-bar"><span style="width:30%"></span></span>30.0%</td><td>3.6k</td><td>600</td><td>1,240</td><td><span class="seg-delta down">▼18%</span></td></tr>
+                  <tr style="cursor:pointer" onclick="toggleSegDrill(this)"><td>▾ 知识检索片段</td><td>16.5k</td><td><span class="share-bar"><span style="width:27%"></span></span>27.0%</td><td>3.1k</td><td>517</td><td>980</td><td><span class="seg-delta down">▼9%</span></td></tr>
+                  <tr class="seg-drill-row"><td colspan="7">
+                    <p class="note" style="margin:4px 0">「知识检索片段」最近 3 次会话（点击行查看该请求全链路追踪）</p>
+                    <div class="segment-item" onclick="jumpToTrace('t-1026')"><span>10:26:18</span><span>演示用户甲</span><span class="seg-item-input">丰隆穴有什么功效？怎么按摩？</span><span class="seg-item-tok">517 tok</span></div>
+                    <div class="segment-item" onclick="jumpToTrace('t-1025', null)"><span>10:25:41</span><span>admin</span><span class="seg-item-input">结合我的笔记谈谈幸福观</span><span class="seg-item-tok">602 tok</span></div>
+                    <div class="segment-item" onclick="jumpToTrace('t-1021', null)"><span>10:18:36</span><span>演示用户乙</span><span class="seg-item-input">增值税的纳税人包括哪些？</span><span class="seg-item-tok">488 tok</span></div>
+                  </td></tr>
+                  <tr><td>百科卡片</td><td>8.9k</td><td><span class="share-bar"><span style="width:14.6%"></span></span>14.6%</td><td>1.7k</td><td>283</td><td>610</td><td><span class="seg-delta up">▲4%</span></td></tr>
+                  <tr><td>记忆注入</td><td>3.2k</td><td><span class="share-bar"><span style="width:5.2%"></span></span>5.2%</td><td>0.6k</td><td>100</td><td>210</td><td><span class="seg-delta flat">—0%</span></td></tr>
+                  <tr><td>附件上下文</td><td>2.8k</td><td><span class="share-bar"><span style="width:4.6%"></span></span>4.6%</td><td>0.5k</td><td>83</td><td>460</td><td><span class="seg-delta down">▼22%</span></td></tr>
+                  <tr><td>用户问题</td><td>1.7k</td><td><span class="share-bar"><span style="width:2.8%"></span></span>2.8%</td><td>0.3k</td><td>50</td><td>96</td><td><span class="seg-delta up">▲2%</span></td></tr>
+                </tbody></table></div>
+              <p class="note" style="margin-top:10px"><b>每日平均 Token/请求趋势</b>（悬停真实系统可见 prompt/completion 拆分 tooltip）</p>
+              <div class="demo-trend" style="height:110px" aria-label="每日平均 Token：714、688、722、727、733、706、722">
+                <div><i style="height:97%"></i>11-06</div><div><i style="height:94%"></i>11-07</div><div><i style="height:98%"></i>11-08</div><div><i style="height:99%"></i>11-09</div><div><i style="height:100%"></i>11-10</div><div><i style="height:96%"></i>11-11</div><div><i style="height:98%"></i>11-12</div>
+              </div>
+            </div>
+            <div class="upload-grid demo-section">
+              <div class="panel"><h3>按 Agent 统计</h3><div class="demo-table-wrap"><table class="demo-table"><thead><tr><th>Agent</th><th>请求</th><th>失败</th><th>平均延迟</th><th>LLM</th><th>工具</th><th>Token</th></tr></thead>
+                <tbody><tr><td><span class="agent-badge agent-chat">chat</span></td><td>96</td><td>4</td><td>2.6s</td><td>178</td><td>86</td><td>70k</td></tr>
+                <tr><td><span class="agent-badge agent-wiki_assistant">wiki_assistant</span></td><td>18</td><td>2</td><td>3.4s</td><td>30</td><td>15</td><td>12k</td></tr>
+                <tr><td><span class="agent-badge agent-wiki_compile">wiki_compile</span></td><td>6</td><td>0</td><td>8.2s</td><td>6</td><td>2</td><td>4k</td></tr></tbody></table></div></div>
+              <div class="panel"><h3>工具调用次数</h3><div class="demo-table-wrap"><table class="demo-table"><thead><tr><th>工具</th><th>调用</th><th>失败</th><th>平均延迟</th></tr></thead>
+                <tbody><tr><td>search_knowledge</td><td>62</td><td>1</td><td>320ms</td></tr>
+                <tr><td>web_search</td><td>21</td><td>2</td><td>1.1s</td></tr>
+                <tr><td>image_ocr</td><td>12</td><td>0</td><td>2.4s</td></tr>
+                <tr><td>doc_to_pdf</td><td>5</td><td>1</td><td>3.8s</td></tr>
+                <tr><td>knowledge_summarize</td><td>3</td><td>0</td><td>1.6s</td></tr></tbody></table></div></div>
+            </div>
+            <p class="note">「模型与调用资源」的工具/LLM 调用按 span 级明细钻取（kind=tool / kind=llm），数量与列表一致；指标监控分性能/质量/安全/业务四方面，上下文、记忆与 Token 分析融入业务。</p>
+            <details class="panel demo-section"><summary>能力缺口补救与受控执行（架构示意）</summary>
+              <p>需求契约 → Agent 编排器 → 能力目录与候选筛选 → 统一工具调用入口（策略引擎/审批/预算账本）→ 固定工具适配器 / 可信 Sandbox Controller → 证据验证 → 回答生成。</p>
+              <p class="note">不变量：缺参数不猜测（不默认城市/URL）、隔离环境不可用则拒绝动态执行而不回退主机、联网只放行审核白名单 host、判定异常保留 unknown/unresolved 绝不假成功；结果分 execution/validation/resolution 三层状态。</p>
+            </details>
+          </div>
+
+          <!-- ===== 模块四：链路追踪 ===== -->
+          <div id="obs-tab-traces" hidden>
+            <div class="demo-role-tabs" aria-label="链路类型">
+              <button class="btn btn-outline" data-trace-sub="chat" aria-pressed="true" onclick="switchTraceSub('chat', this)">对话型链路</button>
+              <button class="btn btn-outline" data-trace-sub="tools" aria-pressed="false" onclick="switchTraceSub('tools', this)">工具调用链路</button>
+            </div>
+            <div id="trace-sub-chat">
+              <div class="panel"><h3>请求追踪（Traces）
+                <span class="range-switch"><select id="traceAgent" onchange="filterTraces()" style="border:1px solid var(--color-border);border-radius:8px;padding:3px 8px;font-size:12px;background:#fff"><option value="">全部 Agent</option><option value="chat">chat 对话</option><option value="wiki_assistant">知识助手</option><option value="wiki_compile">知识编译</option></select>
+                <select id="traceStatus" onchange="filterTraces()" style="border:1px solid var(--color-border);border-radius:8px;padding:3px 8px;font-size:12px;background:#fff"><option value="">全部状态</option><option value="ok">成功</option><option value="error">失败</option><option value="cancelled">已取消</option><option value="timeout">超时</option></select></span></h3>
+                <div class="demo-table-wrap"><table class="demo-table" id="traceTable"><thead><tr><th>时间</th><th>Agent</th><th>用户</th><th>输入</th><th>状态</th><th>延迟</th><th>LLM/工具</th><th>Token</th></tr></thead>
+                  <tbody>
+                    <tr data-agent="chat" data-status="ok" style="cursor:pointer" onclick="openTraceModal('t-1026', this)"><td>10:26:18</td><td><span class="agent-badge agent-chat">chat</span></td><td>演示用户甲</td><td>丰隆穴有什么功效？怎么按摩？</td><td><span class="status-dot ok"></span>成功</td><td>2.6s</td><td>3 / 1</td><td>1.9k</td></tr>
+                    <tr data-agent="chat" data-status="ok" style="cursor:pointer" onclick="openTraceModal('t-1025', this)"><td>10:25:41</td><td><span class="agent-badge agent-chat">chat</span></td><td>admin</td><td>结合我的笔记谈谈幸福观</td><td><span class="status-dot ok"></span>成功</td><td>3.1s</td><td>4 / 2</td><td>2.4k</td></tr>
+                    <tr data-agent="wiki_assistant" data-status="error" style="cursor:pointer" onclick="openTraceModal('t-1024', this)"><td>10:24:02</td><td><span class="agent-badge agent-wiki_assistant">wiki_assistant</span></td><td>演示用户乙</td><td>帮我整理失眠调理词条</td><td><span class="status-dot error"></span>失败</td><td>5.0s</td><td>2 / 2</td><td>1.6k</td></tr>
+                    <tr data-agent="chat" data-status="timeout" style="cursor:pointer" onclick="openTraceModal('t-1023', this)"><td>10:22:47</td><td><span class="agent-badge agent-chat">chat</span></td><td>演示用户甲</td><td>淘米水能治皮肤瘙痒吗</td><td><span class="status-dot timeout"></span>超时</td><td>60.0s</td><td>1 / 1</td><td>0.9k</td></tr>
+                    <tr data-agent="wiki_compile" data-status="ok" style="cursor:pointer" onclick="openTraceModal('t-1022', this)"><td>10:20:13</td><td><span class="agent-badge agent-wiki_compile">wiki_compile</span></td><td>system</td><td>增量编译 · 丰隆穴</td><td><span class="status-dot ok"></span>成功</td><td>8.2s</td><td>1 / 0</td><td>3.5k</td></tr>
+                    <tr data-agent="chat" data-status="cancelled" style="cursor:pointer" onclick="openTraceModal('t-1021', this)"><td>10:18:36</td><td><span class="agent-badge agent-chat">chat</span></td><td>演示用户乙</td><td>增值税的纳税人包括哪些？</td><td><span class="status-dot cancelled"></span>已取消</td><td>1.2s</td><td>1 / 0</td><td>0.4k</td></tr>
+                    <tr id="traceEmpty" hidden><td colspan="8" style="color:#8a7e72">暂无 trace 记录（切换 Agent / 状态筛选后重试）。</td></tr>
+                  </tbody></table></div>
+                <div class="pager-row"><button class="btn btn-outline btn-sm" disabled>上一页</button><span id="tracePager">1-6 / 6</span><button class="btn btn-outline btn-sm" disabled>下一页</button><span class="note" style="margin:0">点击行打开全链路弹窗（span 时间线 + prompt/response + 详细日志）。</span></div>
+              </div>
+            </div>
+            <div id="trace-sub-tools" hidden>
+              <div class="panel"><h3>Tool Routing 调用链分析（工具路由 · 约束钩子 · 可观测性）</h3>
+                <div class="demo-stats">
+                  <div class="demo-stat"><strong>103</strong><span>调用总数</span></div>
+                  <div class="demo-stat"><strong>97.1%</strong><span>参数合法率</span></div>
+                  <div class="demo-stat"><strong>96.2%</strong><span>任务成功率</span></div>
+                  <div class="demo-stat"><strong>0.0%</strong><span>越权暴露率</span></div>
+                  <div class="demo-stat"><strong>4.2k</strong><span>Schema Token 总计</span></div>
+                  <div class="demo-stat"><strong>420ms</strong><span>平均端到端延迟</span></div>
+                  <div class="demo-stat"><strong>1.1s</strong><span>P95 延迟</span></div>
+                  <div class="demo-stat"><strong style="color:#b05555">2</strong><span>约束拦截</span></div>
+                </div>
+                <div class="demo-table-wrap"><table class="demo-table"><thead><tr><th>工具</th><th>命名空间</th><th>调用</th><th>放行</th><th>拦截</th><th>参数合法率</th><th>任务成功率</th><th>平均延迟</th><th>Schema Token</th></tr></thead>
+                  <tbody><tr><td>search_knowledge</td><td>knowledge</td><td>62</td><td>61</td><td>1</td><td>98%</td><td>97%</td><td>320ms</td><td>1.6k</td></tr>
+                  <tr><td>web_search</td><td>web</td><td>21</td><td>19</td><td>2</td><td>95%</td><td>90%</td><td>1.1s</td><td>0.9k</td></tr>
+                  <tr><td>image_ocr</td><td>ocr</td><td>12</td><td>12</td><td>0</td><td>100%</td><td>100%</td><td>2.4s</td><td>0.7k</td></tr>
+                  <tr><td>doc_to_pdf</td><td>cli</td><td>5</td><td>4</td><td>1</td><td>80%</td><td>75%</td><td>3.8s</td><td>0.6k</td></tr>
+                  <tr><td>knowledge_summarize</td><td>knowledge</td><td>3</td><td>3</td><td>0</td><td>100%</td><td>100%</td><td>1.6s</td><td>0.4k</td></tr></tbody></table></div>
+                <p class="note" style="margin-top:10px"><b>约束拦截事件</b>（调用前钩子链 fail-fast 短路，近 30 条）</p>
+                <div class="demo-table-wrap"><table class="demo-table"><thead><tr><th>时间</th><th>工具</th><th>拦截环节</th><th>风险等级</th><th>触发方</th><th>原因</th></tr></thead>
+                  <tbody><tr><td>11-12 10:24</td><td>web_search</td><td>调用前白名单</td><td><span class="tag pink">高</span></td><td>chat</td><td>上游 host 不在审核白名单，fail-fast 短路</td></tr>
+                  <tr><td>11-11 21:40</td><td>doc_to_pdf</td><td>Sandbox 可用性</td><td><span class="tag pink">极高</span></td><td>CLI 适配器</td><td>隔离环境不可用，拒绝动态执行而不回退主机</td></tr></tbody></table></div>
+              </div>
+              <div class="panel demo-section"><h3>标准化工具注册表（命名空间 · 标签 · 场景 · 参数 Schema · 权限 · 风险 · 状态）</h3>
+                <div class="demo-table-wrap"><table class="demo-table"><thead><tr><th>工具</th><th>命名空间</th><th>标签</th><th>适用场景</th><th>权限</th><th>风险</th><th>状态</th><th>参数</th></tr></thead>
+                  <tbody><tr><td>document_import</td><td><span class="tag">knowledge</span></td><td><span class="tag">导入</span> <span class="tag">解析</span></td><td>Word/PDF 确认入库</td><td>登录用户</td><td><span class="status-dot timeout"></span>中</td><td>可用</td><td><span class="tag blue">file_id</span> <span class="tag blue">kb_id</span></td></tr>
+                  <tr><td>image_ocr</td><td><span class="tag">ocr</span></td><td><span class="tag">OCR</span> <span class="tag">图片</span></td><td>手写笔记识别</td><td>登录用户</td><td><span class="status-dot timeout"></span>中</td><td>可用</td><td><span class="tag blue">image_path</span></td></tr>
+                  <tr><td>image_upload</td><td><span class="tag">knowledge</span></td><td><span class="tag">上传</span></td><td>聊天附件落盘</td><td>登录用户</td><td><span class="status-dot ok"></span>低</td><td>可用</td><td><span class="tag blue">file</span></td></tr>
+                  <tr><td>knowledge_summarize</td><td><span class="tag">knowledge</span></td><td><span class="tag">摘要</span></td><td>库级知识总结</td><td>登录用户</td><td><span class="status-dot ok"></span>低</td><td>可用</td><td><span class="tag blue">kb_id</span></td></tr>
+                  <tr><td>web_search</td><td><span class="tag">web</span></td><td><span class="tag">搜索</span> <span class="tag">联网</span></td><td>知识库无结果时联网增强</td><td>白名单 host</td><td><span class="status-dot error"></span>高</td><td>可用</td><td><span class="tag blue">query</span></td></tr>
+                  <tr><td>search_knowledge</td><td><span class="tag">knowledge</span></td><td><span class="tag">检索</span> <span class="tag">RAG</span></td><td>混合检索问答</td><td>公开</td><td><span class="status-dot ok"></span>低</td><td>可用</td><td><span class="tag blue">query</span> <span class="tag blue">kb_id</span></td></tr>
+                  <tr><td>doc_to_pdf</td><td><span class="tag">cli</span></td><td><span class="tag">转换</span></td><td>Word 原始排版预览</td><td>运维</td><td><span class="status-dot error"></span>高</td><td>可用</td><td><span class="tag blue">file_path</span></td></tr></tbody></table></div>
+                <p class="note">共 7 个工具 · function-calling schema 7 份 · Schema Token 估算 4.2k；与后端工具注册表同源。</p>
+              </div>
+              <div class="panel demo-section"><h3>按请求的工具调用链（点击行查看该请求全链路）</h3>
+                <div class="demo-table-wrap"><table class="demo-table"><thead><tr><th>时间</th><th>用户</th><th>Agent</th><th>工具调用序列</th><th>次数</th><th>失败</th><th>工具耗时</th><th>状态</th></tr></thead>
+                  <tbody><tr style="cursor:pointer" onclick="openTraceModal('t-1026', null)"><td>10:26:18</td><td>演示用户甲</td><td><span class="agent-badge agent-chat">chat</span></td><td>search_knowledge</td><td>1</td><td>0</td><td>320ms</td><td><span class="status-dot ok"></span>成功</td></tr>
+                  <tr style="cursor:pointer" onclick="openTraceModal('t-1024', null)"><td>10:24:02</td><td>演示用户乙</td><td><span class="agent-badge agent-wiki_assistant">wiki_assistant</span></td><td>search_knowledge → web_search</td><td>2</td><td>1</td><td>1.4s</td><td><span class="status-dot error"></span>失败</td></tr>
+                  <tr style="cursor:pointer" onclick="openTraceModal('t-1025', null)"><td>10:25:41</td><td>admin</td><td><span class="agent-badge agent-chat">chat</span></td><td>search_knowledge ×2</td><td>2</td><td>0</td><td>640ms</td><td><span class="status-dot ok"></span>成功</td></tr></tbody></table></div>
+              </div>
+            </div>
+            <details class="panel demo-section"><summary>展开成功请求的示例 Trace 详情</summary><p>接收问题 → 意图改写 → 知识检索 → 文档重排 → 证据校验 → LLM 生成 → 引用核对</p><p class="note">真实 Trace 详情可查看已接入追踪并保存的步骤与 LLM prompt / response（输入、输出各最多保留 20,000 字符，超长截断），并可切换「查看详细日志」读取按 trace ID 关联的落盘日志；「工具调用链路」子页签展示 Tool Routing、工具注册表与调用链。此处仅展示模拟流程，不含实际问题、回答或私密配置。</p></details>
+          </div>
+
+          <!-- ===== 全链路追踪弹窗（span 时间线） ===== -->
+          <div class="modal-mask" id="traceModal" onclick="if(event.target===this)this.classList.remove('open')">
+            <div class="modal" style="width:min(860px,94vw)">
+              <h3>全链路追踪 · <span class="agent-badge agent-chat" id="tmAgent">chat</span><span class="close-x" onclick="closeTraceModal()">×</span></h3>
+              <div class="trace-meta" id="tmMeta"></div>
+              <div><span class="span-kind-badge step">输入</span><pre class="span-text" id="tmInput" style="margin-top:6px"></pre></div>
+              <div id="tmAnswerWrap" style="margin-top:10px"><div class="trace-answer-head"><span class="span-io-label" style="margin:0">AI回复内容</span><button class="btn btn-outline btn-sm" onclick="copyTraceAnswer(this)">复制</button></div><pre class="span-text" id="tmAnswer" style="margin-top:6px"></pre></div>
+              <p class="inline-error" id="tmError" hidden></p>
+              <div class="trace-log-actions"><button class="btn btn-outline btn-sm" id="tmLogBtn" onclick="toggleTraceLogs()">查看详细日志</button><span class="note" style="margin:0" id="tmId"></span></div>
+              <div id="tmLogs" hidden>
+                <p class="note">按请求 ID 展示已落盘日志（含异常堆栈），常见凭据已脱敏。旧日志仅能关联带 trace ID 的记录。</p>
+                <div id="tmLogEntries"></div>
+              </div>
+              <div class="span-list" id="tmSpans"></div>
+            </div>
+          </div>
+
+          <!-- ===== 日志详情弹窗 ===== -->
+          <div class="modal-mask" id="logModal" onclick="if(event.target===this)this.classList.remove('open')">
+            <div class="modal" style="width:min(760px,94vw)">
+              <h3>日志详情<span class="close-x" onclick="document.getElementById('logModal').classList.remove('open')">×</span></h3>
+              <div class="trace-meta" id="lmMeta"></div>
+              <div id="lmMergeWrap" hidden><span class="span-io-label">合并明细（同分钟逐条展开）</span><div class="span-list" id="lmMerge"></div></div>
+              <span class="span-io-label">日志内容</span>
+              <pre class="span-text" id="lmMsg"></pre>
+            </div>
+          </div>
         </div>
       </div>
     </section>
@@ -729,6 +1122,164 @@ function setObservationMode(mode) {
   });
 }
 function openWiki() { document.getElementById('wikiModal').classList.add('open'); }
+/* ---------- 可观测性四模块交互（模拟数据） ---------- */
+function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+function switchObsTab(tab, btn) {
+  ['dashboard', 'logs', 'metrics', 'traces'].forEach(k => { document.getElementById('obs-tab-' + k).hidden = k !== tab; });
+  document.querySelectorAll('[data-obs-tab]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.obsTab === tab)));
+}
+function switchTraceSub(sub, btn) {
+  ['chat', 'tools'].forEach(k => { document.getElementById('trace-sub-' + k).hidden = k !== sub; });
+  document.querySelectorAll('[data-trace-sub]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.traceSub === sub)));
+}
+function renderTrend(days, btn) {
+  if (btn) { btn.parentElement.querySelectorAll('.range-btn').forEach(b => b.classList.remove('active')); btn.classList.add('active'); }
+  const base = [14, 16, 18, 22, 15, 17, 18], errs = [1, 0, 1, 2, 0, 1, 1];
+  const rows = [];
+  for (let i = days - 1; i >= 0; i--) {
+    const d = new Date('2026-11-12T00:00:00'); d.setDate(d.getDate() - i);
+    const k = days - 1 - i;
+    rows.push({ label: String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'), q: days === 7 ? base[k] : 10 + ((k * 7) % 13), e: days === 7 ? errs[k] : (k % 6 === 3 ? 1 : 0) });
+  }
+  const max = Math.max.apply(null, rows.map(r => r.q));
+  const total = rows.reduce((s, r) => s + r.q, 0);
+  document.getElementById('dashTrend').innerHTML = rows.map(r => '<div><span class="trend-val">' + r.q + '</span><i style="height:' + Math.round(r.q / max * 100) + '%">' + (r.e ? '<em style="height:' + Math.min(100, Math.round(r.e / r.q * 100)) + '%"></em>' : '') + '</i>' + r.label + '</div>').join('');
+  document.getElementById('trendTotal').textContent = total;
+  document.getElementById('trendTokens').textContent = days === 7 ? '86k' : Math.round(total * 0.717 / 1000) + 'k';
+  document.getElementById('trendRangeLabel').textContent = '近 ' + days + ' 天 · 红色段为当日失败请求占比';
+}
+function filterLogs() {
+  const date = document.getElementById('logDate').value, user = document.getElementById('logUser').value, level = document.getElementById('logLevel').value;
+  const q = (document.getElementById('logKeyword').value || '').trim().toLowerCase();
+  let n = 0;
+  document.querySelectorAll('#logTable tbody tr[data-level]').forEach(tr => {
+    const ok = tr.dataset.date === date && (!user || tr.dataset.user === user) && (!level || tr.dataset.level === level) && (!q || tr.textContent.toLowerCase().includes(q));
+    tr.hidden = !ok; if (ok) n++;
+  });
+  document.getElementById('logEmpty').hidden = n > 0;
+  document.getElementById('logPager').textContent = n ? '1-' + n + ' / ' + n : '0 / 0';
+}
+function filterTraces() {
+  const agent = document.getElementById('traceAgent').value, status = document.getElementById('traceStatus').value;
+  let n = 0;
+  document.querySelectorAll('#traceTable tbody tr[data-agent]').forEach(tr => {
+    const ok = (!agent || tr.dataset.agent === agent) && (!status || tr.dataset.status === status);
+    tr.hidden = !ok; if (ok) n++;
+  });
+  document.getElementById('traceEmpty').hidden = n > 0;
+  document.getElementById('tracePager').textContent = n ? '1-' + n + ' / ' + n : '0 / 0';
+}
+const MERGE_ENTRIES = [
+  { level: 'INFO', ts: '10:26:16', logger: 'app.core.vector_store', msg: 'FAISS 稠密召回 4 条（IndexFlatL2 · top-k 6）' },
+  { level: 'INFO', ts: '10:26:16', logger: 'app.core.sparse_retriever', msg: 'BM25 稀疏召回 2 条 → RRF 融合 6 候选' },
+  { level: 'INFO', ts: '10:26:16', logger: 'app.core.reranker', msg: 'Rerank（qwen3-rerank）保留 5 条，最低相关度 40%' },
+];
+function openLogDetail(row) {
+  const d = row.dataset;
+  document.getElementById('lmMeta').innerHTML = '<span>时间：' + d.ts + '</span><span>级别：<span class="level-badge ' + d.level.toLowerCase() + '">' + d.level + '</span></span><span>用户：' + d.user + '</span><span>模块：' + d.logger + '</span><span>Trace：' + (d.trace || '-') + '</span>' + (d.count ? '<span>合并：同一分钟内共 ' + d.count + ' 条</span>' : '');
+  document.getElementById('lmMsg').textContent = row.querySelector('.msg-text').textContent;
+  const wrap = document.getElementById('lmMergeWrap');
+  if (d.count > 1) {
+    wrap.hidden = false;
+    document.getElementById('lmMerge').innerHTML = MERGE_ENTRIES.map(e => '<div class="span-item"><div class="span-head" style="cursor:default"><span class="level-badge ' + e.level.toLowerCase() + '">' + e.level + '</span><span class="span-meta">' + e.ts + ' · ' + e.logger + '</span></div><div class="span-body"><pre class="span-text">' + esc(e.msg) + '</pre></div></div>').join('');
+  } else { wrap.hidden = true; }
+  document.getElementById('logModal').classList.add('open');
+}
+const STATUS_TEXT = { ok: '成功', error: '失败', timeout: '超时', cancelled: '已取消', running: '进行中', interrupted: '重启中断' };
+const TRACES = {
+  't-1026': { agent: 'chat', status: 'ok', latency: '2.6s', tokens: '1,420 + 480', user: '演示用户甲', started: '2026-11-12 10:26:18', input: '丰隆穴有什么功效？怎么按摩？',
+    answer: '丰隆穴被古人奉为祛痰至宝，「痰多宜向丰隆寻」[来源 3]；为足阳明胃经之络穴，可健脾胃、化痰湿 [来源 1][来源 2]。按摩：拇指指腹按揉，酸胀为度，每次 3~5 分钟，两侧交替。', error: '',
+    spans: [
+      { seq: 1, kind: 'step', name: '意图改写', ms: '180ms', status: 'ok', bar: 7, input: '丰隆穴有什么功效？怎么按摩？', output: '丰隆穴 功效 按摩 方法 自我按摩' },
+      { seq: 2, kind: 'tool', name: 'search_knowledge', ms: '320ms', status: 'ok', bar: 12, input: '{"query":"丰隆穴 功效 按摩","top_k":6}', output: '命中 6 条（FAISS 4 + BM25 2 → RRF → Rerank 保留 5）' },
+      { seq: 3, kind: 'step', name: 'Rerank 重排', ms: '210ms', status: 'ok', bar: 8, output: '保留 5 条 · 最低相关度 40%' },
+      { seq: 4, kind: 'step', name: '证据充分性判断', ms: '160ms', status: 'ok', bar: 6, output: '证据充分：true' },
+      { seq: 5, kind: 'llm', name: 'chat_answer 流式生成', ms: '1.6s', status: 'ok', bar: 62, tok: '1,420+480', input: '[系统提示词 + 百科卡片×5 + 检索片段 + 记忆注入]\n丰隆穴有什么功效？怎么按摩？', output: '丰隆穴为祛痰要穴……[来源 1][来源 3]' },
+      { seq: 6, kind: 'step', name: '引用编号核对', ms: '90ms', status: 'ok', bar: 4, output: '引用核对通过：3 处编号均命中来源' },
+    ],
+    logs: [
+      { source: 'request', text: '>>> POST /api/chat/send-with-files | user=演示用户甲\n<<< 200 | 2.6s' },
+      { source: 'gateway', text: '[业务路由] chat_answer → open&model-mix\n[网关选路] openrouter/free → 免费层级上游\n[网关出网] 200 · 1,420+480 tok' },
+      { source: 'wiki', text: '[WIKI] 百科卡片前置 ×5（丰隆穴 97%）' },
+    ] },
+  't-1024': { agent: 'wiki_assistant', status: 'error', latency: '5.0s', tokens: '1,180 + 420', user: '演示用户乙', started: '2026-11-12 10:24:02', input: '帮我整理失眠调理词条', answer: '', error: 'web_search 上游超时（1.1s），fail-fast 短路',
+    spans: [
+      { seq: 1, kind: 'step', name: '接收问题', ms: '40ms', status: 'ok', bar: 2 },
+      { seq: 2, kind: 'tool', name: 'search_knowledge', ms: '300ms', status: 'ok', bar: 6, output: '命中 3 条（失眠 调理 食疗）' },
+      { seq: 3, kind: 'tool', name: 'web_search', ms: '1.1s', status: 'error', bar: 22, input: '{"query":"失眠 调理 食疗"}', error: 'TimeoutError: upstream=anysearch elapsed=1.1s' },
+      { seq: 4, kind: 'llm', name: 'assistant 总结', ms: '2.2s', status: 'ok', bar: 44, tok: '1,180+420', output: '（基于知识库片段生成词条草稿，联网部分缺失已标注）' },
+    ],
+    logs: [
+      { source: 'request', text: '>>> POST /api/wiki/assistant | user=演示用户乙\n<<< 500 | 5.0s' },
+      { source: 'tool', text: 'web_search 调用失败：TimeoutError upstream=anysearch elapsed=1.1s' },
+    ] },
+  't-1022': { agent: 'wiki_compile', status: 'ok', latency: '8.2s', tokens: '3,200 + 300', user: 'system', started: '2026-11-12 10:20:13', input: '增量编译 · 丰隆穴（来源：文字记录2.jpg）', answer: '', error: '',
+    spans: [
+      { seq: 1, kind: 'step', name: '读取增量素材', ms: '120ms', status: 'ok', bar: 2 },
+      { seq: 2, kind: 'llm', name: 'wiki_compile', ms: '7.6s', status: 'ok', bar: 92, tok: '3,200+300', output: '## 概述\n丰隆穴属足阳明胃经络穴……\n## 关键要点\n- 定位：外踝尖上八寸……' },
+      { seq: 3, kind: 'step', name: '双写落盘', ms: '260ms', status: 'ok', bar: 4, output: 'wiki_pages + 向量库 2 chunks + data/wiki 镜像' },
+    ],
+    logs: [{ source: 'wiki', text: '[WIKI] 编译完成：丰隆穴 → 2 chunks' }] },
+};
+function openTraceModal(id, row) {
+  let t = TRACES[id];
+  if (!t && row) {
+    const c = row.children;
+    t = { agent: row.dataset.agent, status: row.dataset.status, latency: c[5].textContent, tokens: c[7].textContent, user: c[2].textContent, started: '2026-11-12 ' + c[0].textContent, input: c[3].textContent, answer: '', error: '',
+      spans: [ { seq: 1, kind: 'step', name: '接收问题', ms: '40ms', status: 'ok', bar: 3 }, { seq: 2, kind: 'llm', name: '生成回答', ms: c[5].textContent, status: row.dataset.status, bar: 80, tok: c[7].textContent } ],
+      logs: [{ source: 'request', text: '>>> 请求开始 | user=' + c[2].textContent + '\n<<< ' + (STATUS_TEXT[row.dataset.status] || '-') + ' | ' + c[5].textContent }] };
+  }
+  if (!t) return;
+  const agentEl = document.getElementById('tmAgent');
+  agentEl.className = 'agent-badge agent-' + t.agent; agentEl.textContent = t.agent;
+  document.getElementById('tmMeta').innerHTML = '<span>状态：<b>' + (STATUS_TEXT[t.status] || t.status) + '</b></span><span>延迟：' + t.latency + '</span><span>Token：' + t.tokens + '</span><span>用户：' + t.user + '</span><span>开始：' + t.started + '</span>';
+  document.getElementById('tmInput').textContent = t.input || '-';
+  document.getElementById('tmAnswerWrap').hidden = !t.answer;
+  document.getElementById('tmAnswer').textContent = t.answer || '';
+  const errEl = document.getElementById('tmError'); errEl.hidden = !t.error; errEl.textContent = t.error ? '错误：' + t.error : '';
+  document.getElementById('tmId').textContent = '请求 ID：' + id;
+  document.getElementById('tmLogs').hidden = true;
+  document.getElementById('tmSpans').hidden = false;
+  document.getElementById('tmLogBtn').textContent = '查看详细日志';
+  document.getElementById('tmLogEntries').innerHTML = (t.logs || []).map(l => '<div class="log-entry"><span class="span-io-label">' + esc(l.source) + '</span><pre class="span-text">' + esc(l.text) + '</pre></div>').join('');
+  document.getElementById('tmSpans').innerHTML = t.spans.map(s => '<div class="span-item"><button class="span-head" onclick="toggleSpanBody(this)"><span class="span-seq">#' + s.seq + '</span><span class="span-kind-badge ' + s.kind + '">' + s.kind + '</span><span class="span-name">' + esc(s.name) + '</span><span class="span-bar"><i class="' + s.kind + '" style="width:' + (s.bar || 20) + '%"></i></span><span class="status-dot ' + s.status + '"></span><span class="span-meta">' + s.ms + (s.tok ? ' · ' + s.tok + ' tok' : '') + '</span><span class="span-arrow">▼</span></button><div class="span-body" hidden>' + (s.error ? '<p class="inline-error">' + esc(s.error) + '</p>' : '') + (s.input ? '<span class="span-io-label">PROMPT / 入参</span><pre class="span-text">' + esc(s.input) + '</pre>' : '') + (s.output ? '<span class="span-io-label">RESPONSE / 结果</span><pre class="span-text">' + esc(s.output) + '</pre>' : '') + (!s.input && !s.output && !s.error ? '<p class="note" style="margin:0">（无附加内容）</p>' : '') + '</div></div>').join('');
+  document.getElementById('traceModal').classList.add('open');
+}
+function closeTraceModal() { document.getElementById('traceModal').classList.remove('open'); }
+function toggleSpanBody(head) {
+  const body = head.nextElementSibling;
+  body.hidden = !body.hidden;
+  head.querySelector('.span-arrow').classList.toggle('open', !body.hidden);
+}
+function toggleTraceLogs() {
+  const show = document.getElementById('tmLogs').hidden;
+  document.getElementById('tmLogs').hidden = !show;
+  document.getElementById('tmSpans').hidden = show;
+  document.getElementById('tmLogBtn').textContent = show ? '返回步骤追踪' : '查看详细日志';
+}
+function copyTraceAnswer(btn) {
+  const txt = document.getElementById('tmAnswer').textContent;
+  if (navigator.clipboard) navigator.clipboard.writeText(txt).catch(() => {});
+  btn.textContent = '✓ 已复制';
+  setTimeout(() => { btn.textContent = '复制'; }, 1200);
+}
+function jumpToTrace(id, row) {
+  switchObsTab('traces', document.querySelector('[data-obs-tab="traces"]'));
+  openTraceModal(id, row || null);
+}
+function openDrillExample(label) {
+  document.getElementById('drillTitle').textContent = label + ' · 明细（近 7 天 · 分页表格 + 口径计算说明）';
+  const d = document.getElementById('drillDetails');
+  d.open = true;
+  switchObsTab('dashboard', document.querySelector('[data-obs-tab="dashboard"]'));
+  d.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+function toggleSegDrill(row) {
+  const drill = row.nextElementSibling;
+  drill.hidden = !drill.hidden;
+  row.cells[0].textContent = (drill.hidden ? '▸ ' : '▾ ') + '知识检索片段';
+}
+renderTrend(7, null);
 </script>
 </body>
 </html>

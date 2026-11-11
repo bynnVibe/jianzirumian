@@ -89,6 +89,7 @@
               <div class="card-head">
                 <span class="kind-badge" :class="s.kind">{{ s.kind === 'prompt' ? '对话提示' : '策略' }}</span>
                 <span class="scope-badge">{{ scopeLabel(s.scope) }}</span>
+                <span class="vis-badge" :class="s.visibility === 'public' ? 'public' : 'personal'">{{ s.visibility === 'public' ? '公共' : '个人' }}</span>
                 <span class="card-name">{{ s.name }}</span>
               </div>
               <p v-if="s.description" class="card-desc">{{ s.description }}</p>
@@ -112,6 +113,39 @@
                 <button class="op-btn" @click="openEdit(s)">编辑</button>
                 <button class="op-btn danger" @click="askDelete(s)">删除</button>
               </div>
+            </div>
+          </div>
+        </div>
+        </template>
+      </section>
+
+      <!-- 公共技能（他人共享，只读引用） -->
+      <section class="skill-group" v-if="sharedSkills.length">
+        <h2 class="group-title clickable" @click="collapsed.shared = !collapsed.shared"
+            :title="collapsed.shared ? '展开' : '收起'">
+          <svg class="chevron" :class="{ open: !collapsed.shared }" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2" width="14" height="14">
+            <polyline points="9 6 15 12 9 18"/>
+          </svg>
+          公共技能 <span class="group-count">{{ sharedSkills.length }}</span>
+          <span class="group-hint">其他成员公开共享，已自动生效，只读</span>
+        </h2>
+        <template v-if="!collapsed.shared">
+        <div v-for="s in sharedSkills" :key="s.id" class="skill-card shared">
+          <div class="card-inner">
+            <div class="card-main">
+              <div class="card-head">
+                <span class="kind-badge" :class="s.kind">{{ s.kind === 'prompt' ? '对话提示' : '策略' }}</span>
+                <span class="scope-badge">{{ scopeLabel(s.scope) }}</span>
+                <span class="vis-badge public">公共</span>
+                <span class="card-name">{{ s.name }}</span>
+                <span v-if="s.owner_name" class="owner-badge">来自 {{ s.owner_name }}</span>
+              </div>
+              <p v-if="s.description" class="card-desc">{{ s.description }}</p>
+            </div>
+            <div class="card-side">
+              <div class="card-state">{{ s.enabled ? '已生效' : '未启用' }}</div>
+              <div class="card-ops"><span class="op-disabled">共享只读</span></div>
             </div>
           </div>
         </div>
@@ -177,6 +211,14 @@
           <button type="button" class="toggle-switch" :class="{ active: form.enabled }" @click="form.enabled = !form.enabled">
             <span class="knob"></span>
           </button>
+        </div>
+        <div v-if="!form.id" class="form-row">
+          <label>归属可见性</label>
+          <div class="kind-picker">
+            <button type="button" class="kind-opt" :class="{ active: form.visibility === 'personal' }" @click="form.visibility = 'personal'">个人（仅自己）</button>
+            <button type="button" class="kind-opt" :class="{ active: form.visibility === 'public' }" @click="form.visibility = 'public'">公共（全员可用）</button>
+          </div>
+          <p class="field-hint">公共技能对所有成员可见并在对话中自动生效；个人技能仅自己可用。</p>
         </div>
         <div v-if="editorError" class="editor-error">{{ editorError }}</div>
         <div class="modal-actions">
@@ -269,10 +311,10 @@ const loadError = ref('')
 const showEditor = ref(false)
 const saving = ref(false)
 const editorError = ref('')
-const form = reactive({ id: '', name: '', kind: 'prompt', scope: 'chat', description: '', content: '', enabled: true })
+const form = reactive({ id: '', name: '', kind: 'prompt', scope: 'chat', description: '', content: '', enabled: true, visibility: 'personal' })
 
 // 分组折叠状态（内置/我的）
-const collapsed = reactive({ builtin: false, custom: false })
+const collapsed = reactive({ builtin: false, custom: false, shared: false })
 
 // 导入本地技能文件
 const fileInput = ref(null)
@@ -298,8 +340,10 @@ const polishPlaceholder = `{
 const SCOPE_LABELS = { chat: '对话', url_import: '链接解析', polish: '正文清洗' }
 function scopeLabel(scope) { return SCOPE_LABELS[scope] || scope || '对话' }
 
-const builtinSkills = computed(() => skills.value.filter(s => s.builtin))
-const customSkills = computed(() => skills.value.filter(s => !s.builtin))
+const builtinSkills = computed(() => skills.value.filter(s => s.builtin && !s.is_shared))
+const customSkills = computed(() => skills.value.filter(s => !s.builtin && !s.is_shared))
+// 他人公开共享的技能：全员可见、只读引用（不可开关/编辑/删除）
+const sharedSkills = computed(() => skills.value.filter(s => s.is_shared))
 
 function showToast(message, error = false) {
   toast.value = { message, error }
@@ -404,7 +448,7 @@ async function onImportFile(event) {
 }
 
 function openCreate() {
-  Object.assign(form, { id: '', name: '', kind: 'prompt', scope: 'chat', description: '', content: '', enabled: true })
+  Object.assign(form, { id: '', name: '', kind: 'prompt', scope: 'chat', description: '', content: '', enabled: true, visibility: 'personal' })
   editorError.value = ''
   showEditor.value = true
 }
@@ -442,6 +486,7 @@ async function save() {
         name: form.name, kind: form.kind, description: form.description,
         content: form.content, enabled: form.enabled,
         scope: form.kind === 'playbook' ? form.scope : null,
+        visibility: form.visibility,
       })
       showToast('技能已创建')
     }
@@ -599,6 +644,11 @@ onMounted(load)
 .kind-badge.playbook { background: #e8eef7; color: #4a6a9a; }
 .scope-badge { background: #f2ece2; color: var(--color-text-secondary); }
 .builtin-badge { background: #f6e2c8; color: #a9713a; }
+.vis-badge { font-size: 11px; padding: 2px 8px; border-radius: 999px; font-weight: 600; }
+.vis-badge.personal { background: #eef0f3; color: #6a7280; }
+.vis-badge.public { background: #e6f2ee; color: #2f7d63; }
+.owner-badge { font-size: 11px; padding: 2px 8px; border-radius: 999px; background: #f2ece2; color: var(--color-text-secondary); }
+.skill-card.shared { background: #fbfdfc; border-style: dashed; }
 .card-desc { font-size: 13px; color: var(--color-text-secondary); line-height: 1.6; margin-bottom: 8px; }
 .card-content {
   font-size: 12px; line-height: 1.5; color: #6b6155; background: #fbf8f3;

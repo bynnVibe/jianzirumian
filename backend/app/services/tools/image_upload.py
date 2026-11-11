@@ -13,6 +13,25 @@ from app.services.tools.base import BaseTool, ToolContext, ToolResult, register_
 class ImageUploadTool(BaseTool):
     name = "image_upload"
     description = "识别图片中的文字并存入知识库"
+    namespace = "attachment"
+    tags = ("ocr", "image", "ingest", "write")
+    scenarios = (
+        "用户拖入图片并要求「上传/保存/加入知识库」",
+        "把图片中的手写笔记识别后入库",
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "file_path": {"type": "string", "description": "待入库的图片文件路径"},
+            "filename": {"type": "string", "description": "图片文件名"},
+            "kb_id": {"type": "string", "description": "目标知识库 ID（空=默认库）"},
+            "visibility": {"type": "string", "enum": ["private", "public"], "description": "可见性"},
+        },
+        "required": ["file_path"],
+    }
+    permissions = ("authenticated",)
+    risk_level = "medium"
+    status = "active"
 
     async def run(self, ctx: ToolContext, **kwargs) -> ToolResult:
         from app.services.chat_actions import validate_execution

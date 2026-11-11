@@ -16,6 +16,25 @@ logger = logging.getLogger("jianziruyang.tools.knowledge_summarize")
 class KnowledgeSummarizeTool(BaseTool):
     name = "knowledge_summarize"
     description = "识别/解析附件内容后，用 LLM 总结要点（默认不入库）"
+    namespace = "knowledge"
+    tags = ("summarize", "llm", "extract", "attachment")
+    scenarios = (
+        "用户拖入图片/文档并要求「总结/提炼/概括/提取重点」",
+        "长文档解析后生成结构化摘要而非灌入原文",
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "file_path": {"type": "string", "description": "待总结的附件文件路径"},
+            "filename": {"type": "string", "description": "附件文件名"},
+            "kind": {"type": "string", "enum": ["image", "word", "pdf"], "description": "附件类型"},
+            "save_to_kb": {"type": "boolean", "description": "是否将摘要写入知识库（默认 false）"},
+        },
+        "required": ["file_path", "kind"],
+    }
+    permissions = ()
+    risk_level = "low"
+    status = "active"
 
     async def _extract_text(self, ctx: ToolContext) -> str:
         if ctx.kind == "image":

@@ -21,11 +21,14 @@ import httpx
 
 from app.config import settings as app_settings
 from app.core.request_budget import remaining, iterate, close_resources
+from app.core import db
 from app.core import observability as agent_obs
 from app.services.gateway import keys as key_svc
 from app.services.gateway import logs as log_svc
 from app.services.gateway import rules as rule_svc
 from app.services.gateway import security
+from app.services.gateway import security_events as sec_event_svc
+from app.services.gateway import semantic_cache
 from app.services.gateway import settings as settings_svc
 from app.services.gateway import upstream
 from app.services.gateway import upstreams as up_svc
@@ -91,6 +94,8 @@ class Ctx:
         self.key_row: dict = {}
         self.model_req = ""
         self.stream = False
+        # 用户密钥配额用尽后自动降级为公共密钥的标记（友好提示/审计用）
+        self.degraded_from_user_key = False
         # 请求类型：chat（默认）/ embeddings / rerank（与 chat 通道隔离）
         self.kind = "chat"
         # 业务路由提示（role/显式规则/发起用户）
@@ -110,6 +115,13 @@ class Ctx:
         self.model_mapped = ""
         self.upstream_url = ""
         self.retries = 0
+        # 语义缓存（需求：构建在网关层）：仅 chat_answer/assistant 且业务层传入
+        # _gw_cache_* 提示时启用；命中则合成响应、跳过上游 LLM。
+        self.cache_enabled = False
+        self.cache_query = ""
+        self.cache_scope = "personal"
+        self.cache_realtime = False
+        self.cache_hit = False
 
 
 def _requested_tool_names(body: dict) -> List[str]:
@@ -146,6 +158,17 @@ def prepare(body: dict, raw_key: str, client_ip: str = "", kind: str = "chat") -
         ctx.role = {"embeddings": "embed", "rerank": "rerank"}.get(ctx.kind, "")
     ctx.rule_id = str(body.get("_gw_rule_id") or "")
     ctx.user_id = str(body.get("_gw_user_id") or "")
+    # 语义缓存提示（由业务层在意图识别后经 extra_body 注入）：
+    # _gw_cache_query=意图识别后的问题（缓存键）、_gw_cache_scope=public|personal、
+    # _gw_cache_realtime=是否实时。仅对回答类角色且无工具调用时启用。
+    ctx.cache_query = str(body.get("_gw_cache_query") or "")
+    ctx.cache_scope = "public" if str(body.get("_gw_cache_scope") or "") == "public" else "personal"
+    ctx.cache_realtime = bool(body.get("_gw_cache_realtime"))
+    ctx.cache_enabled = (
+        kind == "chat" and ctx.role in ("chat_answer", "assistant")
+        and bool(ctx.cache_query) and not _requested_tool_names(body)
+        and semantic_cache.semantic_cache_enabled()
+    )
     base = {
         "id": ctx.log_id, "created_at": ctx.created_at, "client_ip": ctx.client_ip,
         "model_requested": ctx.model_req, "stream": ctx.stream,
@@ -155,18 +178,57 @@ def prepare(body: dict, raw_key: str, client_ip: str = "", kind: str = "chat") -
         "role": ctx.role,
     }
 
-    # 1. 密钥鉴权
+    # 1. 密钥鉴权（用户密钥总配额用尽时自动降级公共密钥，不阻碍系统正常使用）
     try:
         ctx.key_row = key_svc.authenticate(raw_key)
         base["key_id"] = ctx.key_row["id"]
         base["key_name"] = ctx.key_row.get("name") or ""
         ctx.tracer.add("auth", "密钥鉴权", "ok", f"密钥「{base['key_name']}」校验通过")
     except key_svc.KeyRejected as e:
-        ctx.tracer.add("auth", "密钥鉴权", "error", e.message)
+        degraded = False
+        if e.code == "quota_exceeded" and raw_key:
+            # 用户密钥配额用尽 → 降级切换公共密钥（若该密钥确为用户密钥）
+            row = db.query_one("SELECT id, key_type FROM gateway_keys WHERE key_hash=?",
+                               (key_svc._hash(raw_key),))
+            if row and (row.get("key_type") or "user") == "user":
+                pub = key_svc.find_public_key()
+                pub_plain = key_svc._plain_of(pub["id"]) if pub else ""
+                if pub_plain:
+                    try:
+                        ctx.key_row = key_svc.authenticate(pub_plain)
+                        base["key_id"] = ctx.key_row["id"]
+                        base["key_name"] = ctx.key_row.get("name") or ""
+                        ctx.degraded_from_user_key = True
+                        degraded = True
+                        ctx.tracer.add(
+                            "auth", "密钥鉴权", "warn",
+                            f"用户密钥配额用尽（{e.message}），已自动降级为公共密钥"
+                            f"「{base['key_name']}」继续服务")
+                        logger.warning("[网关密钥] 用户密钥配额用尽，降级公共密钥: user=%s err=%s",
+                                       ctx.user_id or "-", e.message)
+                    except key_svc.KeyRejected:
+                        pass
+        if not degraded:
+            ctx.tracer.add("auth", "密钥鉴权", "error", e.message)
+            log_svc.write_log({**base, "status": "error", "status_code": e.status_code,
+                               "latency_ms": _latency(ctx), "trace_steps": ctx.tracer.dump(),
+                               "error": e.message, "risk_level": "none"})
+            raise GatewayError(e.status_code, e.message, e.code)
+
+    # 1b. 每用户配额与流控：公共密钥按用户设每日限额（用尽提示联系管理员）；
+    #     用户密钥执行每分钟流控（总配额已在鉴权/认领阶段执行）
+    try:
+        key_svc.enforce_user_quota(ctx.key_row, ctx.user_id)
+    except key_svc.QuotaRejected as e:
+        ctx.tracer.add("quota", "用户配额/流控", "error", e.message)
         log_svc.write_log({**base, "status": "error", "status_code": e.status_code,
                            "latency_ms": _latency(ctx), "trace_steps": ctx.tracer.dump(),
                            "error": e.message, "risk_level": "none"})
-        raise GatewayError(e.status_code, e.message, e.code)
+        raise GatewayError(e.status_code, e.message, e.code) from e
+    if (ctx.key_row.get("key_type") or "") in ("public", "user"):
+        ctx.tracer.add("quota", "用户配额/流控", "ok",
+                       f"密钥类型={ctx.key_row.get('key_type')}，"
+                       f"用户={ctx.user_id or '-'} 每用户限额/流控校验通过")
 
     # 2. 模型授权（此时尚不扣减请求次数）
     if not key_svc.check_model_allowed(ctx.key_row, ctx.model_req):
@@ -195,6 +257,19 @@ def prepare(body: dict, raw_key: str, client_ip: str = "", kind: str = "chat") -
         "security", "安全审计", sec_status,
         f"模式={mode}，命中 {len(findings)} 项，风险等级={risk_level}"
         + (f"，动作={ctx.audit_action}" if ctx.audit_action else ""))
+    # 3b. 风险事件闭环：命中风险即在安全审计中心落事件（前端轮询弹窗告警，
+    #     处理策略由模型生成建议，运维处理后留痕）；事件落库失败不阻断主流程
+    if findings:
+        try:
+            sec_event_svc.record_event(
+                log_id=ctx.log_id, client_ip=ctx.client_ip, user_id=ctx.user_id,
+                role=ctx.role, model=ctx.model_req, key_name=base.get("key_name", ""),
+                risk_level=risk_level, risk_score=risk_score, findings=findings,
+                audit_action=ctx.audit_action, settings=ctx.settings)
+            ctx.tracer.add("security", "风险事件记录", "ok",
+                           "已写入安全审计中心（待处理），前端将弹窗告警")
+        except Exception as e:
+            logger.warning("安全事件落库失败（不阻断请求）: %s", e)
     if ctx.audit_action == "block":
         log_svc.write_log({
             **base, "status": "blocked", "status_code": 403, "latency_ms": _latency(ctx),
@@ -249,6 +324,11 @@ def prepare(body: dict, raw_key: str, client_ip: str = "", kind: str = "chat") -
     ctx.tracer.add("quota", "原子配额认领", "ok",
                    f"密钥「{ctx.key_row.get('name') or base['key_name']}」已认领第"
                    f" {ctx.key_row['request_count']} 次请求（配额 0=不限）")
+    # 每用户请求计量（公共密钥每日限额/流控与「我的配额」展示的数据源）
+    try:
+        key_svc.record_usage(ctx.key_row["id"], ctx.user_id, requests=1)
+    except Exception:
+        pass
     return ctx
 
 
@@ -277,14 +357,20 @@ def _finalize(ctx: Ctx, *, status: str, status_code: int, prompt_tokens: int = 0
     if ctx.finalized:
         return
     ctx.finalized = True
-    if not (prompt_tokens or completion_tokens) and response_preview:
+    if not (prompt_tokens or completion_tokens) and response_preview and not ctx.cache_hit:
         completion_tokens = agent_obs.estimate_tokens(response_preview)
         prompt_tokens = agent_obs.estimate_tokens(json.dumps(ctx.forward_body.get("messages") or [], ensure_ascii=False))
     total = int(prompt_tokens or 0) + int(completion_tokens or 0)
-    try:
-        key_svc.consume_tokens(ctx.key_row.get("id", ""), total)
-    except Exception:
-        pass
+    # 缓存命中未消耗上游资源 → 不扣减密钥 Token 用量/不计入用户 Token 配额
+    if not ctx.cache_hit:
+        try:
+            key_svc.consume_tokens(ctx.key_row.get("id", ""), total)
+        except Exception:
+            pass
+        try:
+            key_svc.record_usage(ctx.key_row.get("id", ""), ctx.user_id, tokens=total)
+        except Exception:
+            pass
     req_tools = _requested_tool_names(ctx.forward_body)
     all_tools = list(dict.fromkeys(req_tools + [
         (tc.get("function", {}) or {}).get("name", "") for tc in (tool_calls or [])
@@ -304,6 +390,86 @@ def _finalize(ctx: Ctx, *, status: str, status_code: int, prompt_tokens: int = 0
 
 
 # ---------------------------------------------------------------------------
+# 语义缓存（构建在网关层）：命中查找 / 成功回写 / 合成 OpenAI 兼容响应
+# ---------------------------------------------------------------------------
+
+def _cache_min_answer() -> int:
+    return int(getattr(app_settings, "SEMANTIC_CACHE_MIN_ANSWER_CHARS", 30))
+
+
+async def _cache_lookup(ctx: Ctx) -> Optional[str]:
+    """出网前查缓存；命中返回缓存回答文本并记入链路，未命中/异常返回 None。"""
+    if not ctx.cache_enabled:
+        return None
+    try:
+        hit = await semantic_cache.lookup(
+            ctx.user_id, ctx.cache_query, scope=ctx.cache_scope, is_realtime=ctx.cache_realtime)
+    except Exception as e:
+        logger.warning("[网关语义缓存] 查询失败，走上游: %s", e)
+        return None
+    if hit and (hit.get("answer") or "").strip():
+        ctx.tracer.add("cache", "语义缓存", "ok",
+                       f"命中（scope={hit.get('scope')} 相似度={hit.get('score')} "
+                       f"ttl={hit.get('ttl_label')}），跳过上游 LLM")
+        return hit.get("answer") or ""
+    ctx.tracer.add("cache", "语义缓存", "ok",
+                   f"未命中（scope={ctx.cache_scope} realtime={ctx.cache_realtime}），调用上游")
+    return None
+
+
+async def _cache_store(ctx: Ctx, text: str) -> None:
+    """上游成功产出正文后回写缓存（失败静默降级，不阻塞响应）。"""
+    if not ctx.cache_enabled:
+        return
+    ans = (text or "").strip()
+    if len(ans) < _cache_min_answer():
+        return
+    try:
+        await semantic_cache.store(
+            ctx.user_id, ctx.cache_query, ans, None,
+            scope=ctx.cache_scope, is_realtime=ctx.cache_realtime)
+    except Exception as e:
+        logger.warning("[网关语义缓存] 回写失败: %s", e)
+
+
+def _synthetic_completion(ctx: Ctx, text: str) -> dict:
+    """由缓存文本合成 OpenAI 兼容的非流式 chat.completion 响应。"""
+    return {
+        "id": f"chatcmpl-cache-{ctx.log_id}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": ctx.model_req,
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": text},
+            "finish_reason": "stop",
+        }],
+        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        "_gw_cache": "hit",
+    }
+
+
+def _synthetic_stream(ctx: Ctx, text: str) -> List[str]:
+    """由缓存文本合成 OpenAI 兼容的流式 SSE 块序列（含 [DONE]）。"""
+    cid = f"chatcmpl-cache-{ctx.log_id}"
+    created = int(time.time())
+
+    def _chunk(delta: dict, finish: Optional[str]) -> str:
+        obj = {
+            "id": cid, "object": "chat.completion.chunk", "created": created,
+            "model": ctx.model_req,
+            "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
+        }
+        return "data: " + json.dumps(obj, ensure_ascii=False) + "\n\n"
+
+    return [
+        _chunk({"role": "assistant", "content": text}, None),
+        _chunk({}, "stop"),
+        "data: [DONE]\n\n",
+    ]
+
+
+# ---------------------------------------------------------------------------
 # 非流式响应
 # ---------------------------------------------------------------------------
 
@@ -320,6 +486,12 @@ async def json_response(ctx: Ctx) -> tuple[int, dict]:
 
 
 async def _json_response(ctx: Ctx) -> tuple[int, dict]:
+    # 语义缓存命中：直接合成响应返回，不调用任何上游
+    cached = await _cache_lookup(ctx)
+    if cached is not None:
+        ctx.cache_hit = True
+        _finalize(ctx, status="ok", status_code=200, response_preview=cached)
+        return 200, _synthetic_completion(ctx, cached)
     last_err = ""
     for idx, up in enumerate(ctx.candidates[:_max_attempts(ctx)]):
         ctx.retries = idx
@@ -352,6 +524,9 @@ async def _json_response(ctx: Ctx) -> tuple[int, dict]:
             usage = normalized.get("usage") or {}
             pt, ct = int(usage.get("prompt_tokens") or 0), int(usage.get("completion_tokens") or 0)
             preview, tool_calls = _extract_preview(normalized)
+            # 成功产出正文且非工具调用 → 回写语义缓存（按 public/personal + 实时阶梯 TTL）
+            if sc < 400 and not tool_calls:
+                await _cache_store(ctx, preview)
             ctx.tracer.add("response", "响应下游", "ok",
                            f"tokens={pt}+{ct}，预览 {len(preview)} 字")
             ctx.tracer.add("log", "日志入库", "ok", "已留存调用记录与链路")
@@ -493,6 +668,15 @@ def _network_timeout(ctx):
 
 async def stream_response(ctx: Ctx) -> AsyncGenerator[str, None]:
     """收到协议终止信号才成功；产出首块后不切换，所有重试共用预算。"""
+    # 语义缓存命中：合成流式响应直接下发，不调用任何上游
+    cached = await _cache_lookup(ctx)
+    if cached is not None:
+        ctx.cache_hit = True
+        for sse in _synthetic_stream(ctx, cached):
+            yield sse
+        ctx.tracer.add("response", "响应下游", "ok", "语义缓存命中，合成流式响应")
+        _finalize(ctx, status="ok", status_code=200, response_preview=cached)
+        return
     acc_text: List[str] = []
     usage = {"pt": 0, "ct": 0}
     tool_names: List[str] = []
@@ -543,6 +727,9 @@ async def stream_response(ctx: Ctx) -> AsyncGenerator[str, None]:
                         logger.info("[网关出网] 路由规则「%s」→ 模型「%s」 via 上游「%s」 流式 %dms",
                                     (ctx.rule or {}).get("model_pattern", ""), mapped, up["name"],
                                     int((time.monotonic() - t0) * 1000))
+                        # 成功结束且非工具调用 → 回写语义缓存
+                        if not tool_names:
+                            await _cache_store(ctx, "".join(acc_text))
                         yield sse
                         break
                     for line in sse.splitlines():
@@ -607,6 +794,3 @@ def _account_sse(sse: str, acc_text: List[str], usage: dict, tool_names: List[st
                         tool_names.append(name)
     except Exception:
         pass
-
-
-## 11

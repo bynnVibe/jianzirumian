@@ -39,6 +39,7 @@ from app.core.llm import LLMFactory
 from app.core.request_budget import close_resources
 from app.core.vector_store import vector_store
 from app.services.knowledge import knowledge_service
+from app.services.tools import router as tool_router
 from app.services.web_search import web_search
 from app.services.wiki import _extract_json, _llm_complete
 
@@ -79,6 +80,19 @@ def need_search_event(query: str, reason: str = "") -> str:
 def clarify_event(question: str, options: Optional[List[str]] = None) -> str:
     """HITL：证据不足且意图模糊时，向用户追问澄清。"""
     return sse("clarify", {"question": question, "options": options or []})
+
+
+def capability_gap_event(gap_id: str, scenario: str, scenario_label: str,
+                         solutions: List[dict], query: str = "") -> str:
+    """HITL（需求5）：系统无合适工具/能力时，下发候选 CLI 方案由用户选择。"""
+    return sse("capability_gap", {
+        "gap_id": gap_id,
+        "scenario": scenario,
+        "scenario_label": scenario_label,
+        "solutions": solutions,
+        "query": query,
+        "message": "当前系统没有合适的工具解决这个问题，可选择以下命令行方案执行（沙箱运行）：",
+    })
 
 
 def _clip(text: str, limit: int = _MAX_OBSERVATION_CHARS) -> str:
@@ -320,6 +334,7 @@ async def run_chat_agent(
     user_id: str,
     rule_id: str,
     model: str = "",
+    session_id: str = "",
     use_knowledge: bool,
     use_search: bool,
     skip_search_prompt: bool,
@@ -378,14 +393,14 @@ async def run_chat_agent(
             async for ev in _plan_and_execute(
                 agent_llm, state, query, user_id, history_ctx, memory_text,
                 use_knowledge, use_search, skip_search_prompt, allowed_tools,
-                _run_tool, _remaining, _emit_timeout, result,
+                _run_tool, _remaining, _emit_timeout, result, session_id=session_id,
             ):
                 yield ev
         else:
             async for ev in _react_loop(
                 agent_llm, state, query, user_id, history_ctx, memory_text,
                 use_knowledge, use_search, skip_search_prompt, allowed_tools,
-                _run_tool, _remaining, _emit_timeout, result,
+                _run_tool, _remaining, _emit_timeout, result, session_id=session_id,
             ):
                 yield ev
         if result.get("status") == "error":
@@ -396,6 +411,7 @@ async def run_chat_agent(
         async for ev in _answer_phase(
             agent_llm, state, query, user_id, history_ctx, memory_text, system_prompt,
             use_knowledge, use_search, skip_search_prompt, _remaining, _emit_timeout, result,
+            session_id=session_id,
         ):
             yield ev
     except (asyncio.CancelledError, GeneratorExit):
@@ -409,7 +425,7 @@ async def run_chat_agent(
 
 async def _react_loop(agent_llm, state, query, user_id, history_ctx, memory_text,
                       use_knowledge, use_search, skip_search_prompt, allowed_tools,
-                      _run_tool, _remaining, _emit_timeout, result):
+                      _run_tool, _remaining, _emit_timeout, result, session_id=""):
     """ReAct 决策 / 工具循环（Thought→Action→Observation 回喂下一轮）。"""
     messages = _build_decision_messages(memory_text, history_ctx, query, use_knowledge, use_search)
     for step in range(MAX_TOOL_STEPS):
@@ -465,6 +481,14 @@ async def _react_loop(agent_llm, state, query, user_id, history_ctx, memory_text
         tool_error = observation if observation.startswith(("未知工具", f"工具 {tool} 执行出错")) else ""
         obs.record_tool(tool, args, observation, t0=t0,
                         status="error" if tool_error else "ok", error=tool_error, fail_trace=False)
+        # 需求8：主聊天路径的检索/联网工具也登记 Tool Routing（之前仅 record_tool 写 span，
+        # 未写 tool_routing 表 → 面板无记录）。
+        obs.record_tool_routing(
+            tool_name=tool, namespace="retrieval", user_id=user_id, session_id=session_id,
+            routed_by="react_agent", args=args, risk_level="low",
+            status="error" if tool_error else "ok", success=not tool_error,
+            t0=t0, error=tool_error,
+        )
         yield sse("tool", {"tool": tool, "state": "end", "summary": _summary(observation)})
 
         # HITL：只知识检索、未开联网、知识库空结果 → 询问是否联网（本轮暂停）
@@ -482,7 +506,7 @@ async def _react_loop(agent_llm, state, query, user_id, history_ctx, memory_text
 
 async def _plan_and_execute(agent_llm, state, query, user_id, history_ctx, memory_text,
                             use_knowledge, use_search, skip_search_prompt, allowed_tools,
-                            _run_tool, _remaining, _emit_timeout, result):
+                            _run_tool, _remaining, _emit_timeout, result, session_id=""):
     """Plan&Execute：规划步骤清单 → 顺序执行（失败标记后继续，v1 不动态重规划）。"""
     yield sse("status", {"phase": "planning", "message": "正在规划解题步骤..."})
     messages = _build_plan_messages(memory_text, history_ctx, query, use_knowledge, use_search)
@@ -534,6 +558,13 @@ async def _plan_and_execute(agent_llm, state, query, user_id, history_ctx, memor
         tool_error = observation if observation.startswith(("未知工具", f"工具 {tool} 执行出错")) else ""
         obs.record_tool(f"{tool}#step{i}", args, observation, t0=t0,
                         status="error" if tool_error else "ok", error=tool_error, fail_trace=False)
+        # 需求8：Plan&Execute 路径同样登记 Tool Routing。
+        obs.record_tool_routing(
+            tool_name=tool, namespace="retrieval", user_id=user_id, session_id=session_id,
+            routed_by="plan_execute", args=args, risk_level="low",
+            status="error" if tool_error else "ok", success=not tool_error,
+            t0=t0, error=tool_error,
+        )
         yield sse("tool", {"tool": tool, "state": "end", "index": i, "total": len(clean_steps),
                            "summary": _summary(observation), "failed": bool(tool_error)})
 
@@ -548,7 +579,7 @@ async def _plan_and_execute(agent_llm, state, query, user_id, history_ctx, memor
 
 async def _answer_phase(agent_llm, state, query, user_id, history_ctx, memory_text, system_prompt,
                         use_knowledge, use_search, skip_search_prompt,
-                        _remaining, _emit_timeout, result):
+                        _remaining, _emit_timeout, result, session_id=""):
     """回答阶段：统一格式化累积命中 → 流式生成 → 引用核对 → obs 度量 → 回填 result。"""
     if _remaining() <= 0:
         yield _emit_timeout("answer deadline exceeded")
@@ -563,30 +594,51 @@ async def _answer_phase(agent_llm, state, query, user_id, history_ctx, memory_te
         )
         obs.note_segment("knowledge", context_text)
 
-    if context_text.strip():
+    # 2. 联网搜索结果格式化（与知识上下文一并交由路由决策权重）
+    search_results: List[dict] = []
+    search_context = ""
+    if state.web_results:
+        search_context = knowledge_service.build_search_context(state.web_results)
+        if search_context:
+            obs.note_segment("search", search_context)
+            search_results = [r.to_dict() for r in state.web_results]
+
+    # 场景感知路由（req5）：实时查询（天气/新闻/股价等）或知识库无命中时，
+    # 联网搜索结果作为主依据，避免「知识库未收录、请勿编造」指令淹没真实搜索结果（答非所问根因）
+    route = tool_router.route_tools(query, use_knowledge=use_knowledge, use_search=use_search)
+    kb_has_content = bool(context_text.strip())
+    search_primary = bool(search_context) and (
+        route.search_primary or route.is_realtime or not kb_has_content
+    )
+
+    if search_primary:
+        parts = [f"用户的问题如下：\n{query}\n", f"【联网搜索结果】\n{search_context}\n"]
+        if kb_has_content:
+            parts.append(f"【知识库内容（补充参考）】\n{context_text}\n")
+        reqs = [
+            "要求：",
+            "1. 【核心】请基于联网搜索结果回答问题，给出具体、准确、最新的信息",
+            "2. 回答中标注来源链接（网络来源 X）",
+            "3. 若搜索结果不足以回答问题，请如实说明，不要用无关内容强行作答",
+        ]
+        if kb_has_content:
+            reqs.append("4. 知识库内容仅作补充参考，与搜索结果冲突时以搜索结果为准")
+        parts.append("\n".join(reqs))
+        augmented_query = "\n".join(parts)
+    elif kb_has_content:
         augmented_query = knowledge_service.build_knowledge_prompt(query, context_text, True)
+        if search_context:
+            augmented_query += (
+                f"\n\n【联网搜索结果（供参考）】\n{search_context}\n\n"
+                f"要求：\n1. 【核心】优先以知识库内容为主要回答依据\n"
+                f"2. 联网搜索结果仅作补充参考\n3. 冲突时以知识库为准\n"
+                f"4. 标注引用时区分「来源 X」（知识库）和「网络来源 X」（搜索）"
+            )
     elif skip_search_prompt:
         # 用户已选择「直接回答」：不受知识库约束，用模型自身知识作答
         augmented_query = knowledge_service.build_knowledge_prompt(query, "", False)
     else:
         augmented_query = knowledge_service.build_knowledge_prompt(query, "", use_knowledge)
-
-    # 2. 联网搜索结果并入
-    search_results: List[dict] = []
-    if state.web_results:
-        search_context = knowledge_service.build_search_context(state.web_results)
-        if search_context:
-            obs.note_segment("search", search_context)
-            if use_knowledge and context_text.strip():
-                augmented_query += (
-                    f"\n\n【联网搜索结果（供参考）】\n{search_context}\n\n"
-                    f"要求：\n1. 【核心】优先以知识库内容为主要回答依据\n"
-                    f"2. 联网搜索结果仅作补充参考\n3. 冲突时以知识库为准\n"
-                    f"4. 标注引用时区分「来源 X」（知识库）和「网络来源 X」（搜索）"
-                )
-            else:
-                augmented_query += f"\n\n【联网搜索结果】\n{search_context}\n\n请基于以上搜索结果回答问题，并标注来源链接。"
-            search_results = [r.to_dict() for r in state.web_results]
 
     # 3. 回传来源/搜索结果，供前端来源面板与流水线捕获（与快路径 status 事件一致）
     if sources:
@@ -595,6 +647,9 @@ async def _answer_phase(agent_llm, state, query, user_id, history_ctx, memory_te
     if search_results:
         yield sse("status", {"phase": "searched", "message": f"联网搜索到 {len(search_results)} 条结果",
                              "search_results": search_results})
+
+    # 3.5 能力缺口检测已后移至「回答生成之后」（见下方 5.5 段，与 chat.py 快路径一致）：
+    # 以回答是否真正解决用户问题为准，避免答非所问却结束对话。
 
     # 4. 流式生成
     yield sse("status", {"phase": "generating", "message": "正在生成回答..."})
@@ -650,6 +705,62 @@ async def _answer_phase(agent_llm, state, query, user_id, history_ctx, memory_te
             full_response += notice
             yield sse("status", {"phase": "citations_checked", "message": "已核对引用编号",
                                  "invalid_citations": invalid})
+
+    # 5.5 能力缺口检测（需求5/8，与 chat.py 快路径平行）：后移至回答生成之后。
+    # answer_failed 启发式：回答表明无法作答时，即使有搜索结果也视为不充分，
+    # 下发 capability_gap 卡片（HITL），用户选择 CLI 方案执行后回喂 Agent 判定下一步。
+    try:
+        from app.services import capability_gap as _cap_gap
+
+        answer_failed = _cap_gap.answer_indicates_failure(full_response)
+        gap_scenario = _cap_gap.detect_scenario(
+            query,
+            is_realtime=route.is_realtime,
+            has_suitable_tool=bool(route.primary_tool),
+            search_sufficient=bool(search_context) and not answer_failed,
+            kb_has_content=kb_has_content and not answer_failed,
+        )
+        if gap_scenario:
+            gap_ctx = _cap_gap.extract_context(query)
+            gap_id = _cap_gap.record_gap(
+                session_id=session_id, user_id=user_id, trace_id=obs.current_trace_id(),
+                query=query, scenario=gap_scenario, context=gap_ctx,
+            )
+            gap_solutions = _cap_gap.propose_solutions(gap_scenario, gap_ctx)
+            if gap_id and gap_solutions:
+                recipe = _cap_gap.CAPABILITY_RECIPES.get(gap_scenario, {})
+                label = recipe.get("label", gap_scenario)
+                has_low = any((s.get("risk_level") or "low") == "low" for s in gap_solutions)
+                auto = None
+                if has_low:
+                    # 需求7：低危 CLI 方案内化为模型自动执行，不弹卡等用户确认
+                    yield sse("status", {"phase": "auto_resolving",
+                                         "message": "🔧 正在自动调用命令行能力尝试解决你的问题，请耐心等待…"})
+                    auto = await _cap_gap.auto_resolve(gap_id)
+                if auto and auto.get("resolved") and auto.get("answer"):
+                    bridge = "\n\n---\n\n✅ 已通过命令行能力获取到实时数据，为你整理如下：\n\n"
+                    yield sse("token", {"content": bridge})
+                    yield sse("token", {"content": auto["answer"]})
+                    full_response += bridge + auto["answer"]
+                    obs.record_step(
+                        "capability_gap_auto",
+                        f"scenario={gap_scenario} gap_id={gap_id} resolved=1"
+                        f" rounds={len(auto.get('attempts') or [])}",
+                        fail_trace=False,
+                    )
+                else:
+                    fallback_sols = (auto or {}).get("solutions") or gap_solutions
+                    yield capability_gap_event(
+                        gap_id, gap_scenario, label, fallback_sols, query[:60],
+                    )
+                    obs.record_step(
+                        "capability_gap",
+                        f"scenario={gap_scenario} gap_id={gap_id} 候选方案={len(fallback_sols)}"
+                        f" answer_failed={answer_failed} auto={bool(auto)}",
+                        fail_trace=False,
+                    )
+    except Exception as e:
+        logger.warning("能力缺口检测失败（忽略）: %s", e)
 
     result["status"] = "ok"
     result["answer"] = full_response

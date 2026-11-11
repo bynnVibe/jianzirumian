@@ -70,13 +70,21 @@ def list_accessible_kbs(user_id: str) -> List[dict]:
         " ORDER BY created_at",
         (user_id or "",),
     )
-    # 统计各库的向量条目数
+    # 统计各库的向量条目数与来源文档数
     from app.core.vector_store import vector_store
     meta_map = vector_store._load_metadata()
     counts: dict[str, int] = {}
+    sources: dict[str, set] = {}
     for meta in meta_map.values():
         kid = meta.get("kb_id", "")
         counts[kid] = counts.get(kid, 0) + 1
+        sources.setdefault(kid, set()).add(meta.get("source_image", ""))
+
+    # Token 估算：按来源文档的解析文本字数累计（中文约 1 字 ≈ 1 token）
+    from app.services.records import upload_records
+    all_records, _ = upload_records.list_records(limit=10000, offset=0)
+    text_len = {rec["image_path"]: len(rec.get("ocr_text") or "") for rec in all_records}
+    tokens = {kid: sum(text_len.get(s, 0) for s in srcs) for kid, srcs in sources.items()}
 
     result = []
     for r in rows:
@@ -87,6 +95,8 @@ def list_accessible_kbs(user_id: str) -> List[dict]:
             "visibility": r["visibility"],
             "owner_id": r["owner_id"],
             "entry_count": counts.get(r["id"], 0),
+            "doc_count": len(sources.get(r["id"], set())),
+            "token_estimate": tokens.get(r["id"], 0),
             "created_at": r["created_at"],
         })
     return result

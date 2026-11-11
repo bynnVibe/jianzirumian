@@ -214,17 +214,29 @@ class Settings:
     # 参与主题归纳的单条提问最小长度（过滤「好的」「谢谢」等寒暄）
     WIKI_CONVERSATION_MIN_QUERY_LEN: int = int(os.getenv("WIKI_CONVERSATION_MIN_QUERY_LEN", "4"))
 
-    # ---- 主问答语义缓存（按用户历史问答，语义相似问题命中直回、绕过检索路由） ----
+    # ---- 语义缓存（构建在网关层：代理拦截 chat_answer，命中直回、跳过上游 LLM） ----
+    # 缓存分「公共/个人」域：公共域所有用户共享复用，个人域仅本用户可见；
+    # 并按「实时/非实时」+ 命中热度分档设置 TTL（阶梯形过期）。
     # 总开关（可在系统设置页运行时覆盖）
     SEMANTIC_CACHE_ENABLED: bool = os.getenv("SEMANTIC_CACHE_ENABLED", "true").lower() == "true"
     # 命中判定阈值（余弦相似度，越高越严格）
     SEMANTIC_CACHE_THRESHOLD: float = float(os.getenv("SEMANTIC_CACHE_THRESHOLD", "0.90"))
-    # 单用户缓存条目上限（超出按最近最少使用淘汰）
+    # 单用户（个人域）缓存条目上限（超出按最近最少使用淘汰）
     SEMANTIC_CACHE_MAX_ENTRIES: int = int(os.getenv("SEMANTIC_CACHE_MAX_ENTRIES", "200"))
     # 参与匹配/写入的提问最小长度（过滤过短寒暄）
     SEMANTIC_CACHE_MIN_QUESTION_CHARS: int = int(os.getenv("SEMANTIC_CACHE_MIN_QUESTION_CHARS", "4"))
     # 可写入缓存的回答最小长度（过短回答不缓存，避免污染）
     SEMANTIC_CACHE_MIN_ANSWER_CHARS: int = int(os.getenv("SEMANTIC_CACHE_MIN_ANSWER_CHARS", "30"))
+    # ---- 阶梯 TTL（实时短、非实时按命中热度升级；单位：小时/天）----
+    # 实时类（天气/新闻/股价等时效问题）：固定短 TTL，过期即失效避免陈旧数据
+    SEMANTIC_CACHE_TTL_REALTIME_HOURS: int = int(os.getenv("SEMANTIC_CACHE_TTL_REALTIME_HOURS", "2"))
+    # 非实时类三档：冷数据(命中<WARM) / 常命中(WARM≤命中<HOT) / 热点(命中≥HOT)
+    SEMANTIC_CACHE_TTL_COLD_DAYS: int = int(os.getenv("SEMANTIC_CACHE_TTL_COLD_DAYS", "3"))
+    SEMANTIC_CACHE_TTL_WARM_DAYS: int = int(os.getenv("SEMANTIC_CACHE_TTL_WARM_DAYS", "7"))
+    SEMANTIC_CACHE_TTL_HOT_DAYS: int = int(os.getenv("SEMANTIC_CACHE_TTL_HOT_DAYS", "30"))
+    # 热度阶梯阈值：命中次数达到即升档（冷→常命中→热点）
+    SEMANTIC_CACHE_WARM_HITS: int = int(os.getenv("SEMANTIC_CACHE_WARM_HITS", "3"))
+    SEMANTIC_CACHE_HOT_HITS: int = int(os.getenv("SEMANTIC_CACHE_HOT_HITS", "10"))
 
 
 settings = Settings()

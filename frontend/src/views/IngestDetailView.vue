@@ -1,5 +1,5 @@
 <template>
-  <div class="ingest-detail-view">
+  <div class="ingest-detail-view" :class="{ embedded }">
     <!-- 顶部：返回 + 标题 -->
     <div class="detail-header">
       <button class="back-btn" @click="goBack">
@@ -116,6 +116,13 @@ import UrlSource from '@/components/UrlSource.vue'
 const route = useRoute()
 const router = useRouter()
 
+const props = defineProps({
+  recordId: { type: String, default: '' },
+  src: { type: String, default: '' },
+  embedded: { type: Boolean, default: false },
+})
+const emit = defineEmits(['back'])
+
 const loading = ref(true)
 const error = ref('')
 const record = ref(null)
@@ -150,6 +157,10 @@ function formatDateTime(iso) {
 }
 
 function goBack() {
+  if (props.embedded) {
+    emit('back')
+    return
+  }
   router.push({ name: 'KnowledgeUpload', query: { tab: 'history' } })
 }
 
@@ -181,11 +192,11 @@ async function loadDetail() {
   loading.value = true
   error.value = ''
   try {
-    const res = await getIngestHistoryContent(route.params.recordId)
+    const res = await getIngestHistoryContent(props.recordId || route.params.recordId)
     record.value = res.data.record || null
     fragments.value = res.data.fragments || []
     // 来源预览复用现有端点：优先用接口返回的源路径，回退到列表页传入参数
-    sourcePath = res.data.record?.source_path || route.query.src || ''
+    sourcePath = res.data.record?.source_path || props.src || route.query.src || ''
     pdfPreviewPath = res.data.record?.pdf_preview_path || ''
   } catch (e) {
     error.value = e.response?.data?.detail || e.message || '加载失败'
@@ -206,6 +217,7 @@ onMounted(loadDetail)
   height: 100%;
   overflow-y: auto;
 }
+.ingest-detail-view.embedded { max-width: none; padding: 16px 20px; box-sizing: border-box; }
 
 /* ---------- 顶部返回 ---------- */
 .detail-header { margin-bottom: 18px; }

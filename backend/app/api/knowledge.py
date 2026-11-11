@@ -1163,13 +1163,16 @@ async def clear_knowledge(_admin: dict = Depends(require_admin)):
 async def list_knowledge_entries(
     request: Request,
     q: str = "",
+    kb_id: str = "",
     current_user: dict | None = Depends(get_optional_user),
 ):
     """列出知识库中可见条目（按来源图片分组，游客仅返回前 3 条公开条目）
 
-    支持通过 q 参数按标题（title）或文件名（filename）模糊搜索。
+    支持通过 q 参数按标题（title）或文件名（filename）模糊搜索，
+    kb_id 参数限定只返回指定知识库的条目。
     """
     is_guest = getattr(request.state, "is_guest", False)
+    kb_id_filter = (kb_id or "").strip()
 
     entries = vector_store.get_all_entries()
     if not entries:
@@ -1205,6 +1208,8 @@ async def list_knowledge_entries(
         kb_id = entry.get("kb_id", "")
         # 知识库隔离：不属于可见库的条目直接跳过
         if kb_id and kb_id not in accessible_kb_ids:
+            continue
+        if kb_id_filter and kb_id != kb_id_filter:
             continue
 
         visibility = rec.get("visibility", "public")
@@ -1331,6 +1336,7 @@ async def delete_knowledge_by_source(
     upload_records.delete_record_by_source(source_image)
     # llm-wiki：联动删除该来源编译出的百科卡片（向量 chunk + 镜像 + 数据行）
     wiki_service.delete_page_by_source(source_image)
+    logger.info("知识库删除条目 source=%s user=%s", source_image, user_id)
     return {"message": "条目已删除", "source_image": source_image}
 
 
@@ -1391,6 +1397,8 @@ async def move_source_to_kb(
         raise HTTPException(status_code=404, detail="未找到该来源的知识条目")
     # 同步上传记录可见性，保持列表过滤与向量元数据一致
     upload_records.update_visibility_by_source(body.source_image, target["visibility"])
+    logger.info("知识库移动条目 source=%s → kb=%s chunks=%d user=%s",
+                body.source_image, target["id"], moved, user_id)
     return {
         "message": "已移动",
         "source_image": body.source_image,
@@ -1405,10 +1413,32 @@ async def move_source_to_kb(
 # ============================================
 
 
+def _relevance_percent(score: float) -> int:
+    """把检索分数映射为直观的相关度百分比（需求5）。
+
+    向量原始 cosine 分数分布偏低（好匹配也仅 0.4~0.6），直接 ×100 会普遍
+    显示 40~60%，与用户直觉不符。此处按经验区间 [0.30, 0.85] 线性拉伸到
+    [55, 99]，保持单调与可解释；rerank 精排分（0~1）同样适用。
+    """
+    try:
+        s = max(0.0, min(1.0, float(score or 0.0)))
+    except (TypeError, ValueError):
+        return 1
+    lo, hi = 0.30, 0.85
+    if s <= lo:
+        scaled = (s / lo) * 55.0 if lo else 0.0
+    elif s >= hi:
+        scaled = 99.0
+    else:
+        scaled = 55.0 + (s - lo) / (hi - lo) * (99.0 - 55.0)
+    return max(1, min(99, int(round(scaled))))
+
+
 class KnowledgeSearchRequest(BaseModel):
     """知识库检索请求"""
     query: str
     top_k: int = 5
+    kb_id: str = ""
 
 
 @router.post("/search")
@@ -1445,7 +1475,18 @@ async def search_knowledge(
         results = await asyncio.to_thread(
             vector_store.similarity_search,
             body.query, k=body.top_k, current_user_id=current_user_id,
+            kb_ids={body.kb_id.strip()} if body.kb_id.strip() else None,
         )
+
+        # 需求5：向量原始 cosine 分数普遍偏低（好匹配也仅 0.4~0.6），叠加 rerank 精排
+        # 用交叉编码器/在线 rerank 重新打分，使相关度更贴近真实语义匹配度；
+        # rerank 不可用（未配置提供商/依赖缺失）时自动回退原始分数排序。
+        if results:
+            try:
+                from app.core import reranker
+                results = await asyncio.to_thread(reranker.rerank, body.query, results, body.top_k)
+            except Exception as _e:
+                logger.warning("检索测试 rerank 不可用，回退原始相似度: %s", _e)
 
         # 上传记录映射（补充 title、source_type、pdf_preview_path 等展示字段）
         from app.core import db as sqlite_db
@@ -1462,8 +1503,8 @@ async def search_knowledge(
                 continue
             seen.add(text_key)
             source_image = metadata.get("source_image", "")
-            # relevance score 本身已归一化到 0~1，直接换算百分比
-            relevance_pct = max(0, min(int(score * 100), 99))
+            # 需求5：把检索分数映射为直观百分比（原始 cosine/rerank 分直接 ×100 普遍偏低）
+            relevance_pct = _relevance_percent(score)
 
             # 从上传记录补充文件信息
             rec = record_map.get(source_image, {})

@@ -173,8 +173,12 @@ async def get_full_config():
     current_rerank = runtime_config.rerank_provider or settings.RERANKER_PROVIDER
 
     # 读取本地统计与最近一次真实请求结果，不在配置读取时请求模型。
-    doc_count = vector_store.get_document_count()
-    embedding_status = vector_store.embedding_status()
+    # FAISS 索引加载/Redis 连通性探测放线程池，避免同步 IO 阻塞事件循环拖慢设置页。
+    doc_count, embedding_status, redis_connected = await asyncio.gather(
+        asyncio.to_thread(vector_store.get_document_count),
+        asyncio.to_thread(vector_store.embedding_status),
+        asyncio.to_thread(lambda: file_cache.status()["connected"]),
+    )
 
     return {
         "llm_provider": current_llm,
@@ -212,7 +216,7 @@ async def get_full_config():
         "redis_config": {
             "url": effective_redis_url(),
             "enabled": effective_file_cache_enabled(),
-            "connected": file_cache.status()["connected"],
+            "connected": redis_connected,
             "ttl": settings.FILE_CACHE_TTL,
             "max_mb": settings.FILE_CACHE_MAX_MB,
         },
@@ -401,11 +405,12 @@ async def set_guest_limit(body: dict, _admin: dict = Depends(require_admin)):
 @router.get("/redis")
 async def get_redis_config(_admin: dict = Depends(require_admin)):
     """获取 Redis 文件缓存配置（仅管理员）"""
+    connected = await asyncio.to_thread(lambda: file_cache.status()["connected"])
     return {
         "success": True,
         "url": effective_redis_url(),
         "enabled": effective_file_cache_enabled(),
-        "connected": file_cache.status()["connected"],
+        "connected": connected,
         "ttl": settings.FILE_CACHE_TTL,
         "max_mb": settings.FILE_CACHE_MAX_MB,
     }
@@ -440,8 +445,12 @@ async def test_redis_connection(body: dict = None, _admin: dict = Depends(requir
     start = time.time()
     try:
         import redis
-        client = redis.Redis.from_url(url, socket_connect_timeout=3, socket_timeout=3)
-        client.ping()
+
+        def _ping() -> None:
+            client = redis.Redis.from_url(url, socket_connect_timeout=3, socket_timeout=3)
+            client.ping()
+
+        await asyncio.to_thread(_ping)
         elapsed = time.time() - start
         # 若测的是当前生效地址，顺便重置连接池（可能之前处于失败冷却期）
         if url == effective_redis_url():

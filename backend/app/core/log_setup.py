@@ -176,6 +176,121 @@ def read_trace_logs(trace: dict, cursor: str = "", limit: int = 100) -> dict:
     return result
 
 
+_LOG_LINE = re.compile(
+    r"^\[(?P<user>[^\]\r\n]*)\] (?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) "
+    r"\[(?P<level>DEBUG|INFO|WARNING|ERROR|CRITICAL)\] \[trace=(?P<trace>[^\]\r\n]*)\] "
+    r"(?P<logger>[^:\r\n]+): (?P<message>.*)$"
+)
+_LOG_ENTRY_CHARS = 20000
+
+
+def list_log_dates() -> list:
+    """日志目录中已有日志文件的日期（降序）；只认同目录 YYYY-MM-DD.log 格式。"""
+    try:
+        return sorted(
+            (p.stem for p in LOG_DIR.glob("????-??-??.log") if p.is_file() and not p.is_symlink()),
+            reverse=True,
+        )
+    except OSError:
+        return []
+
+
+def read_day_logs(day: str, user: str = "", level: str = "", keyword: str = "",
+                  limit: int = 200, offset: int = 0) -> dict:
+    """解析单日日志文件并按用户/级别/关键词过滤，续行（堆栈）并入所属记录。
+
+    返回 {date, total, items:[{ts, level, user, trace, logger, message, truncated}]}；
+    日期非法或文件不存在时返回空结果，不接受客户端传入路径。
+    """
+    result = {"date": day, "total": 0, "items": []}
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day or ""):
+        return result
+    path = LOG_DIR / f"{day}.log"
+    if not path.is_file() or path.is_symlink():
+        return result
+    keyword = (keyword or "").strip().lower()
+    records = []
+    current = None
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as stream:
+            for raw in stream:
+                line = raw.rstrip("\r\n")
+                match = _LOG_LINE.match(line)
+                if match:
+                    current = {
+                        "ts": match["ts"], "level": match["level"], "user": match["user"],
+                        "trace": match["trace"], "logger": match["logger"].strip(),
+                        "message": match["message"], "truncated": False,
+                    }
+                    records.append(current)
+                elif current is not None and len(current["message"]) < _LOG_ENTRY_CHARS:
+                    current["message"] += "\n" + line
+    except OSError:
+        return result
+    for rec in records:
+        if len(rec["message"]) > _LOG_ENTRY_CHARS:
+            rec["message"] = rec["message"][:_LOG_ENTRY_CHARS]
+            rec["truncated"] = True
+    filtered = [
+        r for r in records
+        if (not user or r["user"] == user)
+        and (not level or r["level"] == level)
+        and (not keyword or keyword in (r["message"] + " " + r["logger"]).lower())
+    ]
+    # 倒序返回：最新日志在前，首页即可看到当天实时记录
+    filtered.reverse()
+    # 需求1：同一分钟内的日志合并为一条条目，避免单页呈现过多碎片日志；
+    # 合并后级别取组内最高严重度，entries 保留各条原始记录供详情弹窗展开。
+    merged = _merge_by_minute(filtered)
+    result["total"] = len(merged)
+    result["items"] = merged[offset:offset + max(1, limit)]
+    return result
+
+
+_LEVEL_RANK = {"DEBUG": 0, "INFO": 1, "WARNING": 2, "ERROR": 3, "CRITICAL": 4}
+_MERGE_MAX_ENTRIES = 200
+
+
+def _merge_by_minute(records: list) -> list:
+    """把同一分钟（ts 前 16 位）的日志合并为一条（records 已按最新在前排序）。
+
+    合并项：ts=组内最新时间、level=组内最高严重度、count=合并条数、
+    entries=组内各条原始记录（最新在前，最多 _MERGE_MAX_ENTRIES 条）。
+    同分钟但不同用户/级别的记录仍合并（满足「防止呈现太多日志条数」诉求）。
+    """
+    groups: dict = {}
+    order: list = []
+    for rec in records:
+        key = (rec.get("ts") or "")[:16] or (rec.get("ts") or "")
+        g = groups.get(key)
+        if g is None:
+            g = {"entries": [], "levels": set()}
+            groups[key] = g
+            order.append(key)
+        if len(g["entries"]) < _MERGE_MAX_ENTRIES:
+            g["entries"].append(rec)
+        g["levels"].add(rec.get("level") or "INFO")
+    out = []
+    for key in order:
+        g = groups[key]
+        entries = g["entries"]
+        head = entries[0]  # 最新一条（records 已倒序）
+        top_level = max(g["levels"], key=lambda lv: _LEVEL_RANK.get(lv, 1)) if g["levels"] else head.get("level", "INFO")
+        traces = [e.get("trace") for e in entries if e.get("trace") and e.get("trace") != "-"]
+        out.append({
+            "ts": head.get("ts", ""),
+            "level": top_level,
+            "user": head.get("user", ""),
+            "trace": head.get("trace", "") or (traces[0] if traces else ""),
+            "logger": head.get("logger", ""),
+            "message": head.get("message", ""),
+            "truncated": head.get("truncated", False),
+            "count": len(entries),
+            "entries": entries,
+        })
+    return out
+
+
 def setup_logging(debug: bool = False):
     """初始化根日志器：控制台 + 按日期滚动的文件"""
     formatter = logging.Formatter(LOG_FORMAT, datefmt=DATE_FORMAT)

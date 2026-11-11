@@ -263,16 +263,15 @@ const bodyRef = ref(null)
 const inputRef = ref(null)
 const editBusy = ref('')
 
-// 知识助手仅在「知识库界面」浮现：知识类页面白名单（/kb 知识库管理/收藏/百科/上传 + 入库详情）。
+// 知识助手仅在「知识库界面」浮现：知识类页面白名单（/kb 总览/详情/上传 + 入库详情）。
 // 其余页面（含 Skill 配置、对话、登录、管理控制台、系统管理等）一律不浮出助手。
-const ASSISTANT_ROUTES = ['Wiki', 'KnowledgeBase', 'KnowledgeUpload', 'IngestDetail', 'Bookmarks']
+const ASSISTANT_ROUTES = ['KnowledgeOverview', 'KnowledgeDetail', 'KnowledgeUpload', 'IngestDetail']
 const ROUTE_LABELS = {
-  Wiki: '知识百科',
-  KnowledgeBase: '知识库管理',
+  KnowledgeOverview: '知识库',
+  KnowledgeDetail: '知识库详情',
   Management: '系统管理',
   KnowledgeUpload: '知识库上传',
   IngestDetail: '入库详情',
-  Bookmarks: '我的收藏',
   UserManagement: '用户管理',
   Eval: '回归评测',
 }
@@ -493,9 +492,9 @@ watch(
   () => route.name,
   (name, oldName) => {
     store.setContext({ route_name: name || '', route_label: ROUTE_LABELS[name] || '' })
-    if (name !== 'Wiki') store.clearPageContext()
-    // 离开知识库管理页时清除界面实时快照（视图未及清理时的兜底）
-    if (name !== 'KnowledgeBase') store.clearPageState()
+    if (name !== 'KnowledgeDetail') store.clearPageContext()
+    // 离开知识库详情页时清除界面实时快照（视图未及清理时的兜底）
+    if (name !== 'KnowledgeDetail') store.clearPageState()
     // 切换页面时清除文档预览上下文，并记录一条行文动作
     if (name !== oldName) {
       if (store.context.open_doc_title) store.clearOpenDoc()

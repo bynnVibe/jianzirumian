@@ -395,23 +395,34 @@ async def switch_session(session_id: str, user: dict = Depends(get_current_user)
     )
 
 
-# ---- 主问答语义缓存（当前用户专属） ----
+# ---- 语义缓存（构建在网关层：公共域全体共享 + 个人域仅本人；阶梯 TTL） ----
 @router.get("/cache")
-async def get_semantic_cache(limit: int = 50, user: dict = Depends(get_current_user)):
-    """语义缓存面板：开关/阈值/条目数/累计命中 + 当前用户缓存列表。"""
-    from app.services import semantic_cache
+async def get_semantic_cache(limit: int = 50, scope: str = "all",
+                             user: dict = Depends(get_current_user)):
+    """语义缓存面板：开关/阈值/本人条目数/公共条目数/累计命中 + 缓存列表。
+
+    scope=all|personal|public 过滤展示域；每次加载惰性清理已过期条目。
+    条目含 scope（公共/个人）、is_realtime（实时）、ttl_label（阶梯档）、expires_at（过期时间）。
+    """
+    from app.services.gateway import semantic_cache
     uid = user["id"]
+    semantic_cache.purge_expired()
+    entries = semantic_cache.list_entries(uid, limit=limit)
+    if scope == "personal":
+        entries = [e for e in entries if e.get("scope") != "public"]
+    elif scope == "public":
+        entries = [e for e in entries if e.get("scope") == "public"]
     return {
         "success": True,
         **semantic_cache.stats(uid),
-        "entries": semantic_cache.list_entries(uid, limit=limit),
+        "entries": entries,
     }
 
 
 @router.post("/cache/toggle")
 async def toggle_semantic_cache(request: Request, user: dict = Depends(get_current_user)):
     """开/关语义缓存（运行时覆盖，写入 runtime_config）。"""
-    from app.services import semantic_cache
+    from app.services.gateway import semantic_cache
     from app.services.config_manager import runtime_config
     try:
         body = await request.json()
@@ -424,16 +435,16 @@ async def toggle_semantic_cache(request: Request, user: dict = Depends(get_curre
 
 @router.delete("/cache")
 async def clear_semantic_cache(user: dict = Depends(get_current_user)):
-    """清空当前用户的全部语义缓存。"""
-    from app.services import semantic_cache
+    """清空当前用户个人域的全部语义缓存（不影响公共域）。"""
+    from app.services.gateway import semantic_cache
     n = semantic_cache.clear(user["id"])
-    return {"success": True, "deleted": n, "message": f"已清空 {n} 条语义缓存"}
+    return {"success": True, "deleted": n, "message": f"已清空 {n} 条个人语义缓存"}
 
 
 @router.delete("/cache/{entry_id}")
 async def delete_semantic_cache_entry(entry_id: str, user: dict = Depends(get_current_user)):
-    """删除当前用户的单条语义缓存。"""
-    from app.services import semantic_cache
+    """删除当前用户个人域的单条语义缓存（公共域条目不允许普通用户删除）。"""
+    from app.services.gateway import semantic_cache
     if not semantic_cache.delete_entry(user["id"], entry_id):
         raise HTTPException(status_code=404, detail="缓存条目不存在或无权删除")
     return {"success": True, "message": "缓存条目已删除"}

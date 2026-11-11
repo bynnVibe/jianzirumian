@@ -1,0 +1,64 @@
+# 见字如面 - 持续集成（确定性操作沉淀为工作流）
+#
+# 把不依赖密钥/外网业务、结果可复现的验证操作固化为 GitHub Actions：
+#   1. 后端离线隔离回归（tests/run_isolated.py，不读真实 .env、不连业务 DB/外网）
+#   2. 前端单元测试 + 生产构建（npm test / npm run build）
+#   3. 部署快照一致性检查（scripts/sync_deploy.py --check）
+#
+# 评估回归（EDD）与灰度/全量发布仍由应用内「CI/CD 流水线」(/admin/pipeline) 编排，
+# 镜像构建见 docker-images.yml；本工作流只做确定性质量门禁。
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  backend-regression:
+    name: 后端离线隔离回归
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - name: 安装后端依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+      - name: 离线隔离回归（run_isolated）
+        run: python backend/tests/run_isolated.py
+
+  frontend:
+    name: 前端测试与构建
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: 安装前端依赖
+        run: npm ci
+        working-directory: frontend
+      - name: 前端单元测试
+        run: npm test
+        working-directory: frontend
+      - name: 前端生产构建
+        run: npm run build
+        working-directory: frontend
+
+  deploy-sync:
+    name: 部署快照一致性
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: 检查 docker-images 与主配置字节一致
+        run: python scripts/sync_deploy.py --check

@@ -28,6 +28,8 @@ FINAL_ANSWER_RULES = (
     "不要写‘The user asks’、‘I need to answer’、‘应提示用户’等对自己的指令。"
     "历史回答和资料中的过程性自述不是回答格式示例，不要延续或模仿。"
     "默认使用中文，保留必要的专业术语；可用简洁的段落、列表和来源引用。"
+    "涉及对比、清单、打分、参数、方案评估等结构化数据时，优先用 Markdown 表格输出"
+    "（表头行 + |---| 分隔行 + 数据行），以便前端渲染为表格。"
 )
 
 
@@ -420,9 +422,18 @@ class LLMFactory:
             extra["_gw_rule_id"] = resolved_rule
         if user_id:
             extra["_gw_user_id"] = str(user_id)
+        # 出网密钥按用户解析：该用户绑定的用户密钥 > 公共密钥 > 系统内部密钥（兜底）。
+        # 用户密钥配额用尽时 resolve_outbound_key 自动降级公共密钥；代理侧另有每用户
+        # 日限额/流控兜底（公共额度用尽→429 提示联系管理员）。
+        try:
+            outbound_key, key_type = key_svc.resolve_outbound_key(str(user_id) if user_id else "")
+        except Exception as e:
+            logger.warning("[业务路由] 出网密钥解析失败，回退内部密钥: role=%s err=%s", role, e)
+            outbound_key, key_type = key_svc.ensure_internal_key(), "internal"
+        logger.info("[业务路由] role=%s 出网密钥类型=%s", role, key_type)
         cfg = {
             "base_url": settings.GATEWAY_INTERNAL_URL,
-            "api_key": key_svc.ensure_internal_key(),
+            "api_key": outbound_key,
             "model": model_name,
         }
         return LLMFactory._build("gateway", cfg, extra_body=extra)

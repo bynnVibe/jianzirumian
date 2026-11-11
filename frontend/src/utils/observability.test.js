@@ -21,7 +21,12 @@ async function observationHarness(canOps = false, fail = false) {
   let mounted
   const data = {
     getMyObservabilityMetrics: business,
-    getObservabilityMetrics: { overview: { total: 0, success_rate: 0, prompt_tokens: 0, completion_tokens: 0 }, daily: [], by_agent: [], by_tool: [] },
+    getObservabilityMetrics: {
+      overview: { total: 0, success_rate: 0, errors: 0, avg_latency_ms: 0, p95_latency_ms: 0, prompt_tokens: 0, completion_tokens: 0, avg_tokens_per_request: 0, llm_calls: 0, tool_calls: 0, token_overuse: false, token_warn_threshold: 0 },
+      daily: [], by_agent: [], by_tool: [],
+      golden_signals: { rate_per_day: 0, error_rate: 0, duration: { avg_ms: 0, p95_ms: 0 }, saturation: { avg_tokens_per_request: 0, overuse: false, utilization: 0 } },
+      token_comparison: { current_avg: 0, previous_avg: 0, delta_pct: 0, trend: 'flat' },
+    },
     getObservabilityTraces: { items: [], total: 0 },
     getObservabilityTrace: {}, getObservabilityTraceLogs: {},
   }
@@ -35,10 +40,15 @@ async function observationHarness(canOps = false, fail = false) {
   const compiled = compileScript(descriptor, { id: 'obs-test', inlineTemplate: true, genDefaultAs: '__component' })
   const code = compiled.content.replace(/import\s+\{([^}]+)\}\s+from\s+['"]([^'"]+)['"];?/g, (_, names, source) => {
     return `const { ${names.replace(/\bas\b/g, ':')} } = modules[${JSON.stringify(source)}];`
+  }).replace(/import\s+([A-Za-z_$][\w$]*)\s+from\s+['"]([^'"]+)['"];?/g, (_, name, source) => {
+    // 子组件（ObsDashboard/ObsLogs 等）默认导入：以空渲染桩替代，聚焦父视图逻辑
+    return `const ${name} = (modules[${JSON.stringify(source)}] || {}).default;`
   })
   const component = new Function('modules', `${code}\nreturn __component;`)({
     vue: { ...Vue, onMounted: (fn) => { mounted = fn } },
     '@/stores/auth': { useAuthStore: () => ({ canOps }) }, '@/api': api,
+    '@/components/observability/ObsDashboard.vue': { default: { name: 'ObsDashboard', props: ['metrics', 'monitor', 'loading', 'rangeLabel'], render: () => null } },
+    '@/components/observability/ObsLogs.vue': { default: { name: 'ObsLogs', render: () => null } },
   })
   const render = component.setup({}, { expose() {} })
   await mounted()
@@ -60,24 +70,34 @@ function findNode(node, predicate) {
 
 test('普通用户只请求个人指标，渲染结果不包含技术视图', async () => {
   const view = await observationHarness()
-  assert.deepEqual(view.calls, [['getMyObservabilityMetrics', 7]])
+  assert.deepEqual(view.calls, [['getMyObservabilityMetrics', 7, 'days']])
   const html = await view.html()
   for (const text of ['我的使用概览', '使用次数', '服务完成率', '66.7%', '2.5 秒', '智能问答']) assert.ok(html.includes(text))
-  assert.doesNotMatch(html, /Agent|Token|工具调用|请求追踪|LLM|PROMPT|RESPONSE/)
+  // SSR 会保留模板注释（含技术词汇），断言前剥离，仅校验用户可见内容
+  assert.doesNotMatch(html.replace(/<!--[\s\S]*?-->/g, ''), /Agent|Token|工具调用|请求追踪|LLM|PROMPT|RESPONSE/)
   const refresh = findNode(view.nodes(), (node) => node.type === 'button' && typeof node.children === 'string' && node.children.trim() === '刷新')
   assert.ok(refresh)
   await refresh.props.onClick()
-  assert.deepEqual(view.calls, [['getMyObservabilityMetrics', 7], ['getMyObservabilityMetrics', 7]])
+  assert.deepEqual(view.calls, [['getMyObservabilityMetrics', 7, 'days'], ['getMyObservabilityMetrics', 7, 'days']])
 })
 
 test('管理员和运维分支保留全站指标与追踪入口', async () => {
   const view = await observationHarness(true)
   assert.deepEqual(view.calls.map(([name]) => name), ['getObservabilityMetrics', 'getObservabilityTraces'])
-  const html = await view.html()
+  let html = await view.html()
   assert.match(html, /Agent 可观测性/)
-  assert.match(html, /请求追踪/)
-  assert.match(html, /Token 消耗/)
+  assert.match(html, /DashBoard/)
   assert.doesNotMatch(html, /我的使用概览|业务功能使用情况/)
+  const clickTab = async (label) => {
+    const tab = findNode(view.nodes(), (node) => node.type === 'button' && typeof node.children === 'string' && node.children.trim() === label)
+    assert.ok(tab)
+    tab.props.onClick()
+    return view.html()
+  }
+  html = await clickTab('指标监控')
+  assert.match(html, /Token 消耗/)
+  html = await clickTab('链路追踪')
+  assert.match(html, /请求追踪/)
 })
 
 test('普通用户加载失败不显示技术错误原文', async () => {
@@ -93,7 +113,7 @@ test('普通用户切换到近30天仍只调用个人统计接口', async () => 
   assert.ok(button)
   button.props.onClick()
   await new Promise((resolve) => setImmediate(resolve))
-  assert.deepEqual(view.calls, [['getMyObservabilityMetrics', 7], ['getMyObservabilityMetrics', 30]])
+  assert.deepEqual(view.calls, [['getMyObservabilityMetrics', 7, 'days'], ['getMyObservabilityMetrics', 30, 'days']])
 })
 
 test('个人路由按角色分流且不放宽管理控制台权限', async () => {

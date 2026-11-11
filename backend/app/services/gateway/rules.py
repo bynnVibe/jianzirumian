@@ -16,7 +16,9 @@
 命中后按 lb_strategy 排序上游，健康优先、熔断兜底；代理按序尝试，失败自动切换下一个并更新上游健康度。
 
 负载均衡：round_robin（计数取模）/ weighted（A-Res 加权随机）/ random（洗牌）/
-priority（保持规则内上游列表顺序）；健康上游排在熔断上游之前，保留故障切换。
+priority（保持规则内上游列表顺序）/ primary_backup（主备路由：主路由连续失败达
+failover_threshold 次后自动把后续请求切换到备用路由，主路由恢复健康后自动回切）；
+健康上游排在熔断上游之前，保留故障切换。
 """
 import fnmatch
 import json
@@ -31,7 +33,7 @@ from app.core import db
 
 logger = logging.getLogger("jianziruyang.gateway.rules")
 
-LB_STRATEGIES = ("round_robin", "weighted", "random", "priority")
+LB_STRATEGIES = ("round_robin", "weighted", "random", "priority", "primary_backup")
 # 业务角色清单（供前端下拉与校验）：凡经 create_for_role 出网的 role 都应在此登记，
 # 否则无法在「业务路由」中绑定规则/模型（如记忆抽取曾缺席导致只能走默认模型报 503）
 ROLES = (
@@ -143,6 +145,8 @@ def _row_to_dict(row: dict) -> dict:
         "upstreams": up_ids,
         "upstream_detail": _resolve_upstream_names(up_ids),
         "lb_strategy": row.get("lb_strategy") or "weighted",
+        "primary_upstream": row.get("primary_upstream") or "",
+        "failover_threshold": int(row.get("failover_threshold") or 3),
         "priority": int(row.get("priority") or 0),
         "is_default": bool(row.get("is_default")),
         "allowed_users": _parse_json(row.get("allowed_users"), []),
@@ -163,6 +167,23 @@ def get_rule(rule_id: str) -> Optional[dict]:
     return _row_to_dict(row) if row else None
 
 
+def _normalize_primary_backup(lb_strategy: str, primary: str, ups: List[str],
+                              threshold) -> Tuple[str, int]:
+    """主备路由校验：primary_backup 策略必须指定属于上游列表的主路由；阈值 >=1。"""
+    primary = (primary or "").strip()
+    try:
+        thr = max(1, min(20, int(threshold or 3)))
+    except (TypeError, ValueError):
+        thr = 3
+    if lb_strategy == "primary_backup":
+        if not primary:
+            # 未显式指定时默认取上游列表首个为主路由
+            primary = ups[0] if ups else ""
+        if primary and primary not in ups:
+            raise ValueError("主路由必须从该规则已选的上游列表中指定")
+    return primary, thr
+
+
 def create_rule(payload: dict) -> dict:
     pattern = (payload.get("model_pattern") or "").strip()
     if not pattern:
@@ -171,17 +192,22 @@ def create_rule(payload: dict) -> dict:
     if not ups:
         raise ValueError("请至少选择一个上游")
     lb_strategy = _normalize_lb_strategy(payload.get("lb_strategy"))
+    primary, threshold = _normalize_primary_backup(
+        lb_strategy, str(payload.get("primary_upstream") or ""), ups,
+        payload.get("failover_threshold"))
     is_default = 1 if payload.get("is_default") else 0
     allowed_users = _normalize_users(payload.get("allowed_users"))
     rid = _new_id()
     db.execute(
         "INSERT INTO gateway_rules (id, model_pattern, upstreams, lb_strategy, priority,"
-        " is_default, allowed_users, enabled, created_at, updated_at)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?)",
+        " is_default, allowed_users, enabled, created_at, updated_at,"
+        " primary_upstream, failover_threshold)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
         (rid, pattern, json.dumps(ups, ensure_ascii=False), lb_strategy,
          int(payload.get("priority") or 0), is_default,
          json.dumps(allowed_users, ensure_ascii=False),
-         1 if payload.get("enabled", True) else 0, _now(), _now()),
+         1 if payload.get("enabled", True) else 0, _now(), _now(),
+         primary, threshold),
     )
     if is_default:
         _ensure_single_default(rid)
@@ -201,6 +227,9 @@ def update_rule(rule_id: str, patch: dict) -> Optional[dict]:
         raise ValueError("请至少选择一个上游")
     lb_strategy = _normalize_lb_strategy(
         patch.get("lb_strategy") if "lb_strategy" in patch else cur.get("lb_strategy"))
+    primary = str(patch.get("primary_upstream", cur.get("primary_upstream") or "") or "")
+    threshold = patch.get("failover_threshold", cur.get("failover_threshold"))
+    primary, threshold = _normalize_primary_backup(lb_strategy, primary, ups, threshold)
     priority = int(patch.get("priority", cur["priority"]) or 0)
     is_default = 1 if (patch.get("is_default") if "is_default" in patch
                        else bool(cur.get("is_default"))) else 0
@@ -210,9 +239,11 @@ def update_rule(rule_id: str, patch: dict) -> Optional[dict]:
     enabled = 1 if patch.get("enabled", bool(cur["enabled"])) else 0
     db.execute(
         "UPDATE gateway_rules SET model_pattern=?, upstreams=?, lb_strategy=?, priority=?,"
-        " is_default=?, allowed_users=?, enabled=?, updated_at=? WHERE id=?",
+        " is_default=?, allowed_users=?, enabled=?, updated_at=?,"
+        " primary_upstream=?, failover_threshold=? WHERE id=?",
         (pattern, json.dumps(ups, ensure_ascii=False), lb_strategy, priority, is_default,
-         json.dumps(allowed_users, ensure_ascii=False), enabled, _now(), rule_id),
+         json.dumps(allowed_users, ensure_ascii=False), enabled, _now(),
+         primary, threshold, rule_id),
     )
     if is_default:
         _ensure_single_default(rule_id)
@@ -271,11 +302,44 @@ def _round_robin_order(rows: List[dict]) -> List[dict]:
     return rows[idx:] + rows[:idx]
 
 
-def _order_by_strategy(rows: List[dict], strategy: Optional[str]) -> List[dict]:
+def _order_primary_backup(rows: List[dict], rule: Optional[dict]) -> List[dict]:
+    """主备路由：主路由连续失败达阈值后，后续请求自动切换到备用路由。
+
+    - 主路由 = rule.primary_upstream 指定的上游；备用路由 = 列表内其余上游（按原序）；
+    - 判定依据 gateway_upstreams.fail_count（成功一次即清零=自动回切主路由）；
+    - fail_count >= failover_threshold 或已熔断(down) 时视为「主路由失效」，备路由领衔；
+    - 组内仍保持健康上游在前、熔断上游兜底。
+    """
+    primary_id = str((rule or {}).get("primary_upstream") or "")
+    threshold = max(1, int((rule or {}).get("failover_threshold") or 3))
+    primary = next((r for r in rows if r["id"] == primary_id), None)
+    backups = [r for r in rows if r["id"] != primary_id]
+    if primary is None:
+        return _health_first(rows)
+    fails = int(primary.get("fail_count") or 0)
+    down = (primary.get("health") or "healthy") == "down"
+    if fails >= threshold or down:
+        logger.warning("主备路由：主路由「%s」连续失败 %d 次（阈值 %d%s），已切换到备用路由",
+                       primary.get("name"), fails, threshold, "，且已熔断" if down else "")
+        return _health_first(backups) + _health_first([primary])
+    return _health_first([primary]) + _health_first(backups)
+
+
+def _health_first(rows: List[dict]) -> List[dict]:
+    """健康上游在前、熔断(down)上游兜底（组内保持原序）。"""
+    healthy = [r for r in rows if (r.get("health") or "healthy") != "down"]
+    down = [r for r in rows if (r.get("health") or "healthy") == "down"]
+    return healthy + down
+
+
+def _order_by_strategy(rows: List[dict], strategy: Optional[str],
+                       rule: Optional[dict] = None) -> List[dict]:
     """按规则 lb_strategy 对一组上游排序；健康上游排在熔断上游之前。"""
     if not rows:
         return []
     s = _normalize_lb_strategy(strategy)
+    if s == "primary_backup":
+        return _order_primary_backup(rows, rule)
     healthy = [r for r in rows if (r.get("health") or "healthy") != "down"]
     down = [r for r in rows if (r.get("health") or "healthy") == "down"]
 
@@ -382,7 +446,7 @@ def _materialize(rule_row: dict, model: str = "",
         ups = [u for u in ups if (u.get("category") or "llm") == category]
     if model:
         ups = [u for u in ups if _upstream_supports(u, model)]
-    return rule, _order_by_strategy(ups, rule_row.get("lb_strategy"))
+    return rule, _order_by_strategy(ups, rule_row.get("lb_strategy"), rule)
 
 
 def select_upstreams(model: str, role: Optional[str] = None,

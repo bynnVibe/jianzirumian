@@ -6,12 +6,13 @@
 - playbook 技能：链接解析的站点抓取策略（内置「网页链接抓取回退策略」即属此类）。
 内置技能可开关，不可删除/改内容；自定义技能可增删改。所有操作按登录用户归属隔离。
 """
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from app.api.deps import get_current_user
 from app.services.skill import skill_service
 from app.services import skill_docs
+from app.services.skill_market import skill_market
 
 router = APIRouter(prefix="/api/skills", tags=["skills"])
 
@@ -24,6 +25,8 @@ class SkillCreateRequest(BaseModel):
     enabled: bool = True
     # 作用域：prompt 仅 chat；playbook 可选 url_import（链接解析）/ polish（正文清洗），缺省取首选
     scope: str | None = None
+    # 可见性：personal（仅自己）/ public（全员可见可用），缺省 personal
+    visibility: str = "personal"
 
 
 class SkillUpdateRequest(BaseModel):
@@ -56,9 +59,24 @@ async def create_skill(body: SkillCreateRequest, user: dict = Depends(get_curren
         user["id"], body.name, body.kind, body.content,
         description=body.description, enabled=body.enabled,
         scope=body.scope, actor_name=user.get("username", ""),
+        visibility=body.visibility,
     )
     _raise_if_error(res)
     return {"success": True, **res}
+
+
+@router.get("/market/search")
+async def search_skill_market(
+    q: str = Query("", max_length=120),
+    limit: int = Query(6, ge=1, le=12),
+    user: dict = Depends(get_current_user),
+):
+    """从主流技能市场搜寻类似功能的 Skill（沉淀编辑界面用）。
+
+    并发查询多个市场，归一化卡片（名称/描述/指令内容/来源/热度/链接）；
+    单个市场不可达不影响整体，返回 errors 供前端提示。
+    """
+    return await skill_market.search(q, limit)
 
 
 @router.put("/{skill_id}")

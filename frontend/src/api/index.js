@@ -214,8 +214,15 @@ export function listSkills() {
   return api.get('/skills')
 }
 
-export function createSkill({ name, kind = 'prompt', content = '', description = '', enabled = true, scope = null }) {
-  return api.post('/skills', { name, kind, content, description, enabled, scope })
+export function createSkill({ name, kind = 'prompt', content = '', description = '', enabled = true, scope = null, visibility = 'personal' }) {
+  return api.post('/skills', { name, kind, content, description, enabled, scope, visibility })
+}
+
+/**
+ * 技能市场相似 Skill 搜索（沉淀编辑界面用）：并发查询多个主流市场
+ */
+export function searchSkillMarket(q, limit = 6) {
+  return api.get('/skills/market/search', { params: { q, limit }, timeout: 20000 })
 }
 
 export function updateSkill(skillId, { name = null, description = null, content = null, enabled = null } = {}) {
@@ -565,6 +572,102 @@ export function updateKnowledgeBase(kbId, { name, topic }) {
 }
 
 // ============================================
+// 知识库详情 API（文档/思维导图/知识图谱/RAG 评估）
+// ============================================
+
+/**
+ * 知识库文档表格（按来源去重，含大小/分块/状态）
+ */
+export function listKbDocuments(kbId, q = '') {
+  return api.get(`/knowledge/bases/${kbId}/documents`, { params: q ? { q } : {} })
+}
+
+export function getKbMindmap(kbId) {
+  return api.get(`/knowledge/bases/${kbId}/mindmap`)
+}
+
+export function rebuildKbMindmap(kbId) {
+  return api.post(`/knowledge/bases/${kbId}/mindmap/rebuild`)
+}
+
+export function getKbGraph(kbId) {
+  return api.get(`/knowledge/bases/${kbId}/graph`)
+}
+
+export function rebuildKbGraph(kbId) {
+  return api.post(`/knowledge/bases/${kbId}/graph/rebuild`)
+}
+
+export function clearKbGraph(kbId) {
+  return api.delete(`/knowledge/bases/${kbId}/graph`)
+}
+
+export function addKbGraphNode(kbId, { name, type, note }) {
+  return api.post(`/knowledge/bases/${kbId}/graph/nodes`, { name, type, note })
+}
+
+export function deleteKbGraphNode(kbId, nodeId) {
+  return api.delete(`/knowledge/bases/${kbId}/graph/nodes/${nodeId}`)
+}
+
+export function addKbGraphEdge(kbId, { source, target, label }) {
+  return api.post(`/knowledge/bases/${kbId}/graph/edges`, { source, target, label })
+}
+
+export function deleteKbGraphEdge(kbId, edgeId) {
+  return api.delete(`/knowledge/bases/${kbId}/graph/edges/${edgeId}`)
+}
+
+export function importKbGraphJsonl(kbId, jsonl) {
+  return api.post(`/knowledge/bases/${kbId}/graph/import`, { jsonl })
+}
+
+export function searchKbGraphSemantic(kbId, q, topN = 10, threshold = 0.5) {
+  return api.get(`/knowledge/bases/${kbId}/graph/semantic`, {
+    params: { q, top_n: topN, threshold },
+  })
+}
+
+// 图谱节点溯源：点击引用查看对应文档/百科页详细内容（需求3）
+export function getKbGraphSourceContent(kbId, { title = '', path = '' } = {}) {
+  return api.get(`/knowledge/bases/${kbId}/graph/source-content`, {
+    params: { title, path },
+  })
+}
+
+export function listKbEvalCases(kbId) {
+  return api.get(`/knowledge/bases/${kbId}/eval/cases`)
+}
+
+export function addKbEvalCase(kbId, { question, referenceAnswer = '', expectedKeywords = [] }) {
+  return api.post(`/knowledge/bases/${kbId}/eval/cases`, {
+    question,
+    reference_answer: referenceAnswer,
+    expected_keywords: expectedKeywords,
+  })
+}
+
+export function deleteKbEvalCase(kbId, caseId) {
+  return api.delete(`/knowledge/bases/${kbId}/eval/cases/${caseId}`)
+}
+
+export function generateKbEvalCases(kbId) {
+  return api.post(`/knowledge/bases/${kbId}/eval/cases/generate`)
+}
+
+export function startKbEvalRun(kbId) {
+  return api.post(`/knowledge/bases/${kbId}/eval/runs`)
+}
+
+export function listKbEvalRuns(kbId) {
+  return api.get(`/knowledge/bases/${kbId}/eval/runs`)
+}
+
+export function getKbEvalRun(kbId, runId) {
+  return api.get(`/knowledge/bases/${kbId}/eval/runs/${runId}`)
+}
+
+// ============================================
 // 上传记录 API
 // ============================================
 
@@ -606,9 +709,12 @@ export function polishOCR(ocrText) {
 /**
  * 获取知识库条目列表（按来源图片分组）
  * @param {string} q 按标题/文件名搜索关键字
+ * @param {string} kbId 仅返回指定知识库的条目
  */
-export function getKnowledgeEntries(q = '') {
-  const params = q ? { q } : {}
+export function getKnowledgeEntries(q = '', kbId = '') {
+  const params = {}
+  if (q) params.q = q
+  if (kbId) params.kb_id = kbId
   return api.get('/knowledge/entries', { params })
 }
 
@@ -630,10 +736,10 @@ export function moveSourceToKb(sourceImage, targetKbId) {
 }
 
 /**
- * 在知识库中搜索检索
+ * 在知识库中搜索检索（kbId 非空时限定单个知识库）
  */
-export function searchKnowledge(query, topK = 5) {
-  return api.post('/knowledge/search', { query, top_k: topK })
+export function searchKnowledge(query, topK = 5, kbId = '') {
+  return api.post('/knowledge/search', { query, top_k: topK, kb_id: kbId })
 }
 
 /**
@@ -883,10 +989,12 @@ export function compileConversationTopics() {
 // ============================================
 
 /**
- * 语义缓存面板：开关/阈值/条目数/累计命中 + 当前用户缓存列表
+ * 语义缓存面板（构建在网关层）：开关/阈值/本人+公共条目数/累计命中 + 缓存列表
+ * @param {number} limit 返回条目上限
+ * @param {string} scope all|personal|public 过滤展示域
  */
-export function getSemanticCache(limit = 50) {
-  return api.get('/chat/cache', { params: { limit } })
+export function getSemanticCache(limit = 50, scope = 'all') {
+  return api.get('/chat/cache', { params: { limit, scope } })
 }
 
 /**
@@ -1008,26 +1116,71 @@ export function deleteAssistantSession(sessionId) {
 // ============================================
 
 /**
- * Agent 聚合指标：Token 消耗 / 响应延迟 / 成功率 / 工具调用次数
+ * Agent 聚合指标：Token 消耗 / 响应延迟 / 成功率 / 工具调用次数 + 黄金信号
  * @param {number} days 统计窗口天数（默认 7）
+ * @param {string} range 时间范围：days=近 N 天 / today=仅今天
  */
-export function getObservabilityMetrics(days = 7) {
-  return api.get('/observability/metrics', { params: { days } })
+export function getObservabilityMetrics(days = 7, range = 'days', refresh = 0) {
+  return api.get('/observability/metrics', { params: { days, range, refresh } })
 }
 
-/** 当前登录用户的业务概览，不含任何技术追踪数据。 */
-export function getMyObservabilityMetrics(days = 7) {
-  return api.get('/observability/my-metrics', { params: { days } })
+/**
+ * Tool Routing 调用链分析（仅 ops/admin）：参数合法率 / 任务成功率 / Schema Token /
+ * 端到端延迟 / 越权暴露率 + 按工具/命名空间聚合 + 拦截事件明细
+ * @param {number} days 统计窗口天数（默认 7）
+ * @param {string} range 时间范围：days / today
+ */
+export function getToolRoutingMetrics(days = 7, range = 'days', refresh = 0) {
+  return api.get('/observability/tool-routing', { params: { days, range, refresh } })
 }
 
-/** 当前登录用户的「上下文窗口 + 记忆模块」使用概览。 */
-export function getMyContextOverview(days = 7) {
-  return api.get('/observability/my-context', { params: { days } })
+/** 标准化工具注册表快照（仅 ops/admin）：命名空间/标签/场景/参数 Schema/权限/风险等级/可用状态。 */
+export function getToolRegistry() {
+  return api.get('/observability/tool-registry')
 }
 
-/** 按对话窗口下钻的上下文构成：个人面板总集口径的会话级子集切片。 */
-export function getMyContextSessions(days = 7, limit = 20) {
-  return api.get('/observability/my-context/sessions', { params: { days, limit } })
+/** 当前登录用户的业务概览，不含任何技术追踪数据。range: days / today */
+export function getMyObservabilityMetrics(days = 7, range = 'days') {
+  return api.get('/observability/my-metrics', { params: { days, range } })
+}
+
+/** 当前登录用户的「上下文窗口 + 记忆模块」使用概览。range: days / today */
+export function getMyContextOverview(days = 7, range = 'days') {
+  return api.get('/observability/my-context', { params: { days, range } })
+}
+
+/** 按对话窗口下钻的上下文构成：个人面板总集口径的会话级子集切片。range: days / today */
+export function getMyContextSessions(days = 7, limit = 20, range = 'days') {
+  return api.get('/observability/my-context/sessions', { params: { days, limit, range } })
+}
+
+/** 记忆概览钻取：kind=all/profile/retrieved/never_used/importance/type:<t> */
+export function getMyMemoryDrill(kind = 'all') {
+  return api.get('/observability/my-context/memory-drill', { params: { kind } })
+}
+
+/**
+ * 单个对话的统一可观测视图（需求2）：会话内 traces + 上下文段构成 + 调用链 + 会话/用户记忆
+ * @param {string} sessionId 会话 id
+ * @param {object} params { day: 'YYYY-MM-DD' 按天筛选, trace_id: 选中某次请求 }
+ */
+export function getSessionObservability(sessionId, params = {}) {
+  return api.get(`/observability/sessions/${encodeURIComponent(sessionId)}`, { params })
+}
+
+/**
+ * 能力缺口沉淀建议（需求6，仅 ops/admin）：频繁场景提示沉淀为 skill/工具
+ */
+export function getSedimentSuggestions(days = 30, threshold = 3) {
+  return api.get('/observability/sediment-suggestions', { params: { days, threshold } })
+}
+
+/**
+ * 执行能力缺口候选方案（需求5，HITL）：高风险方案需 confirmed=true 二次确认，沙箱运行
+ * @param {object} body { gap_id, solution_id, confirmed, url }
+ */
+export function executeCapabilityGap(body) {
+  return api.post('/capability-gap/execute', body)
 }
 
 /**
@@ -1047,6 +1200,55 @@ export function getObservabilityTrace(traceId) {
 
 export function getObservabilityTraceLogs(traceId, params = {}) {
   return api.get(`/observability/traces/${encodeURIComponent(traceId)}/logs`, { params })
+}
+
+/**
+ * 指标监控四方面聚合：质量 / 安全 / 业务（性能方面复用 /observability/metrics）
+ * @param {number} days @param {string} range 'days' | 'today'
+ */
+export function getObsMonitor(days = 7, range = 'days', refresh = 0) {
+  return api.get('/observability/monitor', { params: { days, range, refresh } })
+}
+
+/**
+ * 工具调用链路：按 trace 聚合的工具 span 序列
+ */
+export function getObsToolChains(days = 7, range = 'days', limit = 50, refresh = 0) {
+  return api.get('/observability/tool-chains', { params: { days, range, limit, refresh } })
+}
+
+/**
+ * 日志记录模块：可选日期与用户列表
+ */
+export function getObsLogsMeta() {
+  return api.get('/observability/logs/meta')
+}
+
+/**
+ * 日志记录模块：单日系统日志查询（按用户/级别/关键词过滤）
+ * @param {object} params { date, user, level, q, limit, offset }
+ */
+export function getObsLogs(params = {}) {
+  return api.get('/observability/logs', { params })
+}
+
+/**
+ * DashBoard 偏好：当前用户选中的指标卡（空数组=未保存，前端用默认集）
+ */
+export function getObsDashboard() {
+  return api.get('/observability/dashboard')
+}
+
+export function saveObsDashboard(cards) {
+  return api.put('/observability/dashboard', { cards })
+}
+
+/**
+ * 指标数字钻取：会话总数 42 → 42 条会话明细（通用列定义 + 行 + 总数）
+ * @param {string} type sessions|messages|active_users|uploads|kbs|wiki|memories|feedbacks|eval_runs|sec_events|tool_calls|tool_blocked|traces
+ */
+export function getObsDrill(type, limit = 200, days = 7, range = 'days', page = 1, pageSize = 20, metric = '') {
+  return api.get('/observability/drill', { params: { type, limit, days, range, page, page_size: pageSize, metric } })
 }
 
 /**
@@ -1240,9 +1442,36 @@ export function listEvalRuns(datasetId) {
   return api.get('/eval/runs', { params: { dataset_id: datasetId } })
 }
 
+/** 全部评测集的运行历史（实验页签） */
+export function listAllEvalRuns() {
+  return api.get('/eval/runs')
+}
+
 /** 运行详情（run + 结果明细 + 上一次 finished run 环比） */
 export function getEvalRun(runId) {
   return api.get(`/eval/runs/${runId}`)
+}
+
+// ---- 评估器（基于已有评测集构建的评测工作流）----
+
+/** 评估器列表（绑定评测集名称/用例数 + 运行次数与最近运行） */
+export function listEvalEvaluators() {
+  return api.get('/eval/evaluators')
+}
+
+/** 基于已有评测集创建评估器 */
+export function createEvalEvaluator({ name, datasetId, description = '' }) {
+  return api.post('/eval/evaluators', { name, dataset_id: datasetId, description })
+}
+
+/** 编辑评估器名称/描述 */
+export function updateEvalEvaluator(evaluatorId, { name, description }) {
+  return api.put(`/eval/evaluators/${evaluatorId}`, { name, description })
+}
+
+/** 删除评估器（不影响评测集与运行历史） */
+export function deleteEvalEvaluator(evaluatorId) {
+  return api.delete(`/eval/evaluators/${evaluatorId}`)
 }
 
 // ---- Prompt / Skill 专项评测（静态断言 + Rubric 打分 + A/B + 优化上线）----
@@ -1416,6 +1645,34 @@ export function saveGatewaySettings(payload) {
 }
 export function gatewayScanPreview(text) {
   return api.post('/gateway/scan-preview', { text })
+}
+
+// ---- 安全审计中心：风险事件闭环（记录→弹窗→模型建议→处理留痕）----
+export function listGatewaySecurityEvents(params = {}) {
+  return api.get('/gateway/security-events', { params })
+}
+export function getGatewaySecurityEvent(eventId) {
+  return api.get(`/gateway/security-events/${encodeURIComponent(eventId)}`)
+}
+export function ackGatewaySecurityEvents(eventIds = []) {
+  return api.post('/gateway/security-events/ack', { event_ids: eventIds })
+}
+export function suggestGatewaySecurityEvent(eventId) {
+  return api.post(`/gateway/security-events/${encodeURIComponent(eventId)}/suggest`)
+}
+export function resolveGatewaySecurityEvent(eventId, payload) {
+  return api.post(`/gateway/security-events/${encodeURIComponent(eventId)}/resolve`, payload)
+}
+export function reopenGatewaySecurityEvent(eventId) {
+  return api.post(`/gateway/security-events/${encodeURIComponent(eventId)}/reopen`)
+}
+export function deleteGatewaySecurityEvent(eventId) {
+  return api.delete(`/gateway/security-events/${encodeURIComponent(eventId)}`)
+}
+
+// ---- 当前用户配额状态（聊天界面友好提示，普通登录用户可访问）----
+export function getMyGatewayQuota() {
+  return api.get('/gateway/my-quota')
 }
 
 // ---- （模型注册表与旧上游端点已退役：模型清单并入上游、连接配置归属上游）----

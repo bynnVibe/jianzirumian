@@ -239,6 +239,7 @@ def init_db(conn: sqlite3.Connection):
             content     TEXT NOT NULL DEFAULT '',
             enabled     INTEGER NOT NULL DEFAULT 1,
             builtin     INTEGER NOT NULL DEFAULT 0,
+            visibility  TEXT NOT NULL DEFAULT 'personal',
             created_at  TEXT NOT NULL,
             updated_at  TEXT NOT NULL
         );
@@ -457,6 +458,86 @@ def init_db(conn: sqlite3.Connection):
         );
         CREATE INDEX IF NOT EXISTS idx_eval_results_run ON eval_results(run_id);
 
+        -- 评估器：基于已有评测集构建的评测工作流（名称 + 绑定评测集），页内发起运行并查看结果
+        CREATE TABLE IF NOT EXISTS eval_evaluators (
+            id          TEXT PRIMARY KEY,
+            name        TEXT NOT NULL,
+            dataset_id  TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            created_by  TEXT NOT NULL DEFAULT '',
+            created_at  TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_eval_evaluators_dataset ON eval_evaluators(dataset_id);
+
+        -- 知识库详情：知识图谱（llm-wiki 聚合 + 手动维护），data 为 {nodes, edges} JSON
+        CREATE TABLE IF NOT EXISTS kb_graphs (
+            kb_id      TEXT PRIMARY KEY,
+            data       TEXT NOT NULL DEFAULT '{}',
+            updated_at TEXT NOT NULL
+        );
+
+        -- 知识库详情：思维导图缓存（LLM 生成的层级树 JSON + 内容哈希增量判断）
+        CREATE TABLE IF NOT EXISTS kb_mindmaps (
+            kb_id       TEXT PRIMARY KEY,
+            data        TEXT NOT NULL DEFAULT '{}',
+            source_hash TEXT NOT NULL DEFAULT '',
+            updated_at  TEXT NOT NULL
+        );
+
+        -- 知识图谱节点向量（重建索引时后台预计算；语义搜索仅向量化查询词，
+        -- 避免请求期内全量 embed 串行往返导致超时）
+        CREATE TABLE IF NOT EXISTS kb_graph_vectors (
+            kb_id      TEXT NOT NULL,
+            node_id    TEXT NOT NULL,
+            text_hash  TEXT NOT NULL DEFAULT '',
+            vec        TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (kb_id, node_id)
+        );
+
+        -- 知识库详情：按 KB 的 RAG 评估用例/运行/结果
+        CREATE TABLE IF NOT EXISTS kb_eval_cases (
+            id                TEXT PRIMARY KEY,
+            kb_id             TEXT NOT NULL,
+            question          TEXT NOT NULL,
+            reference_answer  TEXT NOT NULL DEFAULT '',
+            expected_keywords TEXT NOT NULL DEFAULT '[]',
+            created_by        TEXT NOT NULL DEFAULT '',
+            created_at        TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_kb_eval_cases_kb ON kb_eval_cases(kb_id);
+
+        CREATE TABLE IF NOT EXISTS kb_eval_runs (
+            id          TEXT PRIMARY KEY,
+            kb_id       TEXT NOT NULL,
+            status      TEXT NOT NULL DEFAULT 'running',
+            summary     TEXT NOT NULL DEFAULT '{}',
+            created_by  TEXT NOT NULL DEFAULT '',
+            started_at  TEXT NOT NULL,
+            finished_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_kb_eval_runs_kb ON kb_eval_runs(kb_id, started_at);
+
+        CREATE TABLE IF NOT EXISTS kb_eval_results (
+            id                TEXT PRIMARY KEY,
+            run_id            TEXT NOT NULL,
+            case_id           TEXT NOT NULL,
+            question          TEXT NOT NULL DEFAULT '',
+            answer            TEXT NOT NULL DEFAULT '',
+            contexts          TEXT NOT NULL DEFAULT '[]',
+            retrieval_hit     INTEGER NOT NULL DEFAULT 0,
+            faithfulness      REAL,
+            answer_relevance  REAL,
+            context_precision REAL,
+            context_recall    REAL,
+            judge_score       REAL,
+            judge_reason      TEXT NOT NULL DEFAULT '',
+            latency_ms        INTEGER NOT NULL DEFAULT 0,
+            status            TEXT NOT NULL DEFAULT 'ok',
+            error             TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_kb_eval_results_run ON kb_eval_results(run_id);
+
         -- Agent 可观测性（Tracing 主表）：一次用户请求 / 一次 Agent 运行 = 一条 trace。
         -- status: running(进行中) | ok(成功) | error(失败)；结束时由 span 聚合回写调用数与 token 数。
         CREATE TABLE IF NOT EXISTS agent_traces (
@@ -496,6 +577,13 @@ def init_db(conn: sqlite3.Connection):
             ended_at          TEXT NOT NULL DEFAULT ''
         );
         CREATE INDEX IF NOT EXISTS idx_agent_spans_trace ON agent_spans(trace_id, seq);
+
+        -- 可观测性 DashBoard：按用户持久化选中的指标卡（cards 为 JSON 数组）
+        CREATE TABLE IF NOT EXISTS obs_dashboard_prefs (
+            user_id    TEXT PRIMARY KEY,
+            cards      TEXT NOT NULL DEFAULT '[]',
+            updated_at TEXT NOT NULL
+        );
         CREATE INDEX IF NOT EXISTS idx_agent_spans_started ON agent_spans(started_at);
 
         -- Agent 可观测性（segment 级 Token 度量）：一次请求组装 LLM 上下文时，按语义段
@@ -513,6 +601,60 @@ def init_db(conn: sqlite3.Connection):
         );
         CREATE INDEX IF NOT EXISTS idx_token_segments_started ON agent_token_segments(created_at);
         CREATE INDEX IF NOT EXISTS idx_token_segments_seg ON agent_token_segments(segment, created_at);
+
+        -- Tool Routing 调用链分析（工具治理可观测性）：一次工具调用 = 一条记录。
+        -- 由 tools.invoke.invoke_tool 在「约束钩子 → 执行」全链路落库，聚合出五项核心指标：
+        --   参数合法率(schema_valid) / 任务成功率(success) / 工具 Schema Token(schema_tokens)
+        --   / 端到端延迟(latency_ms) / 越权暴露率(permission_ok=0 即越权被拦截)。
+        -- status: ok(执行成功) | error(执行失败) | blocked(被调用前约束钩子拦截，未执行)
+        CREATE TABLE IF NOT EXISTS tool_routing (
+            id            TEXT PRIMARY KEY,
+            trace_id      TEXT NOT NULL DEFAULT '',
+            session_id    TEXT NOT NULL DEFAULT '',
+            user_id       TEXT NOT NULL DEFAULT '',
+            tool_name     TEXT NOT NULL,
+            namespace     TEXT NOT NULL DEFAULT '',
+            routed_by     TEXT NOT NULL DEFAULT '',
+            args_json     TEXT NOT NULL DEFAULT '{}',
+            risk_level    TEXT NOT NULL DEFAULT 'low',
+            schema_valid  INTEGER NOT NULL DEFAULT 1,
+            permission_ok INTEGER NOT NULL DEFAULT 1,
+            risk_blocked  INTEGER NOT NULL DEFAULT 0,
+            rate_limited  INTEGER NOT NULL DEFAULT 0,
+            allowed       INTEGER NOT NULL DEFAULT 1,
+            blocked_code  TEXT NOT NULL DEFAULT '',
+            status        TEXT NOT NULL DEFAULT 'ok',
+            success       INTEGER NOT NULL DEFAULT 1,
+            schema_tokens INTEGER NOT NULL DEFAULT 0,
+            latency_ms    INTEGER NOT NULL DEFAULT 0,
+            error         TEXT NOT NULL DEFAULT '',
+            created_at    TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_tool_routing_created ON tool_routing(created_at);
+        CREATE INDEX IF NOT EXISTS idx_tool_routing_tool ON tool_routing(tool_name, created_at);
+        CREATE INDEX IF NOT EXISTS idx_tool_routing_trace ON tool_routing(trace_id);
+
+        -- 能力缺口（Capability Gap）：系统无合适工具/能力解决用户问题时留痕（需求5/6）。
+        -- scenario 为归一化场景键（如 realtime_weather）；proposed_json 存候选 CLI/URL 方案；
+        -- chosen 存用户 HITL 选定的方案 id；status: pending(待选)/executed(已执行)/sedimented(已沉淀)。
+        -- 同 scenario 累计次数达阈值即在可观测性提示「沉淀为 skill/工具」（系统可进化性）。
+        CREATE TABLE IF NOT EXISTS capability_gaps (
+            id            TEXT PRIMARY KEY,
+            session_id    TEXT NOT NULL DEFAULT '',
+            user_id       TEXT NOT NULL DEFAULT '',
+            trace_id      TEXT NOT NULL DEFAULT '',
+            query         TEXT NOT NULL DEFAULT '',
+            scenario      TEXT NOT NULL DEFAULT '',
+            context_json  TEXT NOT NULL DEFAULT '{}',
+            proposed_json TEXT NOT NULL DEFAULT '[]',
+            chosen        TEXT NOT NULL DEFAULT '',
+            status        TEXT NOT NULL DEFAULT 'pending',
+            executions    INTEGER NOT NULL DEFAULT 0,
+            last_result   TEXT NOT NULL DEFAULT '',
+            created_at    TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_cap_gaps_created ON capability_gaps(created_at);
+        CREATE INDEX IF NOT EXISTS idx_cap_gaps_scenario ON capability_gaps(scenario, created_at);
 
         -- CI/CD 流水线（运维角色）：一次流水线运行 = 一条 pipeline_run，每个阶段 = 一条 pipeline_stage。
         -- 阶段固定六段：commit(代码提交) → unit_test(单元测试) → eval_regression(评估回归/EDD)
@@ -993,6 +1135,9 @@ def init_db(conn: sqlite3.Connection):
                 sources        TEXT NOT NULL DEFAULT '[]',
                 embedding      TEXT NOT NULL DEFAULT '[]',
                 hit_count      INTEGER NOT NULL DEFAULT 0,
+                scope          TEXT NOT NULL DEFAULT 'personal',
+                is_realtime    INTEGER NOT NULL DEFAULT 0,
+                expires_at     TEXT NOT NULL DEFAULT '',
                 created_at     TEXT NOT NULL,
                 last_used_at   TEXT NOT NULL
             );
@@ -1003,6 +1148,23 @@ def init_db(conn: sqlite3.Connection):
         conn.execute("CREATE INDEX IF NOT EXISTS idx_semantic_cache_user_used"
                      " ON semantic_cache(user_id, last_used_at)")
         conn.execute("INSERT INTO schema_migrations VALUES ('semantic_cache_v1',?)",
+                     (datetime.now().isoformat(),))
+    if not conn.execute("SELECT 1 FROM schema_migrations WHERE version='semantic_cache_v2'").fetchone():
+        # 语义缓存整改（需求1/2）：增加「公共/个人」域、「实时/非实时」标签与阶梯过期时间。
+        # scope='public' 的条目以哨兵 user_id='__public__' 存储 → 全体用户共享复用；
+        # scope='personal' 仍按真实 user_id 隔离。expires_at 为空串=旧数据不过期（向后兼容），
+        # 新写入按「实时 2h / 非实时冷3天·常命中7天·热点30天」阶梯计算并落 expires_at。
+        scols = {r[1] for r in conn.execute("PRAGMA table_info(semantic_cache)")}
+        if "scope" not in scols:
+            conn.execute("ALTER TABLE semantic_cache ADD COLUMN scope TEXT NOT NULL DEFAULT 'personal'")
+        if "is_realtime" not in scols:
+            conn.execute("ALTER TABLE semantic_cache ADD COLUMN is_realtime INTEGER NOT NULL DEFAULT 0")
+        if "expires_at" not in scols:
+            conn.execute("ALTER TABLE semantic_cache ADD COLUMN expires_at TEXT NOT NULL DEFAULT ''")
+        # 公共域按 question_norm 全局去重、按 scope 检索的辅助索引
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_semantic_cache_scope"
+                     " ON semantic_cache(scope, last_used_at)")
+        conn.execute("INSERT INTO schema_migrations VALUES ('semantic_cache_v2',?)",
                      (datetime.now().isoformat(),))
     if not conn.execute("SELECT 1 FROM schema_migrations WHERE version='prompt_skill_eval_v1'").fetchone():
         # Prompt/Skill 评测与上线：
@@ -1052,6 +1214,124 @@ def init_db(conn: sqlite3.Connection):
         conn.execute("CREATE INDEX IF NOT EXISTS idx_prompt_skill_evals_target"
                      " ON prompt_skill_evals(target_type, target_id, created_at)")
         conn.execute("INSERT INTO schema_migrations VALUES ('prompt_skill_eval_v1',?)",
+                     (datetime.now().isoformat(),))
+    if not conn.execute("SELECT 1 FROM schema_migrations WHERE version='gateway_keys_v2'").fetchone():
+        # 密钥体系分层：key_type=internal(系统内部调用)|public(公共密钥)|user(用户密钥)。
+        # - 公共密钥：全体未分配用户密钥的用户共用，按「每用户」设每日 Token/请求限额
+        #   （daily_token_limit/daily_request_limit）与每分钟流控（rate_per_minute）；
+        # - 用户密钥：bound_users JSON 强制绑定 1..n 个用户，沿用 token_quota/request_quota
+        #   总配额并可设每分钟流控；
+        # - gateway_key_usage：按 (key_id, user_id, day) 计量，供公共密钥每日限额与
+        #   用户「我的配额」展示；gateway_settings.outbound_keys 保存 {key_id: 明文}
+        #   映射（本地信任边界），系统出网时按用户解析自动携带。
+        kcols = {r[1] for r in conn.execute("PRAGMA table_info(gateway_keys)")}
+        if "key_type" not in kcols:
+            conn.execute("ALTER TABLE gateway_keys ADD COLUMN key_type TEXT NOT NULL DEFAULT 'user'")
+        if "bound_users" not in kcols:
+            conn.execute("ALTER TABLE gateway_keys ADD COLUMN bound_users TEXT NOT NULL DEFAULT '[]'")
+        if "daily_token_limit" not in kcols:
+            conn.execute("ALTER TABLE gateway_keys ADD COLUMN daily_token_limit INTEGER NOT NULL DEFAULT 0")
+        if "daily_request_limit" not in kcols:
+            conn.execute("ALTER TABLE gateway_keys ADD COLUMN daily_request_limit INTEGER NOT NULL DEFAULT 0")
+        if "rate_per_minute" not in kcols:
+            conn.execute("ALTER TABLE gateway_keys ADD COLUMN rate_per_minute INTEGER NOT NULL DEFAULT 0")
+        # 存量「系统内部调用」密钥行归为 internal
+        conn.execute("UPDATE gateway_keys SET key_type='internal' WHERE name='系统内部调用'")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS gateway_key_usage (
+                key_id     TEXT NOT NULL,
+                user_id    TEXT NOT NULL DEFAULT '',
+                day        TEXT NOT NULL,
+                tokens     INTEGER NOT NULL DEFAULT 0,
+                requests   INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (key_id, user_id, day)
+            );
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_gateway_key_usage_user"
+                     " ON gateway_key_usage(user_id, day)")
+        scols2 = {r[1] for r in conn.execute("PRAGMA table_info(gateway_settings)")}
+        if "outbound_keys" not in scols2:
+            conn.execute("ALTER TABLE gateway_settings ADD COLUMN outbound_keys TEXT NOT NULL DEFAULT '{}'")
+        if "security_alert_min_severity" not in scols2:
+            conn.execute("ALTER TABLE gateway_settings ADD COLUMN security_alert_min_severity"
+                         " TEXT NOT NULL DEFAULT 'medium'")
+        conn.execute("INSERT INTO schema_migrations VALUES ('gateway_keys_v2',?)",
+                     (datetime.now().isoformat(),))
+    if not conn.execute("SELECT 1 FROM schema_migrations WHERE version='gateway_rules_pb_v1'").fetchone():
+        # 主备路由策略：lb_strategy=primary_backup 时，primary_upstream 为主路由，
+        # upstreams 列表中其余为备路由；主路由连续失败达 failover_threshold 次
+        # （gateway_upstreams.fail_count）后，网关自动把后续请求切换到备用路由。
+        rcols = {r[1] for r in conn.execute("PRAGMA table_info(gateway_rules)")}
+        if "primary_upstream" not in rcols:
+            conn.execute("ALTER TABLE gateway_rules ADD COLUMN primary_upstream TEXT NOT NULL DEFAULT ''")
+        if "failover_threshold" not in rcols:
+            conn.execute("ALTER TABLE gateway_rules ADD COLUMN failover_threshold INTEGER NOT NULL DEFAULT 3")
+        conn.execute("INSERT INTO schema_migrations VALUES ('gateway_rules_pb_v1',?)",
+                     (datetime.now().isoformat(),))
+    if not conn.execute("SELECT 1 FROM schema_migrations WHERE version='gateway_security_events_v1'").fetchone():
+        # 安全审计风险事件闭环：代理链路命中风险即落一条事件（关联 gateway_logs），
+        # 安全审计中心轮询未确认事件弹窗告警；处理策略建议由模型生成（suggestion），
+        # 运维处理后记录 status/resolution/resolved_by/resolved_at/resolved_note 留痕。
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS gateway_security_events (
+                id           TEXT PRIMARY KEY,
+                log_id       TEXT NOT NULL DEFAULT '',
+                created_at   TEXT NOT NULL,
+                client_ip    TEXT NOT NULL DEFAULT '',
+                user_id      TEXT NOT NULL DEFAULT '',
+                role         TEXT NOT NULL DEFAULT '',
+                model        TEXT NOT NULL DEFAULT '',
+                key_name     TEXT NOT NULL DEFAULT '',
+                risk_level   TEXT NOT NULL DEFAULT 'none',
+                risk_score   INTEGER NOT NULL DEFAULT 0,
+                findings     TEXT NOT NULL DEFAULT '[]',
+                audit_action TEXT NOT NULL DEFAULT '',
+                status       TEXT NOT NULL DEFAULT 'pending',
+                acked        INTEGER NOT NULL DEFAULT 0,
+                suggestion   TEXT NOT NULL DEFAULT '',
+                suggested_at TEXT NOT NULL DEFAULT '',
+                resolution   TEXT NOT NULL DEFAULT '',
+                resolved_by  TEXT NOT NULL DEFAULT '',
+                resolved_at  TEXT NOT NULL DEFAULT '',
+                resolved_note TEXT NOT NULL DEFAULT ''
+            );
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_gateway_sec_events_status"
+                     " ON gateway_security_events(status, created_at)")
+        conn.execute("INSERT INTO schema_migrations VALUES ('gateway_security_events_v1',?)",
+                     (datetime.now().isoformat(),))
+    if not conn.execute("SELECT 1 FROM schema_migrations WHERE version='kb_graph_vectors_v1'").fetchone():
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS kb_graph_vectors (
+                kb_id      TEXT NOT NULL,
+                node_id    TEXT NOT NULL,
+                text_hash  TEXT NOT NULL DEFAULT '',
+                vec        TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (kb_id, node_id)
+            );
+            """
+        )
+        gcols = {r[1] for r in conn.execute("PRAGMA table_info(capability_gaps)")}
+        if "followup_text" not in gcols:
+            conn.execute("ALTER TABLE capability_gaps ADD COLUMN followup_text TEXT NOT NULL DEFAULT ''")
+        conn.execute("INSERT INTO schema_migrations VALUES ('kb_graph_vectors_v1',?)",
+                     (datetime.now().isoformat(),))
+
+    # 技能公共/个人可见性（沉淀建议同意后编辑归属）；存量默认 personal。
+    # 独立版本门控：production_ab_v1 早已应用，_migrate 不再对存量库执行，故须单独补列。
+    if not conn.execute("SELECT 1 FROM schema_migrations WHERE version='skill_visibility_v1'").fetchone():
+        skill_cols = {r[1] for r in conn.execute("PRAGMA table_info(user_skills)")}
+        if "visibility" not in skill_cols:
+            conn.execute("ALTER TABLE user_skills ADD COLUMN visibility TEXT NOT NULL DEFAULT 'personal'")
+            logger.info("user_skills 补加列: visibility")
+        conn.execute("INSERT INTO schema_migrations VALUES ('skill_visibility_v1',?)",
                      (datetime.now().isoformat(),))
     conn.commit()
 

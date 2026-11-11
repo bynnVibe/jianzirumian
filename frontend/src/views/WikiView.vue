@@ -1,6 +1,6 @@
 <template>
-  <div class="wiki-page">
-    <div class="page-header">
+  <div class="wiki-page" :class="{ embedded }">
+    <div v-if="!embedded" class="page-header">
       <div>
         <h2>知识百科</h2>
         <p class="page-desc">笔记入库后由系统自动编译的结构化词条；提问时检索会优先命中这些百科卡片</p>
@@ -15,7 +15,7 @@
         <option value="source">来源卡片</option>
         <option value="digest">综合词条</option>
       </select>
-      <select v-model="kbFilter" class="filter-select" @change="loadPages">
+      <select v-if="!embedded" v-model="kbFilter" class="filter-select" @change="loadPages">
         <option value="">全部知识库</option>
         <option v-for="kb in kbList" :key="kb.id" :value="kb.id">{{ kb.name }}</option>
       </select>
@@ -23,7 +23,7 @@
     </div>
 
     <!-- 对话沉淀（llm-wiki 路径A：高频主题 → 私人综合词条） -->
-    <div class="conv-card" v-if="conv.enabled">
+    <div class="conv-card" v-if="conv.enabled && !embedded">
       <div class="conv-head">
         <div class="conv-head-text">
           <h3 class="conv-title">对话沉淀</h3>
@@ -135,11 +135,16 @@ const authStore = useAuthStore()
 const assistant = useAssistantStore()
 const md = new MarkdownIt({ html: false, linkify: true, breaks: true })
 
+const props = defineProps({
+  kbId: { type: String, default: '' },
+  embedded: { type: Boolean, default: false },
+})
+
 const wikiPages = ref([])
 const kbList = ref([])
 const loading = ref(false)
 const typeFilter = ref('')
-const kbFilter = ref('')
+const kbFilter = ref(props.kbId)
 const detailPage = ref(null)
 const deleteTarget = ref(null)
 const deleting = ref(false)
@@ -264,7 +269,7 @@ onMounted(async () => {
     console.error('加载知识库列表失败:', e)
   }
   await loadPages()
-  await loadConversation(true)
+  if (!props.embedded) await loadConversation(true)
   window.addEventListener('wiki:page-updated', onWikiPageUpdated)
 })
 
@@ -316,6 +321,13 @@ watch(detailPage, (p) => {
   }
 })
 
+// 内嵌于知识库详情时，跟随所在知识库切换
+watch(() => props.kbId, (id) => {
+  if (!props.embedded) return
+  kbFilter.value = id || ''
+  loadPages()
+})
+
 // 知识助手应用编辑后刷新列表与已打开的详情
 function onWikiPageUpdated() {
   loadPages()
@@ -335,6 +347,11 @@ function onWikiPageUpdated() {
   padding: 24px 28px;
   height: 100%;
   overflow-y: auto;
+}
+
+.wiki-page.embedded {
+  padding: 20px 24px;
+  box-sizing: border-box;
 }
 
 .page-header {

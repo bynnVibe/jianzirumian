@@ -23,6 +23,7 @@ from app.services.gateway import keys as key_svc
 from app.services.gateway import logs as log_svc
 from app.services.gateway import rules as rule_svc
 from app.services.gateway import security
+from app.services.gateway import security_events as sec_event_svc
 from app.services.gateway import settings as settings_svc
 from app.services.gateway import upstreams as up_svc
 
@@ -76,6 +77,9 @@ class RuleBody(BaseModel):
     model_pattern: str
     upstreams: List[str] = []
     lb_strategy: str = "weighted"
+    # 主备路由（lb_strategy=primary_backup）：主路由上游 id + 连续失败切换阈值
+    primary_upstream: str = ""
+    failover_threshold: int = 3
     priority: int = 0
     is_default: bool = False
     allowed_users: List[str] = []
@@ -87,6 +91,8 @@ class RulePatch(BaseModel):
     model_pattern: Optional[str] = None
     upstreams: Optional[List[str]] = None
     lb_strategy: Optional[str] = None
+    primary_upstream: Optional[str] = None
+    failover_threshold: Optional[int] = None
     priority: Optional[int] = None
     is_default: Optional[bool] = None
     allowed_users: Optional[List[str]] = None
@@ -102,16 +108,28 @@ class RoleRouteBody(BaseModel):
 
 class KeyBody(BaseModel):
     name: str
+    # 密钥类型：public(公共密钥，默认，可设每用户每日限额/流控) | user(用户密钥，强制绑定用户)
+    key_type: str = "public"
+    # 用户密钥绑定的用户 id 列表（key_type=user 时必填 1..n 个）
+    bound_users: List[str] = []
     token_quota: int = 0
     request_quota: int = 0
+    # 公共密钥：每用户每日 Token/请求限额；两类密钥均可设每分钟流控
+    daily_token_limit: int = 0
+    daily_request_limit: int = 0
+    rate_per_minute: int = 0
     allowed_models: List[str] = []
     expires_at: Optional[str] = None
 
 
 class KeyPatch(BaseModel):
     name: Optional[str] = None
+    bound_users: Optional[List[str]] = None
     token_quota: Optional[int] = None
     request_quota: Optional[int] = None
+    daily_token_limit: Optional[int] = None
+    daily_request_limit: Optional[int] = None
+    rate_per_minute: Optional[int] = None
     allowed_models: Optional[List[str]] = None
     enabled: Optional[bool] = None
     expires_at: Optional[str] = None
@@ -129,6 +147,18 @@ class SettingsBody(BaseModel):
     log_retention_days: Optional[int] = None
     # 网关默认模型（业务路由未指定模型名时的兜底出网模型；空串=清除回退 .env）
     default_model: Optional[str] = None
+    # 安全审计事件弹窗告警的最低风险等级（low|medium|high|critical）
+    security_alert_min_severity: Optional[str] = None
+
+
+class EventResolveBody(BaseModel):
+    # 处理动作：masked|blocked|whitelisted|ignored|investigated|other
+    resolution: str = ""
+    note: str = ""
+
+
+class EventAckBody(BaseModel):
+    event_ids: List[str] = []
 
 
 # ---------------------------------------------------------------------------
@@ -349,7 +379,11 @@ async def create_key(body: KeyBody, ops: dict = Depends(require_ops)):
         info = key_svc.create_key(
             body.name, created_by=ops.get("username") or ops.get("id") or "",
             token_quota=body.token_quota, request_quota=body.request_quota,
-            allowed_models=body.allowed_models, expires_at=body.expires_at)
+            allowed_models=body.allowed_models, expires_at=body.expires_at,
+            key_type=body.key_type, bound_users=body.bound_users,
+            daily_token_limit=body.daily_token_limit,
+            daily_request_limit=body.daily_request_limit,
+            rate_per_minute=body.rate_per_minute)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     # 明文 key 仅此次返回
@@ -469,3 +503,89 @@ async def scan_preview(payload: dict, _ops: dict = Depends(require_ops)):
     _, findings, risk_level, risk_score = security.scan_payload(obj, settings, do_mask=False)
     return {"success": True, "findings": findings,
             "risk_level": risk_level, "risk_score": risk_score}
+
+
+# ---------------------------------------------------------------------------
+# 安全审计中心：风险事件闭环（记录 → 弹窗告警 → 模型建议 → 处理留痕）
+# ---------------------------------------------------------------------------
+
+@router.get("/security-events")
+async def list_security_events(
+    status: str = "", alert_only: bool = False, limit: int = 50, offset: int = 0,
+    _ops: dict = Depends(require_ops),
+):
+    """风险事件列表。alert_only=true 只返回需弹窗告警的（pending+未确认+达阈值）。"""
+    min_sev = str(settings_svc.get_settings().get("security_alert_min_severity") or "medium")
+    result = sec_event_svc.list_events(
+        status=status, limit=limit, offset=offset,
+        alert_only=alert_only, min_severity=min_sev)
+    return {"success": True, **result, "min_severity": min_sev,
+            "resolutions": sec_event_svc.RESOLUTIONS,
+            "resolution_labels": sec_event_svc.RESOLUTION_LABELS}
+
+
+@router.get("/security-events/{event_id}")
+async def get_security_event(event_id: str, _ops: dict = Depends(require_ops)):
+    event = sec_event_svc.get_event(event_id)
+    if not event:
+        raise HTTPException(status_code=404, detail="风险事件不存在")
+    return {"success": True, "event": event}
+
+
+@router.post("/security-events/ack")
+async def ack_security_events(body: EventAckBody, _ops: dict = Depends(require_ops)):
+    """确认弹窗告警（body.event_ids 为空=确认全部未确认的待处理事件）。"""
+    n = sec_event_svc.ack_events(body.event_ids or None)
+    return {"success": True, "acked": n}
+
+
+@router.post("/security-events/{event_id}/suggest")
+async def suggest_security_event(event_id: str, _ops: dict = Depends(require_ops)):
+    """由模型生成处理策略建议并落库（模型不可用时降级规则化建议）。"""
+    result = await sec_event_svc.generate_suggestion(event_id)
+    if not result.get("success"):
+        raise HTTPException(status_code=404, detail=result.get("error") or "事件不存在")
+    return {"success": True, "event": result.get("event")}
+
+
+@router.post("/security-events/{event_id}/resolve")
+async def resolve_security_event(
+    event_id: str, body: EventResolveBody, ops: dict = Depends(require_ops),
+):
+    """运维处理事件并留痕（status→resolved）。"""
+    try:
+        event = sec_event_svc.resolve_event(
+            event_id, resolution=body.resolution, note=body.note,
+            resolved_by=ops.get("username") or ops.get("id") or "")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not event:
+        raise HTTPException(status_code=404, detail="风险事件不存在")
+    return {"success": True, "event": event}
+
+
+@router.post("/security-events/{event_id}/reopen")
+async def reopen_security_event(event_id: str, _ops: dict = Depends(require_ops)):
+    event = sec_event_svc.reopen_event(event_id)
+    if not event:
+        raise HTTPException(status_code=404, detail="风险事件不存在")
+    return {"success": True, "event": event}
+
+
+@router.delete("/security-events/{event_id}")
+async def delete_security_event(event_id: str, _ops: dict = Depends(require_ops)):
+    if not sec_event_svc.delete_event(event_id):
+        raise HTTPException(status_code=404, detail="风险事件不存在")
+    return {"success": True}
+
+
+# ---------------------------------------------------------------------------
+# 当前用户配额状态（供聊天界面友好提示，普通登录用户可访问）
+# ---------------------------------------------------------------------------
+
+@router.get("/my-quota")
+async def my_quota(user: dict = Depends(get_current_user)):
+    """当前登录用户的出网密钥类型与配额用量（用尽/降级时前端友好提示，非阻断）。"""
+    user_id = str(user.get("id") or user.get("username") or "")
+    return {"success": True, "quota": key_svc.user_quota_status(user_id)}
+

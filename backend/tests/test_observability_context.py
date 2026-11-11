@@ -98,6 +98,26 @@ def test_memory_usage_overview_empty_and_guest():
     assert MemoryService.usage_overview("")["total"] == 0
 
 
+def test_memory_drill_filters_and_explain():
+    uid = _uid()
+    try:
+        _add_memory(uid, "用户偏好清淡饮食", "preference", 0.9, last_used=True)
+        _add_memory(uid, "用户有高血压", "fact", 0.85, last_used=True)
+        _add_memory(uid, "计划三个月减重", "goal", 0.4)
+        assert MemoryService.drill_memories(uid, "all")["total"] == 3
+        assert MemoryService.drill_memories(uid, "profile")["total"] == 2
+        assert MemoryService.drill_memories(uid, "retrieved")["total"] == 2
+        assert MemoryService.drill_memories(uid, "never_used")["total"] == 1
+        assert MemoryService.drill_memories(uid, "type:fact")["total"] == 1
+        imp = MemoryService.drill_memories(uid, "importance")
+        assert imp["items"][0]["importance"] == 0.9  # 重要度降序
+        assert "÷" in imp["explanation"]
+        # 口径说明代入真实数值
+        assert "3" in MemoryService.drill_memories(uid, "all")["explanation"]
+    finally:
+        _cleanup(uid, [])
+
+
 # ============================================
 # 上下文窗口 + 记忆组合概览
 # ============================================

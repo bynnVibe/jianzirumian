@@ -40,13 +40,19 @@
     <table v-else class="key-table">
       <thead>
         <tr>
-          <th>名称</th><th>密钥前缀</th><th class="num">Token 用量</th><th class="num">请求用量</th>
-          <th>可访问模型</th><th>状态</th><th>最近使用</th><th class="ops">操作</th>
+          <th>名称</th><th>类型</th><th>密钥前缀</th><th class="num">Token 用量</th><th class="num">请求用量</th>
+          <th>每用户日限额 / 流控</th><th>可访问模型</th><th>状态</th><th>最近使用</th><th class="ops">操作</th>
         </tr>
       </thead>
       <tbody>
         <tr v-for="k in keys" :key="k.id">
-          <td class="k-name">{{ k.name }}</td>
+          <td class="k-name">
+            {{ k.name }}
+            <div v-if="k.key_type === 'user' && k.bound_users?.length" class="bound-users">
+              绑定 {{ k.bound_users.length }} 人：{{ boundNames(k.bound_users) }}
+            </div>
+          </td>
+          <td><span class="type-pill" :class="`tp-${k.key_type}`">{{ k.key_type_label || typeLabel(k.key_type) }}</span></td>
           <td class="mono k-prefix">{{ k.key_prefix }}…</td>
           <td class="num">
             <div class="quota-cell">
@@ -59,6 +65,14 @@
               <span>{{ formatNum(k.request_count) }}<template v-if="k.request_quota"> / {{ formatNum(k.request_quota) }}</template></span>
               <div v-if="k.request_quota" class="quota-bar"><div class="quota-fill" :style="{ width: pct(k.request_count, k.request_quota) + '%' }"></div></div>
             </div>
+          </td>
+          <td class="limits-cell">
+            <template v-if="k.key_type === 'public'">
+              <div v-if="k.daily_token_limit">日 {{ formatNum(k.daily_token_limit) }} Token/人</div>
+              <div v-if="k.daily_request_limit">日 {{ formatNum(k.daily_request_limit) }} 次/人</div>
+            </template>
+            <div v-if="k.rate_per_minute" class="rate-line">{{ k.rate_per_minute }} 次/分</div>
+            <span v-if="!k.daily_token_limit && !k.daily_request_limit && !k.rate_per_minute" class="wild">不限</span>
           </td>
           <td>
             <span v-if="!k.allowed_models?.length" class="wild">不限</span>
@@ -92,6 +106,36 @@
             <span class="field-label">密钥名称 *（下游用户/应用标识）</span>
             <input v-model.trim="form.name" class="field-input" placeholder="如 张三的桌面客户端" />
           </label>
+
+          <!-- 密钥类型：创建时选择；编辑时不可改（类型决定配额语义） -->
+          <div class="field span-2">
+            <span class="field-label">密钥类型 *</span>
+            <div v-if="!editing" class="type-choose">
+              <label class="type-opt" :class="{ active: form.key_type === 'public' }">
+                <input type="radio" value="public" v-model="form.key_type" />
+                <span class="to-body"><strong>公共密钥</strong><em>全体未分配用户密钥的用户共用；按「每用户」设每日限额与流控</em></span>
+              </label>
+              <label class="type-opt" :class="{ active: form.key_type === 'user' }">
+                <input type="radio" value="user" v-model="form.key_type" />
+                <span class="to-body"><strong>用户密钥</strong><em>强制绑定 1 个或多个用户；可设 Token 配额与流控策略</em></span>
+              </label>
+            </div>
+            <div v-else class="type-fixed">当前类型：<span class="type-pill" :class="`tp-${form.key_type}`">{{ typeLabel(form.key_type) }}</span>（类型创建后不可修改）</div>
+          </div>
+
+          <!-- 用户密钥：强制绑定用户 -->
+          <div v-if="form.key_type === 'user'" class="field span-2">
+            <span class="field-label">绑定用户 *（至少 1 个，可多选）</span>
+            <div v-if="!users.length" class="reg-hint">暂无可选用户</div>
+            <div v-else class="check-list">
+              <label v-for="u in users" :key="u.id" class="check-item">
+                <input type="checkbox" :value="String(u.id)" v-model="form.bound_users" />
+                <span>{{ u.username }}</span>
+                <em>{{ u.role }}</em>
+              </label>
+            </div>
+          </div>
+
           <label class="field">
             <span class="field-label">Token 软限额（0 = 不限）</span>
             <input v-model.number="form.token_quota" type="number" min="0" class="field-input" />
@@ -100,6 +144,23 @@
             <span class="field-label">请求次数配额（0 = 不限）</span>
             <input v-model.number="form.request_quota" type="number" min="0" class="field-input" />
           </label>
+
+          <!-- 公共密钥：每用户每日限额 -->
+          <template v-if="form.key_type === 'public'">
+            <label class="field">
+              <span class="field-label">每用户每日 Token 限额（0 = 不限）</span>
+              <input v-model.number="form.daily_token_limit" type="number" min="0" class="field-input" />
+            </label>
+            <label class="field">
+              <span class="field-label">每用户每日请求限额（0 = 不限）</span>
+              <input v-model.number="form.daily_request_limit" type="number" min="0" class="field-input" />
+            </label>
+          </template>
+          <label class="field span-2">
+            <span class="field-label">每分钟流控（单密钥请求数上限，0 = 不限）</span>
+            <input v-model.number="form.rate_per_minute" type="number" min="0" class="field-input" />
+          </label>
+
           <label class="field span-2">
             <span class="field-label">可访问模型（逗号分隔，留空 = 不限）</span>
             <input v-model.trim="form.modelsText" class="field-input mono" placeholder="gpt-4o-mini, gpt-3.5-turbo" list="gw-model-list" />
@@ -112,7 +173,7 @@
             <input v-model="form.expires_at" type="datetime-local" class="field-input" />
           </label>
         </div>
-        <p class="field-label">Token 为调用后计量，并发与单次响应可能超额，不是硬费用上限。请求次数在进入上游前认领一次，失败不退，渠道重试不重复扣。</p>
+        <p class="field-label">Token 为调用后计量，并发与单次响应可能超额，不是硬费用上限。请求次数在进入上游前认领一次，失败不退，渠道重试不重复扣。<strong>公共密钥</strong>额度按「每用户每日」计，用尽提示联系管理员；<strong>用户密钥</strong>配额用尽自动降级公共密钥，不阻断使用。</p>
         <p v-if="formError" class="err-tip">{{ formError }}</p>
         <div class="modal-actions">
           <button class="btn btn-ghost" @click="showModal = false">取消</button>
@@ -149,11 +210,12 @@ import { ref, reactive, computed, onMounted } from 'vue'
 import {
   listGatewayKeys, createGatewayKey, updateGatewayKey,
   deleteGatewayKey, resetGatewayKey,
-  getGatewayInternalKey, rotateGatewayInternalKey,
+  getGatewayInternalKey, rotateGatewayInternalKey, listUsers,
 } from '@/api'
 
 const keys = ref([])
 const models = ref([])
+const users = ref([])
 const loading = ref(true)
 const errorMsg = ref('')
 const origin = window.location.origin
@@ -167,10 +229,21 @@ const saving = ref(false)
 const formError = ref('')
 const newPlainKey = ref('')
 const copied = ref(false)
-const form = reactive({ name: '', token_quota: 0, request_quota: 0, modelsText: '', expires_at: '' })
+const form = reactive({
+  name: '', key_type: 'public', bound_users: [],
+  token_quota: 0, request_quota: 0,
+  daily_token_limit: 0, daily_request_limit: 0, rate_per_minute: 0,
+  modelsText: '', expires_at: '',
+})
 
 function formatNum(n) { return (n || 0).toLocaleString('en-US') }
 function pct(used, quota) { return quota ? Math.min(100, Math.round((used / quota) * 100)) : 0 }
+function typeLabel(t) { return { internal: '系统内部', public: '公共密钥', user: '用户密钥' }[t] || t }
+function boundNames(ids) {
+  const byId = Object.fromEntries(users.value.map((u) => [String(u.id), u.username]))
+  const names = (ids || []).map((id) => byId[String(id)] || id)
+  return names.length > 3 ? `${names.slice(0, 3).join('、')} 等 ${names.length} 人` : names.join('、')
+}
 function formatTime(iso) {
   if (!iso) return '-'
   const d = new Date(iso)
@@ -192,6 +265,15 @@ async function load() {
   }
 }
 
+async function loadUsers() {
+  try {
+    const res = await listUsers()
+    users.value = res.data.users || res.data || []
+  } catch (e) {
+    // 用户列表加载失败不阻断密钥管理（绑定下拉为空时给出提示）
+  }
+}
+
 async function onRotateInternal() {
   if (!confirm('确认轮换系统内部出网密钥？旧密钥将立即失效，业务模块下次出网自动改用新密钥。')) return
   rotating.value = true
@@ -210,13 +292,21 @@ async function onRotateInternal() {
 
 function openCreate() {
   editing.value = null
-  Object.assign(form, { name: '', token_quota: 0, request_quota: 0, modelsText: '', expires_at: '' })
+  Object.assign(form, {
+    name: '', key_type: 'public', bound_users: [],
+    token_quota: 0, request_quota: 0,
+    daily_token_limit: 0, daily_request_limit: 0, rate_per_minute: 0,
+    modelsText: '', expires_at: '',
+  })
   formError.value = ''; showModal.value = true
 }
 function openEdit(k) {
   editing.value = k.id
   Object.assign(form, {
-    name: k.name, token_quota: k.token_quota, request_quota: k.request_quota,
+    name: k.name, key_type: k.key_type || 'user', bound_users: [...(k.bound_users || [])].map(String),
+    token_quota: k.token_quota, request_quota: k.request_quota,
+    daily_token_limit: k.daily_token_limit || 0, daily_request_limit: k.daily_request_limit || 0,
+    rate_per_minute: k.rate_per_minute || 0,
     modelsText: (k.allowed_models || []).join(', '),
     expires_at: k.expires_at ? k.expires_at.slice(0, 16) : '',
   })
@@ -227,15 +317,24 @@ async function onSave() {
   formError.value = ''
   const modelsList = form.modelsText.split(',').map((s) => s.trim()).filter(Boolean)
   const expires = form.expires_at ? new Date(form.expires_at).toISOString() : null
+  if (!editing.value && form.key_type === 'user' && !form.bound_users.length) {
+    formError.value = '用户密钥必须绑定至少 1 个用户'
+    return
+  }
   const payload = {
     name: form.name, token_quota: Number(form.token_quota) || 0,
     request_quota: Number(form.request_quota) || 0, allowed_models: modelsList, expires_at: expires,
+    bound_users: [...form.bound_users],
+    daily_token_limit: Number(form.daily_token_limit) || 0,
+    daily_request_limit: Number(form.daily_request_limit) || 0,
+    rate_per_minute: Number(form.rate_per_minute) || 0,
   }
   saving.value = true
   try {
     if (editing.value) {
       await updateGatewayKey(editing.value, payload)
     } else {
+      payload.key_type = form.key_type
       const res = await createGatewayKey(payload)
       newPlainKey.value = res.data.key?.key || ''
       copied.value = false
@@ -268,7 +367,7 @@ async function onDelete(k) {
   catch (e) { errorMsg.value = e.response?.data?.detail || '删除失败' }
 }
 
-onMounted(load)
+onMounted(() => { load(); loadUsers() })
 </script>
 
 <style scoped>
@@ -299,6 +398,35 @@ onMounted(load)
 .st-active { background: #e4f4e8; color: #3d8b52; }
 .st-disabled { background: #eee9e2; color: #8a7e72; }
 .st-expired { background: #fbe4e3; color: #c0392b; }
+
+/* 密钥类型徽标 */
+.type-pill { font-size: 10.5px; font-weight: 700; padding: 2px 8px; border-radius: 8px; white-space: nowrap; }
+.tp-internal { background: #eef2f7; color: #5a6b7d; }
+.tp-public { background: var(--color-primary-light); color: #a5703a; }
+.tp-user { background: #f0e8fb; color: #7a4aa5; }
+/* 名称下方绑定用户摘要 */
+.bound-users { font-size: 11px; font-weight: 400; color: var(--color-text-secondary); margin-top: 3px; line-height: 1.5; }
+/* 每用户日限额 / 流控列 */
+.limits-cell { font-size: 11.5px; color: var(--color-text); line-height: 1.6; }
+.limits-cell .rate-line { color: var(--color-text-secondary); }
+
+/* 表单：密钥类型单选卡片 */
+.type-choose { display: flex; flex-direction: column; gap: 8px; }
+.type-opt { display: flex; align-items: flex-start; gap: 8px; border: 1px solid var(--color-border); border-radius: 10px; padding: 10px 12px; cursor: pointer; background: #fff; }
+.type-opt.active { border-color: var(--color-primary); background: #fdf8f2; }
+.type-opt input { margin-top: 3px; cursor: pointer; }
+.to-body { display: flex; flex-direction: column; gap: 2px; }
+.to-body strong { font-size: 12.5px; }
+.to-body em { font-style: normal; font-size: 11.5px; color: var(--color-text-secondary); line-height: 1.5; }
+.type-fixed { font-size: 12.5px; color: var(--color-text-secondary); }
+
+/* 绑定用户多选（复用 RulesPanel 样式模式） */
+.reg-hint { font-size: 12px; color: #b8802a; background: #fdf0d9; padding: 8px 10px; border-radius: 6px; }
+.check-list { display: flex; flex-wrap: wrap; gap: 6px; max-height: 180px; overflow-y: auto; border: 1px solid var(--color-border); border-radius: 8px; padding: 8px; background: #fff; }
+.check-item { display: flex; align-items: center; gap: 5px; font-size: 12px; padding: 3px 8px; border-radius: 6px; background: #f7f2ea; cursor: pointer; }
+.check-item em { font-style: normal; color: var(--color-text-secondary); font-size: 11px; }
+.check-item input { cursor: pointer; }
+
 
 .icon-btn { background: transparent; border: none; color: var(--color-text-secondary); cursor: pointer; font-size: 12px; padding: 2px 4px; }
 .icon-btn:hover { color: var(--color-primary); }

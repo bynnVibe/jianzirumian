@@ -40,6 +40,9 @@
             <div class="rule-pattern mono">{{ r.model_pattern }}</div>
             <div class="rule-meta">
               <span class="strategy-pill">{{ strategyLabel(r.lb_strategy) }}</span>
+              <span v-if="r.lb_strategy === 'primary_backup'" class="pb-pill">
+                主：{{ upstreamName(r.primary_upstream) }} · 失败 {{ r.failover_threshold || 3 }} 次切备
+              </span>
               <span v-if="r.is_default" class="default-pill">默认</span>
               <span class="prio">优先级 {{ r.priority }}</span>
               <span v-if="!r.enabled" class="disabled-pill">已停用</span>
@@ -85,12 +88,33 @@
               <option value="round_robin">round_robin（轮询）</option>
               <option value="random">random（随机）</option>
               <option value="priority">priority（按上游列表顺序）</option>
+              <option value="primary_backup">primary_backup（主备路由）</option>
             </select>
           </label>
           <label class="field">
             <span class="field-label">优先级（越大越先匹配）</span>
             <input v-model.number="form.priority" type="number" class="field-input" />
           </label>
+
+          <!-- 主备路由：主路由选择 + 连续失败切换阈值（仅 primary_backup 时展示） -->
+          <template v-if="form.lb_strategy === 'primary_backup'">
+            <label class="field">
+              <span class="field-label">主路由（优先出网，连续失败后切备）</span>
+              <select v-model="form.primary_upstream" class="field-input">
+                <option value="" disabled>{{ selectedUpstreams.length ? '请选择主路由' : '请先勾选上游列表' }}</option>
+                <option v-for="id in selectedUpstreams" :key="id" :value="id">{{ upstreamName(id) }}</option>
+              </select>
+            </label>
+            <label class="field">
+              <span class="field-label">连续失败阈值（1-20，默认 3）</span>
+              <input v-model.number="form.failover_threshold" type="number" min="1" max="20" class="field-input" />
+            </label>
+            <p class="field span-2 pb-hint">
+              其余已勾选上游自动作为<strong>备路由</strong>：主路由连续失败达到阈值（或健康探测为异常）时，
+              网关自动把后续请求切换到备路由；主路由恢复成功后自动回切。
+            </p>
+          </template>
+
           <div class="field span-2">
             <span class="field-label">上游列表（多选，顺序即 priority 策略次序）</span>
             <div v-if="!upstreams.length" class="reg-hint">请先在「上游管理」页签中添加上游</div>
@@ -133,7 +157,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import {
   listGatewayRoutingRules, createGatewayRoutingRule, updateGatewayRoutingRule,
   deleteGatewayRoutingRule, listUsers,
@@ -152,12 +176,22 @@ const saving = ref(false)
 const formError = ref('')
 const form = reactive({
   model_pattern: '', upstreams: [], lb_strategy: 'weighted', priority: 0,
+  primary_upstream: '', failover_threshold: 3,
   is_default: false, allowed_users: [], enabled: true,
 })
 
-function strategyLabel(s) {
-  return { weighted: '加权', round_robin: '轮询', random: '随机', priority: '顺序' }[s] || '加权'
+// 主备路由：主路由下拉候选 = 已勾选的上游；upstreamName 用于列表回显
+const selectedUpstreams = computed(() => form.upstreams.slice())
+function upstreamName(id) {
+  if (!id) return '未指定'
+  const u = upstreams.value.find((x) => x.id === id)
+  return u ? u.name : id
 }
+
+function strategyLabel(s) {
+  return { weighted: '加权', round_robin: '轮询', random: '随机', priority: '顺序', primary_backup: '主备路由' }[s] || '加权'
+}
+
 function tierLabel(t) { return { paid: '付费', free: '免费', subscription: '订阅' }[t] || t }
 
 async function load() {
@@ -187,6 +221,7 @@ async function loadUsers() {
 function resetForm() {
   Object.assign(form, {
     model_pattern: '', upstreams: [], lb_strategy: 'weighted', priority: 0,
+    primary_upstream: '', failover_threshold: 3,
     is_default: false, allowed_users: [], enabled: true,
   })
 }
@@ -199,6 +234,7 @@ function openEdit(r) {
   Object.assign(form, {
     model_pattern: r.model_pattern, upstreams: [...(r.upstreams || [])],
     lb_strategy: r.lb_strategy || 'weighted', priority: r.priority || 0,
+    primary_upstream: r.primary_upstream || '', failover_threshold: r.failover_threshold || 3,
     is_default: !!r.is_default, allowed_users: (r.allowed_users || []).map(String),
     enabled: !!r.enabled,
   })
@@ -207,11 +243,16 @@ function openEdit(r) {
 }
 
 function buildPayload() {
-  return {
+  const payload = {
     model_pattern: form.model_pattern, upstreams: [...form.upstreams],
     lb_strategy: form.lb_strategy, priority: Number(form.priority) || 0,
     is_default: form.is_default, allowed_users: [...form.allowed_users], enabled: form.enabled,
   }
+  if (form.lb_strategy === 'primary_backup') {
+    payload.primary_upstream = form.primary_upstream
+    payload.failover_threshold = Number(form.failover_threshold) || 3
+  }
+  return payload
 }
 
 async function onSave() {
@@ -219,6 +260,10 @@ async function onSave() {
   const payload = buildPayload()
   if (!payload.model_pattern) { formError.value = '模型模式不能为空'; return }
   if (!payload.upstreams.length) { formError.value = '请至少选择一个上游'; return }
+  if (payload.lb_strategy === 'primary_backup' && !payload.primary_upstream) {
+    formError.value = '主备路由需指定一个主路由（须来自已勾选的上游列表）'; return
+  }
+
   saving.value = true
   try {
     if (editing.value) await updateGatewayRoutingRule(editing.value, payload)
@@ -279,6 +324,9 @@ onMounted(() => { load(); loadUsers() })
 .default-pill { font-size: 10.5px; font-weight: 700; padding: 2px 8px; border-radius: 8px; background: var(--color-primary-light); color: #a5703a; }
 .disabled-pill { font-size: 10.5px; font-weight: 700; padding: 2px 8px; border-radius: 8px; background: #eee9e2; color: #8a7e72; }
 .auth-pill { font-size: 10.5px; font-weight: 700; padding: 2px 8px; border-radius: 8px; background: #f0e8fb; color: #7a4aa5; }
+.pb-pill { font-size: 10.5px; font-weight: 700; padding: 2px 8px; border-radius: 8px; background: #e6f2f6; color: #2f6b7d; }
+.pb-hint { font-size: 11.5px; color: var(--color-text-secondary); line-height: 1.6; background: #f7f2ea; border-radius: 6px; padding: 8px 10px; margin: 0; }
+.pb-hint strong { color: var(--color-text); }
 
 .reg-hint { font-size: 12px; color: #b8802a; background: #fdf0d9; padding: 8px 10px; border-radius: 6px; }
 .check-list { display: flex; flex-wrap: wrap; gap: 6px; max-height: 180px; overflow-y: auto; border: 1px solid var(--color-border); border-radius: 8px; padding: 8px; background: #fff; }

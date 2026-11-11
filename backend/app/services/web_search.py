@@ -49,6 +49,58 @@ def _strip_markdown(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+# 联网搜索查询精炼：口语/疑问停用词（按长度降序匹配，避免短词截断长词）
+_WEB_STOPWORDS = [
+    "请问", "帮我", "告诉我", "我想", "想知道", "知道", "一下", "可以", "能不能", "能否",
+    "是否", "应该", "需要", "怎么", "怎样", "如何", "什么", "哪些", "哪个", "有没有", "有什么",
+    "吗", "呢", "啊", "呀", "吧", "了", "的", "地", "得", "我", "你", "他", "她", "它", "们",
+    "最近", "老是", "总是", "经常", "有点", "有些", "比较", "真的", "到底", "究竟",
+]
+_WEB_STOP_RE = re.compile("|".join(sorted(_WEB_STOPWORDS, key=len, reverse=True)))
+_HOWTO_WORDS = ("怎么", "怎样", "如何", "方法", "妙招", "办法")
+
+
+def refine_web_query(query: str) -> str:
+    """把口语化问句精炼为「空格分隔关键词」的联网搜索式。
+
+    根因修复：搜索引擎（尤其 AnySearch）对完整问句（如「失眠可以怎么缓解」）排序质量差，
+    易返回无关裁判文书；而对空格分隔关键词（「失眠 缓解 方法」）能返回相关健康科普。
+    做法：按停用词切分保留实词片段 → 空格拼接；问「怎么/如何」类时补「方法」意图词。
+    对已是关键词式的输入保持幂等（不破坏原有空格分词）。
+    """
+    q = (query or "").strip()
+    if not q:
+        return q
+    frags = [f.strip(" ，,。.?？!！、") for f in _WEB_STOP_RE.split(q)]
+    kws = [f for f in frags if f and len(f) >= 2]
+    if not kws:
+        return q
+    out = " ".join(kws[:4])
+    if any(h in q for h in _HOWTO_WORDS) and "方法" not in out:
+        out += " 方法"
+    return out
+
+
+# 法院/裁判文书类域名标记：健康养生问句命中这些域名基本可判定为无关结果
+_LEGAL_HOST_MARKERS = (
+    "wenshu.court.gov.cn", "court.gov.cn", "court.gov.mo", "pkulaw", "lawyee",
+    "66law", "lawtime", "findlaw", "chinalaw", "itslaw", "wusong", "fatianxia",
+)
+_LEGAL_QUERY_WORDS = ("法律", "法院", "判决", "起诉", "律师", "纠纷", "合同", "裁判", "立案", "诉讼")
+
+
+def _legal_dominated(results: List["SearchResult"]) -> bool:
+    """结果是否被法院/裁判文书域名主导（≥60%），用于相关性护栏。"""
+    if not results:
+        return False
+    hit = sum(1 for r in results if any(m in (r.url or "") for m in _LEGAL_HOST_MARKERS))
+    return hit / len(results) >= 0.6
+
+
+def _is_legal_query(query: str) -> bool:
+    return any(w in (query or "") for w in _LEGAL_QUERY_WORDS)
+
+
 class SearchResult:
     """搜索结果"""
 
@@ -284,6 +336,23 @@ class WebSearchFactory:
 
 
 async def web_search(query: str, max_results: int = 5) -> List[SearchResult]:
-    """快捷联网搜索"""
+    """快捷联网搜索（统一入口：查询精炼 + 相关性护栏）。
+
+    1) 先把口语问句精炼为空格分隔关键词（refine_web_query），避免搜索引擎对完整问句
+       排序失真返回无关裁判文书；
+    2) 若结果仍被法院/裁判文书域名主导且问题本身非法律类，换增强关键词重试一次。
+    """
     searcher = WebSearchFactory.create()
-    return await searcher.search(query, max_results)
+    refined = refine_web_query(query) or (query or "").strip()
+    results = await searcher.search(refined, max_results)
+    if results and _legal_dominated(results) and not _is_legal_query(query):
+        retry_q = refined if "方法" in refined else refined + " 方法"
+        retry_q += " 科普"
+        logger.info("联网搜索相关性护栏触发（裁判文书主导），重试: %r", retry_q)
+        try:
+            retry = await searcher.search(retry_q, max_results)
+            if retry and not _legal_dominated(retry):
+                results = retry
+        except Exception as e:
+            logger.warning("联网搜索护栏重试失败（保留原结果）: %s", e)
+    return results

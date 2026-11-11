@@ -1,7 +1,6 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import AdminConsoleLayout from '@/components/AdminConsoleLayout.vue'
-import KnowledgeHubLayout from '@/components/KnowledgeHubLayout.vue'
 
 const routes = [
   {
@@ -64,45 +63,34 @@ const routes = [
     path: '/management',
     redirect: '/admin/settings',
   },
-  // ============ 知识库控制台（独立布局 + 专属左侧导航，参考系统管理控制台逻辑） ============
-  // 收纳知识库管理/知识收藏/知识百科三个功能界面；进入后只展示知识库相关功能。
+  // ============ 知识库（保留主侧边栏，右侧为知识库界面） ============
+  // /kb 总览：公共/个人知识库列表；/kb/:kbId 详情（文档/检索/导图/图谱/收藏/百科/评估）
   {
     path: '/kb',
-    component: KnowledgeHubLayout,
+    name: 'KnowledgeOverview',
+    component: () => import('@/views/KnowledgeOverviewView.vue'),
     meta: { requiresAuth: true, allowGuest: true },
-    redirect: { name: 'KnowledgeBase' },
-    children: [
-      {
-        path: 'management',
-        name: 'KnowledgeBase',
-        component: () => import('@/views/ManagementView.vue'),
-        meta: { requiresAuth: true, allowGuest: true },
-      },
-      {
-        path: 'bookmarks',
-        name: 'Bookmarks',
-        component: () => import('@/views/BookmarksView.vue'),
-        meta: { requiresAuth: true, allowGuest: true },
-      },
-      {
-        path: 'wiki',
-        name: 'Wiki',
-        component: () => import('@/views/WikiView.vue'),
-        meta: { requiresAuth: true, allowGuest: false },
-      },
-      {
-        path: 'upload',
-        name: 'KnowledgeUpload',
-        component: () => import('@/views/KnowledgeUpload.vue'),
-        meta: { requiresAuth: true, allowGuest: false },
-      },
-    ],
   },
-  // 旧扁平路径兼容重定向到知识库控制台
-  { path: '/knowledge', redirect: '/kb/management' },
-  { path: '/bookmarks', redirect: '/kb/bookmarks' },
-  { path: '/wiki', redirect: '/kb/wiki' },
+  {
+    path: '/kb/upload',
+    name: 'KnowledgeUpload',
+    component: () => import('@/views/KnowledgeUpload.vue'),
+    meta: { requiresAuth: true, allowGuest: false },
+  },
+  {
+    path: '/kb/:kbId',
+    name: 'KnowledgeDetail',
+    component: () => import('@/views/KnowledgeDetailView.vue'),
+    meta: { requiresAuth: true, allowGuest: true },
+  },
+  // 旧扁平路径与旧知识库控制台路径兼容重定向
+  { path: '/knowledge', redirect: '/kb' },
+  { path: '/bookmarks', redirect: '/kb' },
+  { path: '/wiki', redirect: '/kb' },
   { path: '/upload', redirect: '/kb/upload' },
+  { path: '/kb/management', redirect: '/kb' },
+  { path: '/kb/bookmarks', redirect: '/kb' },
+  { path: '/kb/wiki', redirect: '/kb' },
   {
     path: '/doc-preview',
     name: 'DocPreview',
@@ -115,7 +103,7 @@ const routes = [
     component: () => import('@/views/AttachmentPreviewView.vue'),
     meta: { requiresAuth: true, allowGuest: true },
   },
-  // （/bookmarks 与 /wiki 已并入 /kb 控制台，见上方重定向）
+  // （/bookmarks、/wiki、/knowledge 等旧路径已重定向到 /kb，见上方）
   // ============ 系统管理控制台（独立布局 + 专属左侧导航） ============
   // 收纳所有管理/运维模块；admin 与 ops 均可进（requiresConsole=canOps），
   // 各子页再按 requiresAdmin / requiresOps / requiresOpsOnly 细分权限。
@@ -151,8 +139,20 @@ const routes = [
       },
       {
         path: 'eval',
-        name: 'Eval',
+        name: 'EvalOverview',
+        component: () => import('@/views/EvalOverviewView.vue'),
+        meta: { requiresAuth: true, requiresOps: true },
+      },
+      {
+        path: 'eval/datasets/:datasetId',
+        name: 'EvalDataset',
         component: () => import('@/views/EvalView.vue'),
+        meta: { requiresAuth: true, requiresOps: true },
+      },
+      {
+        path: 'eval/prompt-skill',
+        name: 'EvalPromptSkill',
+        component: () => import('@/views/PromptSkillEvalView.vue'),
         meta: { requiresAuth: true, requiresOps: true },
       },
       {
@@ -183,7 +183,7 @@ const router = createRouter({
 // 运维角色（role==='ops'）可访问的路由白名单：
 // CI/CD 流水线 + 模型网关 + 回归评测 + 可观测性 + 认证相关页（登录/注册/忘记密码/指南）
 const OPS_ALLOWED_ROUTES = [
-  'Pipeline', 'Gateway', 'Eval', 'Observability',
+  'Pipeline', 'Gateway', 'EvalOverview', 'EvalDataset', 'EvalPromptSkill', 'Observability',
   'Login', 'Register', 'ForgotPassword', 'Guide',
 ]
 

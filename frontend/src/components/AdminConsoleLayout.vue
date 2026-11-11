@@ -80,7 +80,7 @@
           v-if="auth.canOps"
           to="/admin/eval"
           class="console-item"
-          :class="{ active: route.name === 'Eval' }"
+          :class="{ active: String(route.name || '').startsWith('Eval') }"
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="console-item-icon">
             <path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
@@ -215,7 +215,9 @@ const TITLE_MAP = {
   UserManagement: '用户管理',
   Pipeline: 'CI/CD 流水线',
   Gateway: '模型网关',
-  Eval: '回归评测',
+  EvalOverview: '回归评测',
+  EvalDataset: '回归评测 · 评测集详情',
+  EvalPromptSkill: '回归评测 · Prompt / Skill',
   Observability: 'Agent 可观测性',
 }
 const currentTitle = computed(() => TITLE_MAP[route.name] || '系统管理')

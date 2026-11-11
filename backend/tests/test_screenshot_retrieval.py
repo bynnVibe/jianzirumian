@@ -136,13 +136,14 @@ def _stub_pipeline(monkeypatch, ocr_text, rewrite_result="改写后检索式"):
 
     async def fake_rewrite(q, provider=None):
         seen["rewrite_input"] = q
-        return rewrite_result
+        # chat.py 意图识别改用 analyze_intent（返回 {query, scope}）
+        return {"query": rewrite_result, "scope": "personal"}
 
     def fake_retrieve(q, user_id):
         seen["retrieve_input"] = q
         return []
 
-    monkeypatch.setattr(chat_module, "rewrite_query", fake_rewrite)
+    monkeypatch.setattr(chat_module, "analyze_intent", fake_rewrite)
     monkeypatch.setattr(chat_module.knowledge_service, "retrieve_for_user", fake_retrieve)
     return seen
 

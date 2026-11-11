@@ -56,18 +56,31 @@ class WikiCompileError(Exception):
     """可重试的编译失败（LLM 调用异常/结果为空），供队列 worker 捕获重试。"""
 
 
+def _invalidate_insight_cache(kb_id: str) -> None:
+    """wiki 数据变更后失效百科列表 Redis 缓存（避免知识库百科页读到旧数据）。"""
+    if not kb_id:
+        return
+    try:
+        from app.core import insight_cache
+        insight_cache.cache_delete(insight_cache.wiki_list_key(kb_id))
+    except Exception as e:  # 缓存失效失败不影响主链路
+        logger.warning("[WIKI] 失效百科列表缓存失败 kb=%s: %s", kb_id, e)
+
+
 # Step1 分析提示词：把资料"读一遍"输出结构化分析 JSON（两步思维链第一步）
 _ANALYSIS_PROMPT = (
     "你是「知识分析师」，这是两步思维链知识编译的第一步。请阅读资料并输出结构化分析，"
     "只输出一个 JSON 对象，不要输出任何解释、不要用代码块包裹。字段定义：\n"
     "{\n"
     '  "entities": [{"name": "实体名", "type": "person|org|product|concept", "note": "一句话说明"}],\n'
+    '  "entity_relations": [{"source": "实体A名", "target": "实体B名", "label": "关系短语（如：就职于/精通/开发）"}],\n'
     '  "claims": ["资料的核心论点或结论，3-8 条"],\n'
     '  "wiki_relations": {"existing": ["已存在于知识库中的相关词条名"], "new": ["建议新增的词条名"]},\n'
     '  "contradictions": ["与现有知识或常识的矛盾/张力，若无则为空数组"],\n'
     '  "structure": {"title": "建议的词条标题", "keywords": ["主题关键词，3-8 个"]}\n'
     "}\n"
-    "要求：严格忠于原文，绝不编造；实体与关键词用于构建知识图谱的实体页/主题页。"
+    "要求：严格忠于原文，绝不编造；实体与关键词用于构建知识图谱的实体页/主题页；"
+    "entity_relations 只写原文明确表达的实体间关系，source/target 必须出自 entities 名单。"
 )
 
 # Step2 生成提示词：基于 Step1 分析把资料"编译"成结构化百科条目
@@ -492,6 +505,9 @@ class WikiService:
             f"hash={sha[:12]} chunks={len(page['doc_ids'])} entities={len(analysis.get('entities', []))}"
         )
         self._rebuild_views()
+        # 知识图谱与 llm-wiki 绑定：编译产物落库后同步刷新该库图谱
+        from app.services import knowledge_graph
+        knowledge_graph.refresh_kb(kb_id)
         return page
 
     async def _throttle(self) -> None:
@@ -705,6 +721,7 @@ class WikiService:
                 now, now,
             ),
         )
+        _invalidate_insight_cache(kb_id)
         return page
 
     def _index_page(self, page: dict, *, source_type: str, pdf_preview_path: Optional[str] = None,
@@ -795,7 +812,10 @@ class WikiService:
         except Exception as e:
             logger.warning("[WIKI] 清理对话沉淀日志失败: %s", e)
         wiki_store.append_log("delete", page["page_type"], page["title"], f"id={page_id[:8]}")
+        _invalidate_insight_cache(page.get("kb_id") or "")
         self._rebuild_views()
+        from app.services import knowledge_graph
+        knowledge_graph.refresh_kb(page.get("kb_id") or "")
         return True
 
     def delete_page_by_source(self, source_image: str, rebuild: bool = True, commit_only: bool = False) -> int:
@@ -815,8 +835,13 @@ class WikiService:
             wiki_store.remove_cache(source_image)
             wiki_store.append_log("delete", "source", Path(source_image).name, f"count={count}")
             logger.info("[WIKI] 删除来源百科卡片 %d 则: %s", count, Path(source_image).name)
+            for kb_id in {r["kb_id"] for r in rows if r["kb_id"]}:
+                _invalidate_insight_cache(kb_id)
             if rebuild:
                 self._rebuild_views()
+                from app.services import knowledge_graph
+                for kb_id in {r["kb_id"] for r in rows if r["kb_id"]}:
+                    knowledge_graph.refresh_kb(kb_id)
         return count
 
     def update_page_content(self, page_id: str, new_content: str, new_title: Optional[str] = None) -> Optional[dict]:
@@ -859,7 +884,10 @@ class WikiService:
         self._update_doc_ids(page_id, page["doc_ids"])
         wiki_store.write_page(page)
         wiki_store.append_log("edit", page["page_type"], title, f"id={page_id[:8]}")
+        _invalidate_insight_cache(page.get("kb_id") or "")
         self._rebuild_views()
+        from app.services import knowledge_graph
+        knowledge_graph.refresh_kb(page.get("kb_id") or "")
         logger.info("[WIKI] 百科页面编辑已应用 | %s | chunks=%d", title, len(page["doc_ids"]))
         return page
 

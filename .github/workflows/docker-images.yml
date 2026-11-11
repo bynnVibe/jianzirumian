@@ -1,0 +1,72 @@
+# 见字如面 - 镜像构建（确定性操作沉淀为工作流）
+#
+# 本地/CI 可复现地构建后端与前端镜像并导出为 tar 工件，供阿里云 ECS 离线加载：
+#   - 默认 SLIM=1 瘦身构建（跳过 torch/LibreOffice，远端 Rerank/解析降级有自动兜底）；
+#   - 基础镜像源在 CI 使用 docker.io（DaoCloud 代理面向国内开发机）；
+#   - 不推送任何 registry、不读取密钥；上云加载/启动仍由 scripts/deploy-aliyun.sh 在服务器执行。
+#
+# 触发：手动（workflow_dispatch）或打 v* tag。产物以 artifact 形式保留，配合
+# 「阿里云服务器部署」流程：下载工件 → 服务器 docker load → server-preflight → server-start。
+name: Docker Images
+
+on:
+  workflow_dispatch:
+    inputs:
+      slim:
+        description: "SLIM=1 瘦身构建（跳过 torch/LibreOffice）"
+        type: boolean
+        default: true
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    name: 构建并导出镜像
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - name: 解析 SLIM 开关（经环境变量传递，避免直接插值到 shell）
+        id: slim
+        env:
+          INPUT_SLIM: ${{ inputs.slim }}
+        run: |
+          if [ "$INPUT_SLIM" = "false" ]; then echo "slim=0" >> "$GITHUB_OUTPUT"; else echo "slim=1" >> "$GITHUB_OUTPUT"; fi
+
+      - name: 构建后端镜像
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.backend
+          push: false
+          load: true
+          tags: jianzirumian-backend:latest
+          build-args: |
+            REGISTRY=docker.io/library/
+            PIP_INDEX_URL=https://pypi.org/simple
+            SLIM=${{ steps.slim.outputs.slim }}
+
+      - name: 构建前端镜像
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.frontend
+          push: false
+          load: true
+          tags: jianzirumian-frontend:latest
+          build-args: |
+            REGISTRY=docker.io/library/
+
+      - name: 导出镜像为 tar.gz
+        run: |
+          docker save jianzirumian-backend:latest | gzip > jianzirumian-backend.tar.gz
+          docker save jianzirumian-frontend:latest | gzip > jianzirumian-frontend.tar.gz
+          ls -lh ./*.tar.gz
+
+      - name: 上传镜像工件
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-images
+          path: "*.tar.gz"
+          retention-days: 14

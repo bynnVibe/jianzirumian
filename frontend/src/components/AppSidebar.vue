@@ -310,8 +310,8 @@
       <div class="modal-box cache-box">
         <div class="cache-head">
           <div class="cache-head-text">
-            <h3 class="modal-title">主问答语义缓存</h3>
-            <p class="cache-desc">相似问题直接回复你之前的答案，绕过知识检索与生成，省时省资源（仅本人可见）</p>
+            <h3 class="modal-title">语义缓存（网关层）</h3>
+            <p class="cache-desc">经意图识别打上「公共/个人」与「实时/非实时」标签：公共缓存全体用户共享复用，个人缓存仅本人可见；按阶梯 TTL 自动过期（实时 {{ cacheStats.ttl?.realtime_hours || 2 }}h、非实时冷 {{ cacheStats.ttl?.cold_days || 3 }}天/常命中 {{ cacheStats.ttl?.warm_days || 7 }}天/热点 {{ cacheStats.ttl?.hot_days || 30 }}天）。</p>
           </div>
           <label class="sc-switch" :title="cacheStats.enabled ? '点击关闭语义缓存' : '点击开启语义缓存'">
             <input type="checkbox" :checked="cacheStats.enabled" @change="onToggleCacheEnabled($event.target.checked)" />
@@ -320,24 +320,40 @@
         </div>
         <div class="sc-stats">
           <span class="sc-stat">相似度阈值 <b>{{ cacheStats.threshold }}</b></span>
-          <span class="sc-stat">缓存条目 <b>{{ cacheStats.count }}</b></span>
-          <span class="sc-stat">累计命中 <b>{{ cacheStats.total_hits }}</b></span>
+          <span class="sc-stat">个人条目 <b>{{ cacheStats.count }}</b></span>
+          <span class="sc-stat">公共条目 <b>{{ cacheStats.public_count }}</b></span>
+          <span class="sc-stat">本人累计命中 <b>{{ cacheStats.total_hits }}</b></span>
           <span class="sc-spacer"></span>
           <button class="sc-mini-btn" :disabled="cacheLoading" @click="loadCache()">刷新</button>
-          <button class="sc-mini-btn danger" :disabled="cacheLoading || !cacheStats.count" @click="onClearCache">清空</button>
+          <button class="sc-mini-btn danger" :disabled="cacheLoading || !cacheStats.count" @click="onClearCache">清空个人</button>
+        </div>
+        <div class="sc-scope-tabs">
+          <button v-for="t in [{k:'all',l:'全部'},{k:'personal',l:'个人'},{k:'public',l:'公共'}]" :key="t.k"
+                  class="sc-scope-tab" :class="{ active: cacheScopeFilter === t.k }"
+                  :disabled="cacheLoading" @click="onScopeFilter(t.k)">{{ t.l }}</button>
         </div>
         <div v-if="cacheMessage" class="sc-message" :class="cacheMessageType">{{ cacheMessage }}</div>
         <div class="sc-list">
           <div v-if="cacheLoading" class="sc-empty">加载中…</div>
-          <div v-else-if="!cacheEntries.length" class="sc-empty">暂无缓存。正常作答后会自动沉淀你的问答，后续相似问题即可命中直回。</div>
+          <div v-else-if="!cacheEntries.length" class="sc-empty">暂无缓存。正常作答后网关会自动沉淀问答，后续相似问题即可命中直回。</div>
           <div v-for="e in cacheEntries" :key="e.id" class="sc-item">
             <div class="sc-item-main">
-              <div class="sc-q">{{ e.question }}</div>
+              <div class="sc-q">
+                <span class="sc-tag" :class="e.scope === 'public' ? 'tag-public' : 'tag-personal'"
+                      :title="e.scope === 'public' ? '公共域：所有用户相似问题均可命中复用' : '个人域：仅本人可见'">{{ e.scope === 'public' ? '公共' : '个人' }}</span>
+                <span v-if="e.is_realtime" class="sc-tag tag-rt" title="实时类：短 TTL，过期即失效避免陈旧数据">实时</span>
+                {{ e.question }}
+              </div>
               <div class="sc-a">{{ e.answer }}</div>
+              <div class="sc-meta">
+                <span class="sc-ttl" :title="'阶梯 TTL 档位'">{{ e.ttl_label || '—' }}</span>
+                <span class="sc-exp" :title="'过期时间'">{{ e.expired ? '已过期' : '至 ' + fmtExpiry(e.expires_at) }}</span>
+              </div>
             </div>
             <div class="sc-item-side">
               <span class="sc-hits" :title="'该缓存已被命中次数'">命中 {{ e.hit_count || 0 }}</span>
-              <button class="sc-del" title="删除该缓存条目" @click="onDeleteEntry(e)">
+              <button class="sc-del" :disabled="e.scope === 'public'"
+                      :title="e.scope === 'public' ? '公共域条目不允许个人删除' : '删除该缓存条目'" @click="onDeleteEntry(e)">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13">
                   <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/>
                 </svg>
@@ -795,8 +811,9 @@ async function submitMemoryDelete(m) {
 // ============================================
 const showCacheModal = ref(false)
 const cacheLoading = ref(false)
-const cacheStats = ref({ enabled: false, threshold: 0.9, count: 0, total_hits: 0 })
+const cacheStats = ref({ enabled: false, threshold: 0.9, count: 0, total_hits: 0, public_count: 0, public_hits: 0, ttl: null })
 const cacheEntries = ref([])
+const cacheScopeFilter = ref('all') // all|personal|public（公共域全体共享，个人域仅本人）
 const cacheMessage = ref('')
 const cacheMessageType = ref('info')
 
@@ -804,13 +821,16 @@ async function loadCache() {
   if (auth.isGuest) return
   cacheLoading.value = true
   try {
-    const res = await getSemanticCache(50)
+    const res = await getSemanticCache(50, cacheScopeFilter.value)
     const d = res.data || {}
     cacheStats.value = {
       enabled: !!d.enabled,
       threshold: d.threshold ?? 0.9,
       count: d.count ?? 0,
       total_hits: d.total_hits ?? 0,
+      public_count: d.public_count ?? 0,
+      public_hits: d.public_hits ?? 0,
+      ttl: d.ttl || null,
     }
     cacheEntries.value = d.entries || []
   } catch (e) {
@@ -818,6 +838,24 @@ async function loadCache() {
     cacheMessageType.value = 'error'
   } finally {
     cacheLoading.value = false
+  }
+}
+
+function onScopeFilter(scope) {
+  cacheScopeFilter.value = scope
+  loadCache()
+}
+
+// 过期时间友好展示（本地时区，精到分钟）
+function fmtExpiry(iso) {
+  if (!iso) return '不过期'
+  try {
+    const dt = new Date(iso)
+    if (Number.isNaN(dt.getTime())) return '不过期'
+    const p = (n) => String(n).padStart(2, '0')
+    return `${dt.getMonth() + 1}/${dt.getDate()} ${p(dt.getHours())}:${p(dt.getMinutes())}`
+  } catch {
+    return '不过期'
   }
 }
 
@@ -856,6 +894,11 @@ async function onClearCache() {
 }
 
 async function onDeleteEntry(entry) {
+  if (entry.scope === 'public') {
+    cacheMessage.value = '公共域缓存为全体用户共享，不支持个人删除'
+    cacheMessageType.value = 'info'
+    return
+  }
   try {
     await deleteSemanticCacheEntry(entry.id)
     cacheEntries.value = cacheEntries.value.filter((e) => e.id !== entry.id)
@@ -1740,6 +1783,21 @@ function chartTooltip(row) {
 .sc-hits { font-size: 11px; color: var(--color-text-secondary); background: #f4ede1; border-radius: 8px; padding: 1px 7px; }
 .sc-del { display: inline-flex; padding: 3px; border: none; background: transparent; color: var(--color-text-secondary); cursor: pointer; border-radius: 6px; }
 .sc-del:hover { color: #c0392b; background: #fdecea; }
+.sc-del:disabled { opacity: 0.35; cursor: not-allowed; }
+.sc-del:disabled:hover { color: var(--color-text-secondary); background: transparent; }
+/* 域筛选标签 */
+.sc-scope-tabs { display: flex; gap: 6px; margin-bottom: 10px; }
+.sc-scope-tab { padding: 3px 12px; font-size: 12px; border: 1px solid var(--color-border); background: #fff; color: var(--color-text-secondary); border-radius: 999px; cursor: pointer; }
+.sc-scope-tab.active { background: var(--color-primary, #c98a4b); border-color: var(--color-primary, #c98a4b); color: #fff; font-weight: 600; }
+.sc-scope-tab:disabled { opacity: 0.5; cursor: not-allowed; }
+/* 条目标签与元信息 */
+.sc-tag { display: inline-block; font-size: 10px; font-weight: 600; line-height: 1.6; padding: 0 6px; border-radius: 6px; margin-right: 5px; vertical-align: middle; }
+.tag-public { background: #e6f4ea; color: #2e7d4f; }
+.tag-personal { background: #eaf9fb; color: #2b7a8c; }
+.tag-rt { background: #fdeede; color: #b9762a; }
+.sc-meta { display: flex; gap: 10px; margin-top: 5px; font-size: 11px; color: var(--color-text-secondary); }
+.sc-ttl { background: #f4ede1; border-radius: 8px; padding: 1px 7px; }
+.sc-exp { opacity: 0.85; }
 
 /* ---- 通用弹窗 ---- */
 .modal-overlay {

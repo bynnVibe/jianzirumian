@@ -1,9 +1,9 @@
 <template>
-  <div class="upload-view">
+  <div class="upload-view" :class="{ embedded }">
     <!-- 头部 + 模块切换 -->
     <div class="page-header">
       <div class="page-title-row">
-        <h1 class="page-title">知识库上传</h1>
+        <h1 v-if="!embedded" class="page-title">知识库上传</h1>
         <div class="module-tabs">
           <button
             class="module-tab"
@@ -29,7 +29,7 @@
           </button>
         </div>
       </div>
-      <p class="page-desc">上传图片 / Word / PDF，或导入公开文章链接；后台解析后在「知识入库」检查、修改并确认，写入知识库与 llm-wiki 百科</p>
+      <p v-if="!embedded" class="page-desc">上传图片 / Word / PDF，或导入公开文章链接；后台解析后在「知识入库」检查、修改并确认，写入知识库与 llm-wiki 百科</p>
     </div>
 
     <!-- ==================== Tab 1：文件上传 ==================== -->
@@ -282,7 +282,10 @@
             <div class="module-sub">解析完成的文件将入库到所选知识库，并同步编译 llm-wiki 百科卡片</div>
           </div>
         </div>
-        <div class="kb-selector-row">
+        <div v-if="presetKbId" class="kb-selector-row">
+          <span class="kb-locked-target">目标知识库：{{ presetKbName }}</span>
+        </div>
+        <div v-else class="kb-selector-row">
           <select v-model="kbVisibilityFilter" class="kb-select kb-filter" @change="onKbFilterChange">
             <option value="public">公共知识库</option>
             <option value="private">个人知识库</option>
@@ -765,6 +768,12 @@ import { analyzeImageBlur, BLUR_VARIANCE_THRESHOLD } from '@/utils/imageQuality'
 const router = useRouter()
 const route = useRoute()
 const auth = useAuthStore()
+
+const props = defineProps({
+  embedded: { type: Boolean, default: false },
+  presetKbId: { type: String, default: '' },
+})
+const emit = defineEmits(['open-history-detail'])
 const urlInput = ref('')
 const urlSubmitting = ref(false)
 const rendererEnabled = ref(false)
@@ -898,8 +907,12 @@ function openHistorySource(item) {
   window.open(`/doc-preview?pdf=${encodeURIComponent(pdfName)}${fileParam}${titleParam}`, '_blank')
 }
 
-/** 解析文档：跳转独立详情页 */
+/** 解析文档：跳转独立详情页；内嵌弹窗时交由父级打开详情弹窗 */
 function openHistoryDetail(item) {
+  if (props.embedded) {
+    emit('open-history-detail', { recordId: item.record_id, src: item.source_path || '' })
+    return
+  }
   router.push({
     name: 'IngestDetail',
     params: { recordId: item.record_id },
@@ -1950,13 +1963,18 @@ const canWriteUrlTarget = computed(() => {
 const filteredKbList = computed(() =>
   kbList.value.filter((kb) => kb.visibility === kbVisibilityFilter.value)
 )
+const presetKbName = computed(() =>
+  kbList.value.find((kb) => kb.id === props.presetKbId)?.name || props.presetKbId
+)
 
 async function loadKnowledgeBases() {
   try {
     const res = await listKnowledgeBases()
     kbList.value = res.data.bases || []
     kbIsAdmin.value = !!res.data.is_admin
-    if (!selectedKbId.value && kbList.value.length > 0) {
+    if (props.presetKbId) {
+      selectedKbId.value = props.presetKbId
+    } else if (!selectedKbId.value && kbList.value.length > 0) {
       selectedKbId.value = kbList.value[0].id
     }
     const selected = kbList.value.find((k) => k.id === selectedKbId.value)
@@ -2022,6 +2040,8 @@ onUnmounted(() => {
   if (statusTimer) clearTimeout(statusTimer)
   if (blurModal.thumb) URL.revokeObjectURL(blurModal.thumb)
 })
+
+defineExpose({ allowLeave })
 </script>
 
 <style scoped>
@@ -2035,6 +2055,11 @@ onUnmounted(() => {
   /* 父容器 .main-content 为 100vh + overflow:hidden，页面需自身承担滚动 */
   height: 100%;
   overflow-y: auto;
+}
+.upload-view.embedded { max-width: none; padding: 16px 20px; box-sizing: border-box; }
+.kb-locked-target {
+  font-size: 13px; color: var(--color-text); background: var(--color-primary-light);
+  border: 1px solid #eadfce; border-radius: 8px; padding: 8px 14px;
 }
 .page-header { margin-bottom: 18px; }
 .page-title-row {

@@ -26,7 +26,7 @@ from app.core.request_budget import iterate, close_resources
 from app.core import observability as obs
 from app.core.evidence_checker import check_evidence_sufficiency, verify_citations
 from app.core.llm import FINAL_ANSWER_RULES, LLMFactory
-from app.core.intent_rewriter import rewrite_query
+from app.core.intent_rewriter import analyze_intent
 from app.core.vector_store import vector_store
 from app.services.config_manager import runtime_config
 from app.services.knowledge import knowledge_service
@@ -36,9 +36,11 @@ from app.services import module_recall
 from app.services.records import upload_records
 from app.services import session_summary
 from app.services import tool_orchestrator
+from app.services.tools import router as tool_router
 from app.services.web_search import web_search
 from app.services import chat_agent
-from app.services import semantic_cache
+from app.services import capability_gap
+from app.services.gateway.semantic_cache import resolve_scope
 from app.core.query_complexity import classify_complexity
 from app.core.intent_clarifier import decide_clarification
 
@@ -408,37 +410,10 @@ class ChatService:
         if att_meta:
             yield f"data: {self._json_event('status', {'phase': 'attachments_saved', 'attachments': att_meta, 'message_id': user_msg.message_id})}\n\n"
 
-        # 2.4 语义缓存命中直回：针对当前用户历史问答，语义相似的问题直接回复缓存内容，
-        # 绕过知识检索 / Agent / LLM 生成的业务路由（仅纯文本、启用知识库、登录用户时生效）
-        if (not attachments and use_knowledge and semantic_cache.semantic_cache_enabled()
-                and user_id and user_id != "guest"):
-            try:
-                cache_hit = await semantic_cache.lookup(user_id, query)
-            except Exception as e:
-                logger.warning("语义缓存查询失败，走正常流程: %s", e)
-                cache_hit = None
-            if cache_hit:
-                cached_answer = cache_hit.get("answer", "")
-                obs.record_step(
-                    "semantic_cache",
-                    f"命中语义缓存（相似度 {cache_hit.get('score')}），直接回复历史回答",
-                )
-                yield f"data: {self._json_event('status', {'phase': 'cache_hit', 'message': '命中语义缓存，直接回复历史回答', 'score': cache_hit.get('score')})}\n\n"
-                yield f"data: {self._json_event('token', {'content': cached_answer})}\n\n"
-                assistant_msg = Message(
-                    role="assistant",
-                    content=cached_answer,
-                    sources=cache_hit.get("sources", []),
-                    use_knowledge=use_knowledge,
-                    use_search=False,
-                )
-                session.add_message(assistant_msg)
-                self._persist_session(session)
-                from app.services.usage import record_usage
-                record_usage(user_id, len(query), len(cached_answer),
-                             use_knowledge=use_knowledge, use_search=False)
-                yield f"data: {self._json_event('done', {'session_id': session.session_id, 'user_message_id': user_msg.message_id, 'message': assistant_msg.to_dict(), 'cache_hit': True, 'cache_score': cache_hit.get('score')})}\n\n"
-                return
+        # 2.4 语义缓存已下沉至【网关层】：代理在 chat_answer 出网前拦截，命中直接合成
+        # 响应、跳过上游 LLM（见 services/gateway/proxy.py + gateway/semantic_cache.py）。
+        # 业务层不再直接读写缓存，只在意图识别后计算「公共/个人 + 实时」标签经
+        # extra_body 传入网关（见下方步骤 6）。
 
         # 2.5 聊天框附件工具调用：按用户文本意图路由到 OCR / 入库 / 总结工具
         tool_context_text = ""
@@ -568,7 +543,7 @@ class ChatService:
                 try:
                     async for ev in chat_agent.run_chat_agent(
                         mode=mode, query=query, user_id=user_id, rule_id=rule_id,
-                        model=model,
+                        model=model, session_id=session.session_id,
                         use_knowledge=use_knowledge, use_search=use_search,
                         skip_search_prompt=skip_search_prompt, history_ctx=history_ctx,
                         memory_text=memory_text, system_prompt=self._build_system_prompt(),
@@ -597,10 +572,26 @@ class ChatService:
         # 4. 知识检索 + 5. 联网搜索
         # 两者同时启用时并行执行；同步检索（embedding/rerank）放入线程池，
         # 避免阻塞事件循环拖慢其他请求
+        # 场景感知路由（req5）：实时查询（天气/新闻/股价等）主来源指向联网搜索，
+        # 避免健康养生知识库无命中时「知识库未收录」指令淹没真实搜索结果（答非所问根因）
+        route = tool_router.route_tools(query, use_knowledge=use_knowledge, use_search=use_search)
+        obs.record_step(
+            "tool_routing",
+            f"primary={route.primary_tool or '直接作答'} scenario={route.scenario} "
+            f"realtime={route.is_realtime} | {route.reason}",
+            fail_trace=False,
+        )
         sources = []
         search_results = []
         retrieve_task = None
         search_task = None
+        context_text = ""
+        kb_has_content = False
+        search_context = ""
+        # 意图识别产出的缓存域标签（公共/个人）；默认 personal（安全），
+        # 启用知识库时由 analyze_intent 覆盖，作为网关语义缓存的键之一。
+        intent_scope = "personal"
+        search_query = ""
 
         if use_knowledge:
             # 发出检索开始信号
@@ -611,10 +602,12 @@ class ChatService:
             yield f"data: {self._json_event('status', {'phase': 'rewriting', 'message': '正在理解你的问题...'})}\n\n"
             t_rewrite = time.monotonic()
             try:
-                # 改写是增强而非必需：8s 内未完成即回退原问题检索，避免慢上游吃满 15s 旧预算
-                search_query = await asyncio.wait_for(
-                    rewrite_query(retrieval_query, llm_provider), timeout=8
+                # 意图识别是增强而非必需：8s 内未完成即回退原问题检索，避免慢上游吃满预算
+                _intent = await asyncio.wait_for(
+                    analyze_intent(retrieval_query, llm_provider), timeout=8
                 )
+                search_query = _intent.get("query") or retrieval_query.strip()
+                intent_scope = _intent.get("scope") or "personal"
                 obs.record_llm("intent_rewrite", retrieval_query, search_query, t0=t_rewrite, fail_trace=False)
             except asyncio.TimeoutError:
                 logger.warning("意图改写超时，使用原问题检索")
@@ -635,6 +628,7 @@ class ChatService:
 
         if use_search:
             yield f"data: {self._json_event('status', {'phase': 'searching', 'message': '正在联网搜索...'})}\n\n"
+            t_search = time.monotonic()
             search_task = asyncio.create_task(web_search(effective_query))
             tasks.add(search_task)
 
@@ -645,10 +639,23 @@ class ChatService:
             try:
                 results = await retrieve_task
                 obs.record_step("knowledge_retrieve", f"命中 {len(results)} 条相关片段", t0=t_retrieve)
+                # 需求8：快路径知识检索也登记 Tool Routing（之前只有 record_step，无 tool_routing）
+                obs.record_tool_routing(
+                    tool_name="search_knowledge", namespace="retrieval", user_id=user_id,
+                    session_id=session.session_id, routed_by="chat_fastpath",
+                    args={"query": (search_query or effective_query)[:200]}, risk_level="low",
+                    status="ok", success=bool(results), t0=t_retrieve,
+                )
             except Exception as e:
                 logger.error("知识检索失败: %s", e)
                 obs.record_step("knowledge_retrieve", "", t0=t_retrieve,
                                 status="error", error=str(e), fail_trace=False)
+                obs.record_tool_routing(
+                    tool_name="search_knowledge", namespace="retrieval", user_id=user_id,
+                    session_id=session.session_id, routed_by="chat_fastpath",
+                    args={"query": (search_query or effective_query)[:200]}, risk_level="low",
+                    status="error", success=False, t0=t_retrieve, error=str(e)[:500],
+                )
             if results:
                 # Rerank 重排序 + 相关度过滤（同步计算移入线程池，避免阻塞事件循环）
                 yield f"data: {self._json_event('status', {'phase': 'reranking', 'message': '正在对检索结果重排序...'})}\n\n"
@@ -684,55 +691,85 @@ class ChatService:
                             yield f"data: {self._json_event('done', {'session_id': session.session_id, 'user_message_id': user_msg.message_id, 'hitl': 'clarify'})}\n\n"
                             return
 
-                augmented_query = knowledge_service.build_knowledge_prompt(effective_query, context_text, True)
-                # segment 级 token 度量：知识上下文段（含重检后的最终上下文）
-                obs.note_segment("knowledge", context_text)
-
-                # 发出检索完成信号
-                yield f"data: {self._json_event('status', {'phase': 'retrieved', 'message': f'检索到 {len(sources)} 份相关知识文档', 'sources': sources})}\n\n"
-            else:
-                # HITL：只知识检索、未开联网、未跳过询问 → 弹卡询问是否联网搜索，结束本轮
-                if not use_search and not skip_search_prompt:
-                    yield chat_agent.need_search_event(_card_query(query, effective_query))
-                    yield f"data: {self._json_event('done', {'session_id': session.session_id, 'user_message_id': user_msg.message_id, 'hitl': 'need_search'})}\n\n"
-                    return
-                # 用户已选「直接回答」（skip_search_prompt）→ 不受知识库约束，用模型自身知识作答
-                kb_flag = False if skip_search_prompt else True
-                augmented_query = knowledge_service.build_knowledge_prompt(effective_query, "", kb_flag)
-                yield f"data: {self._json_event('status', {'phase': 'not_found', 'message': '知识库中未检索到相关内容'})}\n\n"
-        else:
-            augmented_query = knowledge_service.build_knowledge_prompt(effective_query, "", False)
+                kb_has_content = bool(context_text.strip())
+                if kb_has_content:
+                    # segment 级 token 度量：知识上下文段（含重检后的最终上下文）
+                    obs.note_segment("knowledge", context_text)
+                    # 发出检索完成信号
+                    yield f"data: {self._json_event('status', {'phase': 'retrieved', 'message': f'检索到 {len(sources)} 份相关知识文档', 'sources': sources})}\n\n"
+            # KB 无命中的提示词构造延后到搜索结果已知后统一决策（避免过早注入「知识库未收录」）
 
         # 等待联网搜索结果
         if search_task is not None:
             try:
                 web_results = await search_task
                 search_context = knowledge_service.build_search_context(web_results)
+                # 需求8：快路径联网搜索登记 Tool Routing
+                obs.record_tool_routing(
+                    tool_name="web_search", namespace="retrieval", user_id=user_id,
+                    session_id=session.session_id, routed_by="chat_fastpath",
+                    args={"query": effective_query[:200]}, risk_level="low",
+                    status="ok", success=bool(search_context), t0=t_search,
+                )
 
                 if search_context:
                     # segment 级 token 度量：联网搜索上下文段
                     obs.note_segment("search", search_context)
-                    if use_knowledge:
-                        # 同时启用知识库和搜索：知识库优先，搜索为辅
-                        augmented_query += (
-                            f"\n\n【联网搜索结果（供参考）】\n{search_context}\n\n"
-                            f"要求：\n"
-                            f"1. 【核心】优先以知识库内容为主要回答依据\n"
-                            f"2. 联网搜索结果仅作为补充参考，可用于佐证或扩展知识库中的内容\n"
-                            f"3. 如果知识库内容和搜索内容有冲突，以知识库为准\n"
-                            f"4. 标注引用来源时，区分「来源 X」（知识库）和「网络来源 X」（搜索）"
-                        )
-                    else:
-                        augmented_query += f"\n\n【联网搜索结果】\n{search_context}\n\n请基于以上搜索结果回答问题，并标注来源链接。"
                     search_results = [r.to_dict() for r in web_results]
                     yield f"data: {self._json_event('status', {'phase': 'searched', 'message': f'联网搜索到 {len(web_results)} 条结果', 'search_results': search_results})}\n\n"
                 else:
                     yield f"data: {self._json_event('status', {'phase': 'search_empty', 'message': '联网搜索无结果'})}\n\n"
             except Exception as e:
                 yield f"data: {self._json_event('status', {'phase': 'search_error', 'message': f'联网搜索出错: {str(e)}'})}\n\n"
+                obs.record_tool_routing(
+                    tool_name="web_search", namespace="retrieval", user_id=user_id,
+                    session_id=session.session_id, routed_by="chat_fastpath",
+                    args={"query": effective_query[:200]}, risk_level="low",
+                    status="error", success=False, t0=t_search, error=str(e)[:500],
+                )
+
+        # HITL：知识库无命中、未开联网、未跳过询问 → 弹卡询问是否联网搜索，结束本轮。
+        # 实时/时效类查询（天气等）跳过此询问：联网搜索难以给出结构化实时数据，
+        # 直接走「生成 → 能力缺口 CLI 方案」闭环（需求8），避免对话在给出 CLI 前提前结束。
+        if use_knowledge and not kb_has_content and not use_search and not skip_search_prompt \
+                and not route.is_realtime:
+            yield chat_agent.need_search_event(_card_query(query, effective_query))
+            yield f"data: {self._json_event('done', {'session_id': session.session_id, 'user_message_id': user_msg.message_id, 'hitl': 'need_search'})}\n\n"
+            return
+        # 知识库与联网搜索都无内容时才提示「未检索到」（有搜索结果时不再误报未收录）
+        if use_knowledge and not kb_has_content and not search_context:
+            yield f"data: {self._json_event('status', {'phase': 'not_found', 'message': '知识库中未检索到相关内容'})}\n\n"
+
+        # 能力缺口检测已后移至「回答生成之后」（见下方 7.6 段）：以回答是否真正解决用户问题为准。
+
+        # 6. 统一构造回答提示词（req5 核心修复）：按路由主来源决定知识库/搜索结果权重，
+        # 实时查询或知识库无命中但联网有结果时以搜索结果为主依据，消除答非所问
+        augmented_query = self._build_augmented_query(
+            effective_query, context_text, kb_has_content, search_context,
+            route, use_knowledge, skip_search_prompt,
+        )
 
         # 6. 添加用户问题
         llm_messages.append({"role": "user", "content": augmented_query})
+
+        # 6.5 语义缓存标签注入（需求1/2）：把「意图识别后的问题 + 公共/个人 + 实时/非实时」
+        # 经 extra_body 传入网关，由代理层做命中/回写。scope 综合 LLM 意图标签与安全网
+        # （个人数据信号 / 本轮注入了用户相关记忆 → 强制个人域，避免个性化答案被公共共享）。
+        # 仅纯文本、启用知识库、无附件工具上下文时缓存；游客不写个人域（公共域仍可命中）。
+        if (use_knowledge and search_query and not attachments and not tool_context_text
+                and getattr(llm, "extra_body", None) is not None):
+            cache_scope = resolve_scope(
+                intent_scope, effective_query, uses_relevant_memory=bool(relevant_text)
+            )
+            llm.extra_body["_gw_cache_query"] = search_query
+            llm.extra_body["_gw_cache_scope"] = cache_scope
+            llm.extra_body["_gw_cache_realtime"] = bool(route.is_realtime)
+            obs.record_step(
+                "semantic_cache_tag",
+                f"scope={cache_scope}（意图={intent_scope}） realtime={bool(route.is_realtime)}"
+                f" key={search_query[:40]}",
+                fail_trace=False,
+            )
 
         # 7. 流式 LLM 生成
         yield f"data: {self._json_event('status', {'phase': 'generating', 'message': '正在生成回答...'})}\n\n"
@@ -811,6 +848,62 @@ class ChatService:
                 full_response += notice
                 yield f"data: {self._json_event('status', {'phase': 'citations_checked', 'message': '已核对引用编号', 'invalid_citations': invalid_citations})}\n\n"
 
+        # 7.6 能力缺口检测（需求5/8）：后移至回答生成之后——以「回答是否真正解决用户问题」为准。
+        # answer_failed 启发式：回答文本表明无法作答时，即使有搜索结果也视为不充分，
+        # 触发 capability_gap 卡片（HITL），由用户选择 CLI 方案执行并回喂 Agent（Claude Code 式闭环）。
+        try:
+            answer_failed = capability_gap.answer_indicates_failure(full_response)
+            gap_scenario = capability_gap.detect_scenario(
+                query,
+                is_realtime=route.is_realtime,
+                has_suitable_tool=bool(route.primary_tool),
+                search_sufficient=bool(search_context) and not answer_failed,
+                kb_has_content=kb_has_content and not answer_failed,
+            )
+            if gap_scenario:
+                gap_ctx = capability_gap.extract_context(query)
+                gap_id = capability_gap.record_gap(
+                    session_id=session.session_id, user_id=user_id,
+                    trace_id=obs.current_trace_id(), query=query,
+                    scenario=gap_scenario, context=gap_ctx,
+                )
+                solutions = capability_gap.propose_solutions(gap_scenario, gap_ctx)
+                if gap_id and solutions:
+                    recipe = capability_gap.CAPABILITY_RECIPES.get(gap_scenario, {})
+                    label = recipe.get("label", gap_scenario)
+                    has_low = any((s.get("risk_level") or "low") == "low" for s in solutions)
+                    auto = None
+                    if has_low:
+                        # 需求7：低危 CLI 方案内化为模型自动执行，不弹卡等用户确认；
+                        # 先给界面友好等待提示，循环执行+回喂直到解决问题。
+                        yield f"data: {self._json_event('status', {'phase': 'auto_resolving', 'message': '🔧 正在自动调用命令行能力尝试解决你的问题，请耐心等待…'})}\n\n"
+                        auto = await capability_gap.auto_resolve(gap_id)
+                    if auto and auto.get("resolved") and auto.get("answer"):
+                        bridge = "\n\n---\n\n✅ 已通过命令行能力获取到实时数据，为你整理如下：\n\n"
+                        yield f"data: {self._json_event('token', {'content': bridge})}\n\n"
+                        yield f"data: {self._json_event('token', {'content': auto['answer']})}\n\n"
+                        full_response += bridge + auto["answer"]
+                        obs.record_step(
+                            "capability_gap_auto",
+                            f"scenario={gap_scenario} gap_id={gap_id} resolved=1"
+                            f" rounds={len(auto.get('attempts') or [])}",
+                            fail_trace=False,
+                        )
+                    else:
+                        # 无低危方案 / 自动执行未解决 → 回退 HITL 卡片由用户选择
+                        fallback_sols = (auto or {}).get("solutions") or solutions
+                        yield chat_agent.capability_gap_event(
+                            gap_id, gap_scenario, label, fallback_sols, query[:60],
+                        )
+                        obs.record_step(
+                            "capability_gap",
+                            f"scenario={gap_scenario} gap_id={gap_id} 候选方案={len(fallback_sols)}"
+                            f" answer_failed={answer_failed} auto={bool(auto)}",
+                            fail_trace=False,
+                        )
+        except Exception as e:
+            logger.warning("能力缺口检测失败（忽略）: %s", e)
+
         # 8. 保存助手消息（LLM 生成失败时不保存知识来源，避免展示与回答无关的检索结果）
         assistant_msg = Message(
             role="assistant",
@@ -830,10 +923,8 @@ class ChatService:
         session.add_message(assistant_msg)
         self._persist_session(session)  # 每次对话后持久化
 
-        # 8.5 写入语义缓存：本次正常作答（无错误、纯文本、启用知识库）沉淀为当前用户缓存，
-        # 供后续相似问题命中直回；失败静默降级，不影响 done。
-        if llm_error is None and not attachments and use_knowledge:
-            await semantic_cache.store(user_id, effective_query, full_response, sources)
+        # 8.5 语义缓存回写已由【网关层】在上游成功产出正文后自动完成
+        # （见 services/gateway/proxy.py 的 _cache_store），业务层不再重复写入。
 
         # 用量统计埋点：查询次数 + 字符数（Token 估算由统计层完成）
         from app.services.usage import record_usage
@@ -883,10 +974,8 @@ class ChatService:
             raise asyncio.CancelledError()
         session.add_message(assistant_msg)
         self._persist_session(session)
-        # 写入语义缓存（Agent 轮次的正常作答同样沉淀，纯文本、启用知识库时）
-        if use_knowledge and not user_msg.attachments:
-            await semantic_cache.store(session.user_id, user_msg.content, full_response,
-                                       result.get("sources", []))
+        # Agent 轮次涵盖多步工具调用与推理，不适合做语义缓存（不传 _gw_cache_* 提示，
+        # 网关也就不会拦截/回写），故此处不再写入缓存。
         from app.services.usage import record_usage
         record_usage(
             session.user_id,
@@ -896,6 +985,66 @@ class ChatService:
             use_search=use_search,
         )
         yield f"data: {self._json_event('done', {'session_id': session.session_id, 'user_message_id': user_msg.message_id, 'message': assistant_msg.to_dict()})}\n\n"
+
+    def _build_augmented_query(
+        self,
+        query: str,
+        context_text: str,
+        kb_has_content: bool,
+        search_context: str,
+        route,
+        use_knowledge: bool,
+        skip_search_prompt: bool,
+    ) -> str:
+        """统一构造回答提示词：按路由主来源决定知识库/搜索结果权重（req5 核心修复）。
+
+        旧逻辑对实时查询（如「查询今天深圳的天气」）会先注入「知识库未收录、请勿编造」，
+        再把联网搜索结果降级为「仅供参考、优先以知识库为准」，两条矛盾指令导致模型忽略
+        真实搜索结果 → 答非所问。此处依据 RouteDecision 判定主来源：
+          - 联网为主（实时查询 / KB 无命中但有搜索结果）→ 搜索结果作为核心依据；
+          - 知识库为主 → 沿用 build_knowledge_prompt，搜索结果仅作补充参考。
+        """
+        search_primary = bool(search_context) and (
+            route.search_primary or route.is_realtime or not kb_has_content
+        )
+        if search_primary:
+            parts = [
+                f"用户的问题如下：\n{query}\n",
+                f"【联网搜索结果】\n{search_context}\n",
+            ]
+            if kb_has_content:
+                parts.append(f"【知识库内容（补充参考）】\n{context_text}\n")
+            reqs = [
+                "要求：",
+                "1. 【核心】请基于联网搜索结果回答问题，给出具体、准确、最新的信息",
+                "2. 回答中标注来源链接（网络来源 X）",
+                "3. 若搜索结果不足以回答问题，请如实说明，不要用无关内容强行作答",
+            ]
+            if kb_has_content:
+                reqs.append("4. 知识库内容仅作补充参考，与搜索结果冲突时以搜索结果为准")
+            parts.append("\n".join(reqs))
+            return "\n".join(parts)
+
+        # 知识库为主来源
+        if kb_has_content:
+            augmented = knowledge_service.build_knowledge_prompt(query, context_text, True)
+            if search_context:
+                augmented += (
+                    f"\n\n【联网搜索结果（供参考）】\n{search_context}\n\n"
+                    f"要求：\n"
+                    f"1. 【核心】优先以知识库内容为主要回答依据\n"
+                    f"2. 联网搜索结果仅作补充参考\n"
+                    f"3. 两者冲突时以知识库为准\n"
+                    f"4. 标注引用时区分「来源 X」（知识库）和「网络来源 X」（搜索）"
+                )
+            return augmented
+
+        # 知识库无命中且无搜索结果（或未启用检索）
+        if skip_search_prompt:
+            return knowledge_service.build_knowledge_prompt(query, "", False)
+        if use_knowledge:
+            return knowledge_service.build_knowledge_prompt(query, "", True)
+        return knowledge_service.build_knowledge_prompt(query, "", False)
 
     async def _recheck_once(
         self,

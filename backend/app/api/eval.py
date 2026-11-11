@@ -295,19 +295,29 @@ async def start_run(dataset_id: str, admin: dict = Depends(require_ops)):
 
 @router.get("/runs")
 async def list_runs(
-    dataset_id: str = Query(...),
+    dataset_id: str = Query(""),
     _admin: dict = Depends(require_ops),
 ):
-    """运行历史（含 summary 与已完成用例进度计数）"""
-    rows = db.query(
-        "SELECT * FROM eval_runs WHERE dataset_id = ? ORDER BY started_at DESC",
-        (dataset_id,),
-    )
-    case_total = db.query_one(
-        "SELECT COUNT(*) AS c FROM eval_cases WHERE dataset_id = ?", (dataset_id,)
-    )["c"]
+    """运行历史（含 summary 与已完成用例进度计数）。
+
+    dataset_id 为空时返回全部评测集的运行（实验页签），附 dataset_name。
+    """
+    if dataset_id:
+        rows = db.query(
+            "SELECT * FROM eval_runs WHERE dataset_id = ? ORDER BY started_at DESC",
+            (dataset_id,),
+        )
+    else:
+        rows = db.query("SELECT * FROM eval_runs ORDER BY started_at DESC LIMIT 200")
+    ds_names = {r["id"]: r["name"] for r in db.query("SELECT id, name FROM eval_datasets")}
+    case_totals: dict = {}
     runs = []
     for r in rows:
+        ds_id = r["dataset_id"]
+        if ds_id not in case_totals:
+            case_totals[ds_id] = db.query_one(
+                "SELECT COUNT(*) AS c FROM eval_cases WHERE dataset_id = ?", (ds_id,)
+            )["c"]
         completed = db.query_one(
             "SELECT COUNT(*) AS c FROM eval_results WHERE run_id = ?", (r["id"],)
         )["c"]
@@ -317,14 +327,15 @@ async def list_runs(
             summary = {}
         runs.append({
             "id": r["id"],
-            "dataset_id": r["dataset_id"],
+            "dataset_id": ds_id,
+            "dataset_name": ds_names.get(ds_id, "(评测集已删除)"),
             "status": r["status"],
             "started_at": r["started_at"],
             "finished_at": r["finished_at"],
             "created_by": r["created_by"],
             "summary": summary,
             "completed": completed,
-            "total": case_total,
+            "total": case_totals[ds_id],
         })
     return {"success": True, "runs": runs, "total": len(runs)}
 
@@ -385,6 +396,96 @@ async def get_run(run_id: str, _admin: dict = Depends(require_ops)):
         "prev_run_id": prev["id"] if prev else None,
         "prev_summary": prev_summary,
     }
+
+
+# ---------------------------------------------------------------------------
+# 评估器（基于已有评测集构建的评测工作流）
+# ---------------------------------------------------------------------------
+class EvaluatorCreate(BaseModel):
+    name: str
+    dataset_id: str
+    description: str = ""
+
+
+@router.get("/evaluators")
+async def list_evaluators(_admin: dict = Depends(require_ops)):
+    """评估器列表（绑定评测集名称/用例数 + 运行次数与最近一次运行）"""
+    rows = db.query("SELECT * FROM eval_evaluators ORDER BY created_at DESC")
+    result = []
+    for e in rows:
+        ds = db.query_one("SELECT id, name FROM eval_datasets WHERE id = ?", (e["dataset_id"],))
+        case_count = db.query_one(
+            "SELECT COUNT(*) AS c FROM eval_cases WHERE dataset_id = ?", (e["dataset_id"],)
+        )["c"]
+        run_count = db.query_one(
+            "SELECT COUNT(*) AS c FROM eval_runs WHERE dataset_id = ?", (e["dataset_id"],)
+        )["c"]
+        last_run = db.query_one(
+            "SELECT id, status, started_at, finished_at, summary FROM eval_runs"
+            " WHERE dataset_id = ? ORDER BY started_at DESC LIMIT 1",
+            (e["dataset_id"],),
+        )
+        result.append({
+            **e,
+            "dataset_name": ds["name"] if ds else "(评测集已删除)",
+            "dataset_exists": bool(ds),
+            "case_count": case_count,
+            "run_count": run_count,
+            "last_run": last_run,
+        })
+    return {"success": True, "evaluators": result, "total": len(result)}
+
+
+@router.post("/evaluators")
+async def create_evaluator(body: EvaluatorCreate, admin: dict = Depends(require_ops)):
+    """基于已有评测集创建评估器（评测工作流）"""
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="评估器名称不能为空")
+    ds = db.query_one("SELECT id FROM eval_datasets WHERE id = ?", (body.dataset_id,))
+    if not ds:
+        raise HTTPException(status_code=404, detail="绑定的评测集不存在")
+    ev_id = _new_id()
+    db.execute(
+        "INSERT INTO eval_evaluators (id, name, dataset_id, description, created_by, created_at)"
+        " VALUES (?,?,?,?,?,?)",
+        (ev_id, name, body.dataset_id, body.description.strip(), admin.get("username", ""), _now()),
+    )
+    row = db.query_one("SELECT * FROM eval_evaluators WHERE id = ?", (ev_id,))
+    return {"success": True, "evaluator": row}
+
+
+class EvaluatorUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+
+
+@router.put("/evaluators/{evaluator_id}")
+async def update_evaluator(evaluator_id: str, body: EvaluatorUpdate, _admin: dict = Depends(require_ops)):
+    """编辑评估器名称/描述（绑定评测集不可变更）"""
+    row = db.query_one("SELECT * FROM eval_evaluators WHERE id = ?", (evaluator_id,))
+    if not row:
+        raise HTTPException(status_code=404, detail="评估器不存在")
+    name = (body.name if body.name is not None else row["name"]).strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="评估器名称不能为空")
+    description = (body.description if body.description is not None else row["description"]).strip()
+    db.execute(
+        "UPDATE eval_evaluators SET name = ?, description = ? WHERE id = ?",
+        (name, description, evaluator_id),
+    )
+    updated = db.query_one("SELECT * FROM eval_evaluators WHERE id = ?", (evaluator_id,))
+    return {"success": True, "evaluator": updated}
+
+
+@router.delete("/evaluators/{evaluator_id}")
+async def delete_evaluator(evaluator_id: str, _admin: dict = Depends(require_ops)):
+    """删除评估器（不影响评测集与运行历史）"""
+    row = db.query_one("SELECT id FROM eval_evaluators WHERE id = ?", (evaluator_id,))
+    if not row:
+        raise HTTPException(status_code=404, detail="评估器不存在")
+    db.execute("DELETE FROM eval_evaluators WHERE id = ?", (evaluator_id,))
+    return {"success": True}
 
 
 # ---------------------------------------------------------------------------

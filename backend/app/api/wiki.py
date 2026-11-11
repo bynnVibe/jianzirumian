@@ -37,17 +37,18 @@ async def list_wiki_pages(
     page_type: str = Query("", pattern="^(|source|digest)$"),
     current_user: dict = Depends(get_current_user),
 ):
-    """可见百科页面列表（私人页面仅属主/管理员可见）"""
-    pages = wiki_service.list_pages(
-        _user_id(current_user),
-        current_user.get("role") == "admin",
-        kb_id=kb_id,
-        page_type=page_type,
-    )
-    # 列表不返回全文，减小载荷
-    return {
-        "success": True,
-        "pages": [
+    """可见百科页面列表（私人页面仅属主/管理员可见）；Redis 缓存优先。"""
+    cached = None
+    if kb_id:
+        cached = insight_cache.cache_get(insight_cache.wiki_list_key(kb_id))
+    if cached is None:
+        pages = wiki_service.list_pages(
+            _user_id(current_user),
+            current_user.get("role") == "admin",
+            kb_id=kb_id,
+            page_type=page_type,
+        )
+        rows = [
             {
                 "id": p["id"],
                 "page_type": p["page_type"],
@@ -61,9 +62,17 @@ async def list_wiki_pages(
                 "updated_at": p["updated_at"],
             }
             for p in pages
-        ],
-        "total": len(pages),
-    }
+        ]
+        if kb_id:
+            insight_cache.cache_set(insight_cache.wiki_list_key(kb_id), {"rows": rows})
+        return {"success": True, "pages": rows, "total": len(rows)}
+    rows = [
+        r for r in cached.get("rows", [])
+        if (not page_type or r["page_type"] == page_type)
+        and (r["visibility"] == "public" or r["owner_id"] == _user_id(current_user)
+             or current_user.get("role") == "admin")
+    ]
+    return {"success": True, "pages": rows, "total": len(rows)}
 
 
 @router.get("/pages/{page_id}")

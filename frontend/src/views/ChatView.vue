@@ -76,6 +76,8 @@
             @option="handleHitlOption"
           />
           <ChatActionCard v-for="action in msg.actions || []" :key="action.id" :action="action" @update="store.updateAction" />
+          <!-- 能力缺口卡片（需求5）：系统无合适工具时给出 CLI 候选方案，用户选择后沙箱执行 -->
+          <CapabilityGapCard v-if="msg.capability_gap" :gap="msg.capability_gap" />
         </div>
         <!-- 正在生成的流式响应 -->
         <ChatMessage
@@ -173,6 +175,7 @@ import ChatMessage from '@/components/ChatMessage.vue'
 import ChatInput from '@/components/ChatInput.vue'
 import ChatActionCard from '@/components/ChatActionCard.vue'
 import ChatHitlCard from '@/components/ChatHitlCard.vue'
+import CapabilityGapCard from '@/components/CapabilityGapCard.vue'
 import ConversationNavigator from '@/components/ConversationNavigator.vue'
 import { messageAnchor } from '@/utils/conversationNavigation'
 import { useConversationNavigation } from '@/utils/useConversationNavigation'
@@ -214,6 +217,7 @@ const phaseMessage = computed(() => {
     case 'search_empty': return '联网搜索无结果'
     case 'search_error': return '联网搜索出错'
     case 'generating': return '正在生成回答...'
+    case 'auto_resolving': return '🔧 正在自动调用命令行能力获取实时数据以解决你的问题，请耐心等待…'
     case 'planning': return '正在规划解题步骤...'
     case 'executing': return '正在按计划执行检索...'
     case 'thinking': return '正在思考...'
@@ -247,7 +251,7 @@ const pipelineSteps = computed(() => {
   if (hasSearch) {
     steps.push({ key: 'search', label: '联网搜索', phases: ['searching', 'searched', 'search_empty', 'search_error'] })
   }
-  steps.push({ key: 'generate', label: '生成回答', phases: ['generating', 'fallback', 'citations_checked'] })
+  steps.push({ key: 'generate', label: '生成回答', phases: ['generating', 'fallback', 'citations_checked', 'auto_resolving'] })
 
   const activeIdx = steps.findIndex((s) => s.phases.includes(phase))
   return steps.map((s, i) => ({

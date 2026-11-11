@@ -354,6 +354,65 @@ class MemoryService:
         }
 
     @staticmethod
+    def drill_memories(user_id: str, kind: str = "all") -> dict:
+        """记忆概览钻取：按指标/类型返回记忆明细 + 口径说明（只读）。
+
+        kind: all/profile/retrieved/never_used/importance 或 type:<preference|fact|goal|feedback>。
+        口径与 usage_overview 同源，explanation 代入真实数值推导。
+        """
+        rows = MemoryService.list_memories(user_id) if user_id else []
+        for r in rows:
+            r["is_profile"] = (
+                float(r.get("importance") or 0) >= _PROFILE_IMPORTANCE
+                or (r.get("memory_type") or "fact") == "preference"
+            )
+            r["type_label"] = _TYPE_LABELS.get(r.get("memory_type") or "fact", "事实")
+        total = len(rows)
+        imp_sum = sum(float(r.get("importance") or 0.5) for r in rows)
+        avg = round(imp_sum / total, 3) if total else 0.0
+        budget = int(getattr(settings, "MEMORY_PROFILE_CHARS", 300))
+
+        if kind == "profile":
+            items = [r for r in rows if r["is_profile"]]
+            label = "画像卡候选"
+            explanation = (
+                f"画像卡候选 = 重要度 ≥ {_PROFILE_IMPORTANCE} 或类型为「偏好」的记忆，共 {len(items)} 条；"
+                f"常驻画像卡按重要度降序最多取 {_PROFILE_MAX_ITEMS} 条、字符预算 {budget}。"
+            )
+        elif kind == "retrieved":
+            items = [r for r in rows if r.get("last_used_at")]
+            label = "被检索命中"
+            explanation = f"被检索命中 = last_used_at 非空（曾被相关检索层注入上下文）的记忆，共 {len(items)} 条。"
+        elif kind == "never_used":
+            items = [r for r in rows if not r.get("last_used_at")]
+            label = "从未使用"
+            explanation = (
+                f"从未使用 = last_used_at 为空的记忆，共 {len(items)} 条；"
+                "超上限时「低重要度 + 长期未用」者会被优先遗忘。"
+            )
+        elif kind == "importance":
+            items = sorted(rows, key=lambda r: float(r.get("importance") or 0), reverse=True)
+            label = "平均重要度"
+            explanation = f"平均重要度 = 全部 {total} 条记忆重要度之和 {imp_sum:.2f} ÷ {total} = {avg}。按重要度降序展示。"
+        elif kind.startswith("type:"):
+            t = kind.split(":", 1)[1]
+            items = [r for r in rows if (r.get("memory_type") or "fact") == t]
+            label = f"{_TYPE_LABELS.get(t, t)}类记忆"
+            explanation = f"「{_TYPE_LABELS.get(t, t)}」类记忆 = memory_type='{t}' 的记录，共 {len(items)} 条。"
+        else:
+            kind = "all"
+            items = rows
+            label = "记忆条数"
+            usage = round(total / MAX_MEMORIES_PER_USER * 100, 1) if MAX_MEMORIES_PER_USER else 0.0
+            explanation = (
+                f"记忆条数 = 当前用户 user_memories 表记录数 {total}"
+                f"（存储上限 {MAX_MEMORIES_PER_USER}，水位 {usage}%）。按更新时间倒序展示。"
+            )
+        if kind not in ("importance",):
+            items = sorted(items, key=lambda r: r.get("updated_at") or "", reverse=True)
+        return {"kind": kind, "label": label, "explanation": explanation, "total": len(items), "items": items}
+
+    @staticmethod
     def apply_extraction(user_id: str, session_id: str, items: list) -> dict:
         """执行抽取侧输出的动作清单（add/update/delete），单轮上限 3 条。"""
         stats = {"add": 0, "update": 0, "delete": 0}

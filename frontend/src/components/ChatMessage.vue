@@ -450,6 +450,10 @@ const renderedContent = computed(() => {
   // 先渲染 Markdown，再注入引用标记样式
   // （md 配置了 html:false，若渲染前注入 <span> 会被转义成源码显示）
   let html = md.render(props.content || '')
+  // 表格包裹横向滚动容器，窄屏不溢出（样式见 style.css .md-table-wrap）
+  html = html
+    .replace(/<table>/g, '<div class="md-table-wrap"><table>')
+    .replace(/<\/table>/g, '</table></div>')
   html = html.replace(
     /\[(网络来源|来源)\s*(\d+)\]/g,
     (m, type, num) => {

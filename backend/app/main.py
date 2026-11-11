@@ -28,6 +28,7 @@ from app.core.embeddings import embedding_error_message
 from app.api import chat as chat_api
 from app.api import config_api
 from app.api import knowledge as knowledge_api
+from app.api import kb_insights as kb_insights_api
 from app.api import url_imports as url_imports_api
 from app.api import auth_api
 from app.api import bookmark_api
@@ -39,6 +40,7 @@ from app.api import gateway as gateway_api
 from app.api import gateway_proxy as gateway_proxy_api
 from app.api import me as me_api
 from app.api import skills as skills_api
+from app.api import capability as capability_api
 from app.services import auth as auth_service
 from app.config import settings
 from app.core.log_setup import setup_logging, current_username
@@ -131,6 +133,13 @@ async def lifespan(app: FastAPI):
         obs.purge_old()
     except Exception as e:
         logger.warning("Agent 可观测性过期数据清理失败: %s", e)
+    # 工具注册表：导入即注册全部工具（附件/知识/检索/CLI 封装），供 Tool Routing 统一治理
+    try:
+        from app.services.tools import bootstrap_registry
+        tool_names = bootstrap_registry()
+        logger.info("工具注册表初始化完成：%d 个工具 [%s]", len(tool_names), ", ".join(tool_names))
+    except Exception as e:
+        logger.warning("工具注册表初始化失败: %s", e)
     # 模型网关：清理过期请求日志（按配置的保留天数）
     try:
         from app.services.gateway import logs as gw_logs
@@ -213,6 +222,7 @@ app.add_middleware(RequestLogMiddleware)
 app.include_router(chat_api.router)
 app.include_router(url_imports_api.router)
 app.include_router(knowledge_api.router)
+app.include_router(kb_insights_api.router)
 app.include_router(config_api.router)
 app.include_router(auth_api.router)
 app.include_router(bookmark_api.router)
@@ -224,6 +234,7 @@ app.include_router(gateway_api.router)
 app.include_router(gateway_proxy_api.router)
 app.include_router(me_api.router)
 app.include_router(skills_api.router)
+app.include_router(capability_api.router)
 
 
 # ---- 鉴权中间件：除 /api/auth/* 和 /api/health 外都需要登录 ----
@@ -242,6 +253,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         "/api/knowledge/records",
         "/api/knowledge/entries",
         "/api/knowledge/search",
+        "/api/knowledge/bases",
         "/api/bookmarks",
         "/api/chat/send",
         "/api/chat/sessions",

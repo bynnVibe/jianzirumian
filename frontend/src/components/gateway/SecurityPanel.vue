@@ -16,6 +16,86 @@
     <div v-if="loading" class="mini-loading">加载安全配置中…</div>
 
     <template v-else>
+      <!-- 风险事件闭环：记录 → 弹窗告警 → 模型建议 → 处理留痕 -->
+      <section class="card">
+        <div class="card-head">
+          <h3 class="card-title">
+            风险事件
+            <span v-if="eventStats.pending" class="ev-badge">待处理 {{ eventStats.pending }}</span>
+            <span v-if="eventStats.unacked_alerts" class="ev-badge alert">未确认告警 {{ eventStats.unacked_alerts }}</span>
+          </h3>
+          <div class="rule-tools">
+            <select v-model="eventStatusFilter" class="field-input sm" @change="loadEvents">
+              <option value="">全部</option>
+              <option value="pending">待处理</option>
+              <option value="resolved">已处理</option>
+            </select>
+            <button class="btn btn-ghost sm" :disabled="eventsLoading" @click="loadEvents">刷新</button>
+          </div>
+        </div>
+        <p class="card-sub">
+          代理链路每次命中风险即在此留档；达到告警等级会自动弹窗。可对单条事件「模型建议」生成处置策略，处理后记录留痕。
+        </p>
+        <div v-if="eventsLoading && !events.length" class="mini-loading">加载风险事件中…</div>
+        <div v-else-if="!events.length" class="mini-empty">暂无风险事件。</div>
+        <div v-else class="ev-list">
+          <article v-for="ev in events" :key="ev.id" class="ev-card" :class="`sev-${ev.risk_level}`">
+            <div class="ev-head" @click="toggleExpand(ev.id)">
+              <span class="risk-tag" :class="`risk-${ev.risk_level}`">{{ riskLabel(ev.risk_level) }} · {{ ev.risk_score }}</span>
+              <span class="ev-title">{{ ev.finding_count }} 项命中</span>
+              <span class="ev-meta">{{ ev.role || '—' }} · {{ ev.model || '—' }} · 密钥 {{ ev.key_name || '—' }}</span>
+              <span class="ev-time">{{ formatTime(ev.created_at) }}</span>
+              <span v-if="ev.status === 'resolved'" class="ev-state done">{{ ev.resolution_label || '已处理' }}</span>
+              <span v-else class="ev-state pending">待处理</span>
+              <span class="ev-caret">{{ expanded.has(ev.id) ? '▾' : '▸' }}</span>
+            </div>
+            <div v-if="expanded.has(ev.id)" class="ev-body">
+              <div class="ev-findings">
+                <div v-for="(f, i) in ev.findings" :key="i" class="finding" :class="`sev-${f.severity}`">
+                  <div class="finding-head">
+                    <strong>{{ f.rule_name }}</strong>
+                    <span class="finding-cat">{{ f.category_label }}</span>
+                    <span class="finding-sev" :class="`txt-${f.severity}`">{{ sevLabel(f.severity) }}</span>
+                  </div>
+                  <div class="finding-match mono">{{ f.matched }}</div>
+                </div>
+              </div>
+
+              <!-- 模型建议 -->
+              <div class="ev-suggest">
+                <div class="ev-suggest-head">
+                  <strong>处理策略建议</strong>
+                  <button class="btn btn-ghost sm" :disabled="suggestingId === ev.id" @click="onSuggest(ev)">
+                    {{ suggestingId === ev.id ? '生成中…' : (ev.suggestion ? '重新生成' : '模型建议') }}
+                  </button>
+                </div>
+                <p v-if="ev.suggestion" class="ev-suggest-text">{{ ev.suggestion }}</p>
+                <p v-else class="ev-suggest-empty">尚未生成建议，点「模型建议」由模型研判并推荐处置动作。</p>
+              </div>
+
+              <!-- 处理留痕 -->
+              <div v-if="ev.status === 'pending'" class="ev-resolve">
+                <select v-model="resolveForm[ev.id].resolution" class="field-input sm">
+                  <option v-for="r in resolutions" :key="r" :value="r">{{ resolutionLabels[r] || r }}</option>
+                </select>
+                <input v-model.trim="resolveForm[ev.id].note" class="field-input sm ev-note" placeholder="处理说明（可选）" />
+                <button class="btn btn-primary sm" :disabled="resolvingId === ev.id" @click="onResolve(ev)">
+                  {{ resolvingId === ev.id ? '提交中…' : '确认处理' }}
+                </button>
+                <button class="btn btn-ghost sm" @click="onDeleteEvent(ev)">删除</button>
+              </div>
+              <div v-else class="ev-resolved">
+                <span>处理动作：<strong>{{ ev.resolution_label || '—' }}</strong></span>
+                <span v-if="ev.resolved_by">· 处理人 {{ ev.resolved_by }}</span>
+                <span v-if="ev.resolved_at">· {{ formatTime(ev.resolved_at) }}</span>
+                <span v-if="ev.resolved_note" class="ev-note-text">· 备注 {{ ev.resolved_note }}</span>
+                <button class="btn btn-ghost sm" @click="onReopen(ev)">重新打开</button>
+              </div>
+            </div>
+          </article>
+        </div>
+      </section>
+
       <!-- 审计模式 -->
       <section class="card">
         <h3 class="card-title">审计模式</h3>
@@ -53,6 +133,15 @@
           <label class="field">
             <span class="field-label">日志保留天数</span>
             <input v-model.number="settings.log_retention_days" type="number" min="1" max="365" class="field-input" />
+          </label>
+          <label class="field">
+            <span class="field-label">弹窗告警最低风险等级</span>
+            <select v-model="settings.security_alert_min_severity" class="field-input">
+              <option value="low">低危及以上</option>
+              <option value="medium">中危及以上（默认）</option>
+              <option value="high">高危及以上</option>
+              <option value="critical">仅严重</option>
+            </select>
           </label>
         </div>
       </section>
@@ -122,12 +211,45 @@
         <div v-else-if="scanResult" class="scan-clean">✓ 未检测到风险</div>
       </section>
     </template>
+
+    <!-- 弹窗告警：轮询未确认且达阈值的风险事件，逐条弹出 -->
+    <div v-if="alertQueue.length" class="modal-mask">
+      <div class="modal alert-modal" :class="`sev-${alertCurrent.risk_level}`">
+        <div class="modal-head">
+          <h3 class="modal-title">⚠️ 安全风险告警</h3>
+          <span class="alert-count">{{ alertIndex + 1 }} / {{ alertQueue.length }}</span>
+        </div>
+        <div class="alert-top">
+          <span class="risk-tag" :class="`risk-${alertCurrent.risk_level}`">{{ riskLabel(alertCurrent.risk_level) }} · {{ alertCurrent.risk_score }} 分</span>
+          <span class="alert-meta">{{ alertCurrent.finding_count }} 项命中 · {{ alertCurrent.role || '—' }} · {{ alertCurrent.model || '—' }}</span>
+          <span class="alert-time">{{ formatTime(alertCurrent.created_at) }}</span>
+        </div>
+        <div class="alert-findings">
+          <div v-for="(f, i) in alertCurrent.findings" :key="i" class="finding" :class="`sev-${f.severity}`">
+            <div class="finding-head">
+              <strong>{{ f.rule_name }}</strong>
+              <span class="finding-cat">{{ f.category_label }}</span>
+              <span class="finding-sev" :class="`txt-${f.severity}`">{{ sevLabel(f.severity) }}</span>
+            </div>
+            <div class="finding-match mono">{{ f.matched }}</div>
+          </div>
+        </div>
+        <div class="modal-actions">
+          <button class="btn btn-ghost" @click="onAlertDismiss">知道了</button>
+          <button class="btn btn-primary" @click="onAlertHandle">前往处理</button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted } from 'vue'
-import { getGatewayRules, getGatewaySettings, saveGatewaySettings, gatewayScanPreview } from '@/api'
+import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
+import {
+  getGatewayRules, getGatewaySettings, saveGatewaySettings, gatewayScanPreview,
+  listGatewaySecurityEvents, ackGatewaySecurityEvents, suggestGatewaySecurityEvent,
+  resolveGatewaySecurityEvent, reopenGatewaySecurityEvent, deleteGatewaySecurityEvent,
+} from '@/api'
 
 const loading = ref(true)
 const saving = ref(false)
@@ -137,7 +259,8 @@ const savedTip = ref(false)
 const rules = ref([])
 const categoryLabels = ref({})
 const ruleFilter = ref('')
-const settings = reactive({ audit_mode: 'audit', retry_count: 2, log_retention_days: 30, disabled_rules: [], blacklist: [], whitelist: [] })
+const settings = reactive({ audit_mode: 'audit', retry_count: 2, log_retention_days: 30, disabled_rules: [], blacklist: [], whitelist: [], security_alert_min_severity: 'medium' })
+
 const bools = reactive({ unicode_detection: true, tool_cmd_detection: true, outbound_detection: true })
 const blacklistText = ref('')
 const whitelistText = ref('')
@@ -145,6 +268,38 @@ const whitelistText = ref('')
 const scanText = ref('')
 const scanning = ref(false)
 const scanResult = ref(null)
+
+// ---- 风险事件闭环 ----
+const events = ref([])
+const eventsLoading = ref(false)
+const eventStats = reactive({ pending: 0, unacked_alerts: 0 })
+const eventStatusFilter = ref('')
+const expanded = ref(new Set())
+const resolutions = ref([])
+const resolutionLabels = ref({})
+const resolveForm = reactive({})
+const suggestingId = ref('')
+const resolvingId = ref('')
+// 弹窗告警队列（轮询未确认且达阈值的事件）
+const alertQueue = ref([])
+const alertIndex = ref(0)
+const alertCurrent = computed(() => alertQueue.value[alertIndex.value] || {})
+let alertTimer = null
+
+function formatTime(iso) {
+  if (!iso) return '-'
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return iso
+  return `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+function toggleExpand(id) {
+  const s = new Set(expanded.value)
+  if (s.has(id)) s.delete(id); else { s.add(id); ensureResolveForm(id) }
+  expanded.value = s
+}
+function ensureResolveForm(id) {
+  if (!resolveForm[id]) resolveForm[id] = { resolution: 'investigated', note: '' }
+}
 
 const modes = [
   { key: 'audit', label: '审计', desc: '只记录风险，不改变请求（默认）' },
@@ -188,6 +343,7 @@ async function load() {
     bools.unicode_detection = !!Number(s.unicode_detection ?? 1)
     bools.tool_cmd_detection = !!Number(s.tool_cmd_detection ?? 1)
     bools.outbound_detection = !!Number(s.outbound_detection ?? 1)
+    settings.security_alert_min_severity = s.security_alert_min_severity || 'medium'
     blacklistText.value = (s.blacklist || []).join('\n')
     whitelistText.value = (s.whitelist || []).join('\n')
   } catch (e) {
@@ -213,6 +369,7 @@ async function onSave() {
       outbound_detection: bools.outbound_detection,
       retry_count: Number(settings.retry_count) || 0,
       log_retention_days: Number(settings.log_retention_days) || 30,
+      security_alert_min_severity: settings.security_alert_min_severity,
       disabled_rules: settings.disabled_rules,
       blacklist: parseLines(blacklistText.value),
       whitelist: parseLines(whitelistText.value),
@@ -242,7 +399,117 @@ async function onScan() {
   }
 }
 
-onMounted(load)
+// ---- 风险事件闭环 ----
+async function loadEvents() {
+  eventsLoading.value = true
+  try {
+    const res = await listGatewaySecurityEvents({ status: eventStatusFilter.value, limit: 50 })
+    events.value = res.data.events || []
+    eventStats.pending = res.data.pending || 0
+    eventStats.unacked_alerts = res.data.unacked_alerts || 0
+    resolutions.value = res.data.resolutions || []
+    resolutionLabels.value = res.data.resolution_labels || {}
+    // 预填每条待处理事件的处理表单（默认动作：已排查处置）
+    events.value.forEach((ev) => { if (ev.status === 'pending') ensureResolveForm(ev.id) })
+  } catch (e) {
+    // 事件加载失败不阻断安全配置页
+  } finally {
+    eventsLoading.value = false
+  }
+}
+
+async function onSuggest(ev) {
+  suggestingId.value = ev.id
+  try {
+    const res = await suggestGatewaySecurityEvent(ev.id)
+    if (res.data.event) Object.assign(ev, res.data.event)
+  } catch (e) {
+    errorMsg.value = e.response?.data?.detail || '建议生成失败'
+  } finally {
+    suggestingId.value = ''
+  }
+}
+
+async function onResolve(ev) {
+  const f = resolveForm[ev.id] || { resolution: 'investigated', note: '' }
+  resolvingId.value = ev.id
+  try {
+    const res = await resolveGatewaySecurityEvent(ev.id, { resolution: f.resolution, note: f.note })
+    if (res.data.event) Object.assign(ev, res.data.event)
+    await loadEvents()
+  } catch (e) {
+    errorMsg.value = e.response?.data?.detail || '处理失败'
+  } finally {
+    resolvingId.value = ''
+  }
+}
+
+async function onReopen(ev) {
+  try {
+    const res = await reopenGatewaySecurityEvent(ev.id)
+    if (res.data.event) Object.assign(ev, res.data.event)
+    ensureResolveForm(ev.id)
+    await loadEvents()
+  } catch (e) {
+    errorMsg.value = e.response?.data?.detail || '重开失败'
+  }
+}
+
+async function onDeleteEvent(ev) {
+  if (!confirm('确认删除该风险事件？删除后不可恢复。')) return
+  try {
+    await deleteGatewaySecurityEvent(ev.id)
+    events.value = events.value.filter((x) => x.id !== ev.id)
+    await loadEvents()
+  } catch (e) {
+    errorMsg.value = e.response?.data?.detail || '删除失败'
+  }
+}
+
+// 轮询未确认告警：达到阈值即弹窗（弹窗只弹一次，确认后不再打扰）
+async function pollAlerts() {
+  if (alertQueue.value.length) return // 已有弹窗在处理，跳过本轮
+  try {
+    const res = await listGatewaySecurityEvents({ alert_only: true, limit: 20 })
+    const list = res.data.events || []
+    if (list.length) { alertQueue.value = list; alertIndex.value = 0 }
+  } catch (e) {
+    // 轮询失败静默
+  }
+}
+
+async function onAlertDismiss() {
+  // 确认当前弹窗（不再重复弹），前进到下一条
+  const cur = alertCurrent.value
+  if (cur?.id) { try { await ackGatewaySecurityEvents([cur.id]) } catch (e) { /* 忽略 */ } }
+  if (alertIndex.value < alertQueue.value.length - 1) {
+    alertIndex.value += 1
+  } else {
+    alertQueue.value = []; alertIndex.value = 0
+    loadEvents()
+  }
+}
+
+async function onAlertHandle() {
+  const cur = alertCurrent.value
+  alertQueue.value = []; alertIndex.value = 0
+  if (cur?.id) {
+    try { await ackGatewaySecurityEvents([cur.id]) } catch (e) { /* 忽略 */ }
+    eventStatusFilter.value = 'pending'
+    await loadEvents()
+    const s = new Set(expanded.value); s.add(cur.id); expanded.value = s
+    ensureResolveForm(cur.id)
+  }
+}
+
+onMounted(() => {
+  load()
+  loadEvents()
+  pollAlerts()
+  alertTimer = setInterval(pollAlerts, 15000)
+})
+onUnmounted(() => { if (alertTimer) clearInterval(alertTimer) })
+
 </script>
 
 <style scoped>
@@ -328,6 +595,54 @@ textarea.field-input { resize: vertical; font-size: 12px; width: 100%; box-sizin
 .risk-medium { background: #fdf0d9; color: #b8802a; }
 .risk-high { background: #fbe7d9; color: #c1622a; }
 .risk-critical { background: #fbe4e3; color: #c0392b; }
+
+/* 风险事件闭环 */
+.card-sub { font-size: 11.5px; color: var(--color-text-secondary); line-height: 1.6; margin: -4px 0 12px; }
+.ev-badge { font-size: 10.5px; font-weight: 700; padding: 2px 8px; border-radius: 8px; background: #fdf0d9; color: #b8802a; margin-left: 6px; }
+.ev-badge.alert { background: #fbe4e3; color: #c0392b; }
+.ev-list { display: flex; flex-direction: column; gap: 8px; max-height: 560px; overflow-y: auto; }
+.ev-card { border: 1px solid var(--color-border); border-left: 3px solid var(--color-border); border-radius: 8px; background: #fffdfb; overflow: hidden; }
+.ev-card.sev-low { border-left-color: #6a9fd8; }
+.ev-card.sev-medium { border-left-color: #e0a92e; }
+.ev-card.sev-high { border-left-color: #d97b3f; }
+.ev-card.sev-critical { border-left-color: #d9534f; }
+.ev-head { display: flex; align-items: center; gap: 10px; padding: 10px 12px; cursor: pointer; flex-wrap: wrap; }
+.ev-head:hover { background: #faf6f0; }
+.ev-title { font-size: 12.5px; font-weight: 700; }
+.ev-meta { font-size: 11.5px; color: var(--color-text-secondary); }
+.ev-time { font-size: 11px; color: var(--color-text-secondary); margin-left: auto; }
+.ev-state { font-size: 10.5px; font-weight: 700; padding: 2px 8px; border-radius: 8px; }
+.ev-state.pending { background: #fdf0d9; color: #b8802a; }
+.ev-state.done { background: #e4f4e8; color: #3d8b52; }
+.ev-caret { font-size: 11px; color: var(--color-text-secondary); }
+.ev-body { padding: 4px 12px 14px; border-top: 1px solid #f4efe8; }
+.ev-findings { display: flex; flex-direction: column; gap: 8px; margin: 12px 0; }
+.ev-suggest { background: #f7f2ea; border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; }
+.ev-suggest-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 6px; }
+.ev-suggest-head strong { font-size: 12.5px; }
+.ev-suggest-text { font-size: 12px; line-height: 1.7; color: var(--color-text); white-space: pre-wrap; margin: 0; }
+.ev-suggest-empty { font-size: 11.5px; color: var(--color-text-secondary); margin: 0; }
+.ev-resolve { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ev-note { flex: 1; min-width: 160px; }
+.ev-resolved { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 11.5px; color: var(--color-text-secondary); }
+.ev-resolved strong { color: #3d8b52; }
+.ev-note-text { font-style: italic; }
+
+/* 弹窗告警 */
+.modal-mask { position: fixed; inset: 0; background: rgba(45,42,36,0.4); display: flex; align-items: center; justify-content: center; z-index: 200; padding: 20px; }
+.modal { background: #fffdfb; border-radius: 14px; padding: 22px 24px; width: 100%; max-width: 560px; max-height: 86vh; overflow-y: auto; box-shadow: 0 8px 30px rgba(0,0,0,0.22); }
+.alert-modal { border-top: 4px solid #d9534f; }
+.alert-modal.sev-medium { border-top-color: #e0a92e; }
+.alert-modal.sev-high { border-top-color: #d97b3f; }
+.alert-modal.sev-low { border-top-color: #6a9fd8; }
+.modal-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+.modal-title { font-size: 16px; font-weight: 700; margin: 0; }
+.alert-count { font-size: 11.5px; color: var(--color-text-secondary); }
+.alert-top { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+.alert-meta { font-size: 12px; color: var(--color-text-secondary); }
+.alert-time { font-size: 11px; color: var(--color-text-secondary); margin-left: auto; }
+.alert-findings { display: flex; flex-direction: column; gap: 8px; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
 
 .btn { padding: 8px 16px; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer; border: 1px solid transparent; transition: all 0.15s; white-space: nowrap; }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }

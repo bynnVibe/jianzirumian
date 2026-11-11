@@ -29,6 +29,7 @@ export const useChatStore = defineStore('chat', () => {
   let generationId = 0
   const pendingDone = ref(null) // 最近一次 done 事件数据（含 message_id）
   const cacheHitInfo = ref(null) // 本轮是否命中语义缓存 { score }（命中则绕过检索路由直回）
+  const capabilityGap = ref(null) // 本轮能力缺口（需求5）：候选 CLI 方案随回答附带，由用户 HITL 选择执行
 
   // ---- Agent（复杂度分流）过程状态 ----
   const agentPlan = ref([]) // Plan&Execute 步骤清单 [{tool, purpose, query}]
@@ -139,6 +140,7 @@ export const useChatStore = defineStore('chat', () => {
     agentThoughts.value = []
     agentTools.value = []
     cacheHitInfo.value = null
+    capabilityGap.value = null
     resolveHitl() // 清除上一轮遗留的 HITL 卡片
     const skipSearchPrompt = !!(options && options.skipSearchPrompt)
 
@@ -231,6 +233,7 @@ export const useChatStore = defineStore('chat', () => {
           feedback: null,
           cache_hit: !!cacheHitInfo.value,
           cache_score: cacheHitInfo.value?.score || 0,
+          capability_gap: capabilityGap.value || null,
         })
       }
 
@@ -312,6 +315,19 @@ export const useChatStore = defineStore('chat', () => {
           question: data.question || '',
           options: Array.isArray(data.options) ? data.options : [],
         })
+        break
+
+      case 'capability_gap':
+        // 能力缺口（需求5）：不暂停回答，方案卡片随本轮回答一起呈现，
+        // 由用户选择 CLI 方案后调 /capability-gap/execute 在沙箱执行
+        capabilityGap.value = {
+          gap_id: data.gap_id || '',
+          scenario: data.scenario || '',
+          scenario_label: data.scenario_label || '',
+          solutions: Array.isArray(data.solutions) ? data.solutions : [],
+          query: data.query || '',
+          message: data.message || '',
+        }
         break
 
       case 'error':

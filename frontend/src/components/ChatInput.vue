@@ -1,5 +1,13 @@
 <template>
   <div class="input-area">
+    <!-- 配额友好提示：公共额度用尽→联系管理员；专属配额用尽→已降级公共密钥（均不阻断使用） -->
+    <div v-if="quotaMessage" class="quota-banner" :class="quota.exhausted ? 'warn' : 'info'">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+        <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+      </svg>
+      <span>{{ quotaMessage }}</span>
+      <button class="quota-close" type="button" title="收起" @click="quotaDismissed = true">×</button>
+    </div>
     <!-- 模式切换 (DeepSeek 风格) -->
     <div class="mode-bar">
       <label class="mode-toggle">
@@ -121,7 +129,7 @@
 <script setup>
 import { ref, computed, watch, nextTick, onMounted } from 'vue'
 import { useChatStore } from '@/stores/chat'
-import { getMyChatModels } from '@/api'
+import { getMyChatModels, getMyGatewayQuota } from '@/api'
 import ContextUsageBadge from '@/components/ContextUsageBadge.vue'
 
 const store = useChatStore()
@@ -261,6 +269,7 @@ const defaultModelLabel = computed(() => {
   return '默认（自动均衡）'
 })
 onMounted(async () => {
+  loadQuota()
   try {
     const res = await getMyChatModels()
     models.value = res.data.models || []
@@ -279,6 +288,30 @@ const ctxBadgeRef = ref(null)
 watch(() => store.isGenerating, (v) => {
   if (!v) ctxBadgeRef.value?.refresh()
 })
+
+// 我的出网配额：友好提示（公共额度用尽→联系管理员；专属配额用尽→已降级），非阻断
+const quota = ref({})
+const quotaDismissed = ref(false)
+const quotaMessage = computed(() => {
+  if (quotaDismissed.value) return ''
+  const q = quota.value || {}
+  if (q.exhausted || q.degraded) return q.message || ''
+  return ''
+})
+async function loadQuota() {
+  try {
+    const res = await getMyGatewayQuota()
+    const next = res.data.quota || {}
+    // 状态变化（如从降级恢复）时重新展示提示
+    if ((next.message || '') !== (quota.value.message || '')) quotaDismissed.value = false
+    quota.value = next
+  } catch (e) {
+    quota.value = {}
+  }
+}
+// 每轮回答结束后刷新配额（用量在此时累加）
+watch(() => store.isGenerating, (v) => { if (!v) loadQuota() })
+
 
 // 消费再编辑草稿：历史问题回填输入框并聚焦
 watch(
@@ -348,6 +381,28 @@ defineExpose({ focus })
   padding: 12px 24px 20px;
   background: linear-gradient(transparent, var(--color-bg) 30%);
 }
+
+/* 配额友好提示条（非阻断） */
+.quota-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 4px 10px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.quota-banner svg { flex-shrink: 0; }
+.quota-banner span { flex: 1; }
+.quota-banner.warn { background: #fbe4e3; color: #a8322a; border: 1px solid #f0c9c6; }
+.quota-banner.info { background: #fdf0d9; color: #96691f; border: 1px solid #f0dcb4; }
+.quota-close {
+  border: none; background: transparent; cursor: pointer;
+  font-size: 18px; line-height: 1; color: inherit; opacity: 0.6; padding: 0 2px;
+}
+.quota-close:hover { opacity: 1; }
+
 
 .mode-bar {
   display: flex;

@@ -4,66 +4,25 @@
     <header class="eval-header">
       <div class="header-inner">
         <div class="header-title">
+          <button class="btn btn-ghost sm back-btn-top" @click="goOverview">← 返回回归评测</button>
           <span class="header-eyebrow">Regression Suite</span>
-          <h1>回归评测</h1>
+          <h1>{{ selectedDataset ? selectedDataset.name : '问答回归 · Ragas' }}</h1>
           <p class="header-sub">
-            {{ mode === 'ragas'
-              ? '仿照 Ragas 评估框架对问答主链路跑离线回归，量化忠实度、回答相关性、上下文精确率与上下文召回率，防止优化引入回退'
-              : '对系统提示词（Prompt）与用户技能（Skill）做专项评测：静态断言 + Rubric 多维打分 + A/B 行为对比，据结果一键优化并上线' }}
+            仿照 Ragas 评估框架对问答主链路跑离线回归，量化忠实度、回答相关性、上下文精确率与上下文召回率，防止优化引入回退
           </p>
         </div>
-        <nav class="mode-tabs">
-          <button class="mode-tab" :class="{ active: mode === 'ragas' }" @click="mode = 'ragas'">问答回归 · Ragas</button>
-          <button class="mode-tab" :class="{ active: mode === 'prompt_skill' }" @click="mode = 'prompt_skill'">Prompt / Skill 评测</button>
-        </nav>
       </div>
     </header>
 
-    <div v-if="mode === 'ragas'" class="eval-layout">
-      <!-- ============ 左栏：评测集 ============ -->
-      <aside class="dataset-panel">
-        <div class="panel-head">
-          <span class="panel-title">评测集</span>
-          <button class="icon-btn" title="新建评测集" @click="openCreateDataset">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
-              <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
-            </svg>
-          </button>
-        </div>
-
-        <div v-if="loadingDatasets" class="mini-loading">加载中…</div>
-        <div v-else-if="!datasets.length" class="empty-block">
-          <p>还没有评测集</p>
-          <button class="btn btn-ghost sm" @click="openCreateDataset">创建第一个</button>
-        </div>
-        <ul v-else class="dataset-list">
-          <li
-            v-for="d in datasets"
-            :key="d.id"
-            class="dataset-item"
-            :class="{ active: d.id === selectedDatasetId }"
-            @click="selectDataset(d.id)"
-          >
-            <div class="dataset-main">
-              <span class="dataset-name">{{ d.name }}</span>
-              <span class="dataset-meta">{{ d.case_count }} 用例 · {{ runStatusText(d.last_run) }}</span>
-            </div>
-            <button class="icon-btn danger" title="删除评测集" @click.stop="removeDataset(d)">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
-                <polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-              </svg>
-            </button>
-          </li>
-        </ul>
-      </aside>
-
-      <!-- ============ 右栏：主工作区 ============ -->
+    <div class="eval-layout">
+      <!-- ============ 主工作区 ============ -->
       <main class="work-panel">
         <div v-if="!selectedDataset" class="placeholder">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" width="46" height="46">
             <path d="M9 11l3 3L22 4" /><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
           </svg>
-          <p>选择左侧评测集开始，或新建一个评测集</p>
+          <p>{{ loadingDatasets ? '加载中…' : '评测集不存在或已被删除' }}</p>
+          <button v-if="!loadingDatasets" class="btn btn-outline sm" @click="goOverview">返回回归评测总览</button>
         </div>
 
         <template v-else>
@@ -325,53 +284,32 @@
         </template>
       </main>
     </div>
-
-    <!-- ============ Prompt / Skill 专项评测 ============ -->
-    <div v-else class="pse-wrap">
-      <PromptSkillEval />
-    </div>
-
-    <!-- 新建评测集弹窗 -->
-    <div v-if="showCreateDataset" class="modal-overlay" @click.self="showCreateDataset = false">
-      <div class="modal-box">
-        <h3 class="modal-title">新建评测集</h3>
-        <label class="field">
-          <span class="field-label">名称 <em>*</em></span>
-          <input class="input" v-model.trim="datasetForm.name" placeholder="如：中医养生核心问答集" />
-        </label>
-        <label class="field">
-          <span class="field-label">描述</span>
-          <textarea class="input textarea" v-model.trim="datasetForm.description" rows="3" placeholder="评测集用途说明（选填）"></textarea>
-        </label>
-        <div class="modal-actions">
-          <button class="btn btn-outline" @click="showCreateDataset = false">取消</button>
-          <button class="btn btn-primary" :disabled="creatingDataset || !datasetForm.name" @click="createDataset">
-            {{ creatingDataset ? '创建中…' : '创建' }}
-          </button>
-        </div>
-      </div>
-    </div>
   </div>
 </template>
 
 <script setup>
 import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import {
-  listEvalDatasets, createEvalDataset, deleteEvalDataset,
+  listEvalDatasets,
   listEvalCases, createEvalCase, deleteEvalCase,
   importEvalCases, importEvalCasesFromFeedback,
   startEvalRun, listEvalRuns, getEvalRun,
 } from '@/api'
-import PromptSkillEval from '@/components/PromptSkillEval.vue'
 
-// ---- 顶层模式：ragas 问答回归 | prompt_skill 专项评测 ----
-const mode = ref('ragas')
+// ---- 路由：评测集详情，datasetId 来自路由参数 ----
+const route = useRoute()
+const router = useRouter()
 
 // ---- 评测集 ----
 const datasets = ref([])
 const loadingDatasets = ref(false)
-const selectedDatasetId = ref('')
+const selectedDatasetId = ref(String(route.params.datasetId || ''))
 const selectedDataset = computed(() => datasets.value.find((d) => d.id === selectedDatasetId.value) || null)
+
+function goOverview() {
+  router.push({ name: 'EvalOverview' })
+}
 
 // ---- 面板 ----
 const panel = ref('cases') // cases | runs | detail
@@ -413,8 +351,10 @@ async function loadDatasets() {
   try {
     const res = await listEvalDatasets()
     datasets.value = res.data.datasets || []
-    if (!selectedDatasetId.value && datasets.value.length) {
-      await selectDataset(datasets.value[0].id)
+    if (selectedDatasetId.value && datasets.value.some((d) => d.id === selectedDatasetId.value)) {
+      await selectDataset(selectedDatasetId.value)
+      const runId = String(route.query.run || '')
+      if (runId) await openRun(runId)
     }
   } catch (e) {
     errorMsg.value = errMsg(e, '加载评测集失败')
@@ -431,48 +371,6 @@ async function selectDataset(id) {
   errorMsg.value = ''
   stopPolling()
   await Promise.all([loadCases(), loadRuns()])
-}
-
-const showCreateDataset = ref(false)
-const creatingDataset = ref(false)
-const datasetForm = reactive({ name: '', description: '' })
-
-function openCreateDataset() {
-  datasetForm.name = ''
-  datasetForm.description = ''
-  showCreateDataset.value = true
-}
-
-async function createDataset() {
-  creatingDataset.value = true
-  try {
-    const res = await createEvalDataset({ name: datasetForm.name, description: datasetForm.description })
-    showCreateDataset.value = false
-    datasets.value.unshift(res.data.dataset)
-    await selectDataset(res.data.dataset.id)
-  } catch (e) {
-    errorMsg.value = errMsg(e, '创建评测集失败')
-  } finally {
-    creatingDataset.value = false
-  }
-}
-
-async function removeDataset(d) {
-  if (!window.confirm(`确认删除评测集「${d.name}」？其用例与运行历史将一并删除。`)) return
-  try {
-    await deleteEvalDataset(d.id)
-    datasets.value = datasets.value.filter((x) => x.id !== d.id)
-    if (selectedDatasetId.value === d.id) {
-      selectedDatasetId.value = ''
-      detail.value = null
-      cases.value = []
-      runs.value = []
-      stopPolling()
-      if (datasets.value.length) await selectDataset(datasets.value[0].id)
-    }
-  } catch (e) {
-    errorMsg.value = errMsg(e, '删除评测集失败')
-  }
 }
 
 // ============================================
@@ -748,11 +646,6 @@ function statusLabel(st) {
   return { running: '执行中', finished: '已完成', failed: '失败', interrupted: '已中断' }[st] || st
 }
 
-function runStatusText(lastRun) {
-  if (!lastRun) return '未运行'
-  return `最近${statusLabel(lastRun.status)}`
-}
-
 function fmtTime(iso) {
   if (!iso) return ''
   const d = new Date(iso)
@@ -790,45 +683,17 @@ function fmtTime(iso) {
 .header-title h1 { font-size: 22px; font-weight: 700; margin: 2px 0 4px; letter-spacing: -0.3px; }
 .header-sub { font-size: 12.5px; color: var(--color-text-secondary); max-width: 720px; line-height: 1.5; }
 
-/* ---- 顶层模式切换 ---- */
-.mode-tabs { display: flex; gap: 6px; flex-shrink: 0; }
-.mode-tab {
-  padding: 7px 16px; font-size: 12.5px; font-weight: 600; border-radius: 999px;
-  border: 1px solid var(--color-border); background: #fff; color: var(--color-text-secondary);
-  cursor: pointer; transition: all .15s; white-space: nowrap;
-}
-.mode-tab:hover { border-color: var(--color-primary); color: var(--color-primary); }
-.mode-tab.active { background: var(--color-primary); border-color: var(--color-primary); color: #fff; }
-
+/* ---- 返回总览 ---- */
+.back-btn-top { margin-bottom: 8px; align-self: flex-start; }
 
 /* ---- 布局 ---- */
 .eval-layout {
-  flex: 1; display: grid; grid-template-columns: 264px 1fr;
+  flex: 1; display: flex; flex-direction: column;
   gap: 20px; padding: 20px 32px 40px; max-width: 1400px; width: 100%; margin: 0 auto;
-  align-items: start;
+  box-sizing: border-box;
 }
-.pse-wrap { padding: 20px 32px 40px; max-width: 1400px; width: 100%; margin: 0 auto; }
 
-/* ---- 左栏 ---- */
-.dataset-panel {
-  background: #fff; border: 1px solid var(--color-border); border-radius: 16px;
-  padding: 14px; position: sticky; top: 96px; max-height: calc(100vh - 130px);
-  display: flex; flex-direction: column;
-}
-.panel-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
-.panel-title { font-size: 12px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; color: var(--color-text-secondary); }
-.dataset-list { list-style: none; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
-.dataset-item {
-  display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-radius: 10px;
-  cursor: pointer; border: 1px solid transparent; transition: all 0.16s;
-}
-.dataset-item:hover { background: #faf5ee; }
-.dataset-item.active { background: var(--color-primary-light); border-color: #e9bc7d; }
-.dataset-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.dataset-name { font-size: 13.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.dataset-meta { font-size: 11px; color: var(--color-text-secondary); }
-
-/* ---- 右栏 ---- */
+/* ---- 主工作区 ---- */
 .work-panel { min-width: 0; display: flex; flex-direction: column; gap: 16px; }
 .placeholder {
   border: 1px dashed var(--color-border); border-radius: 16px; padding: 80px 20px;
@@ -996,12 +861,6 @@ function fmtTime(iso) {
 .mini-loading { padding: 26px; text-align: center; color: var(--color-text-secondary); font-size: 12.5px; }
 .empty-block { padding: 30px 16px; text-align: center; color: var(--color-text-secondary); font-size: 12.5px; display: flex; flex-direction: column; gap: 10px; align-items: center; }
 
-/* ---- 弹窗 ---- */
-.modal-overlay { position: fixed; inset: 0; background: rgba(45,42,36,0.4); display: flex; align-items: center; justify-content: center; z-index: 100; }
-.modal-box { width: 440px; max-width: 92vw; background: #fff; border-radius: 16px; padding: 22px 24px; box-shadow: 0 16px 48px rgba(0,0,0,0.2); display: flex; flex-direction: column; gap: 12px; }
-.modal-title { font-size: 16px; font-weight: 700; margin-bottom: 2px; }
-.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
-
 /* ---- 响应式 ---- */
 @media (max-width: 980px) {
   .metric-grid { grid-template-columns: repeat(2, 1fr); }
@@ -1009,8 +868,7 @@ function fmtTime(iso) {
 @media (max-width: 768px) {
   .eval-header { padding-top: 44px; }
   .header-inner { padding: 16px; }
-  .eval-layout { grid-template-columns: 1fr; padding: 16px; }
-  .dataset-panel { position: static; max-height: none; }
+  .eval-layout { padding: 16px; }
   .form-grid { grid-template-columns: 1fr; }
   .field.span-2 { grid-column: span 1; }
   .metric-grid { grid-template-columns: 1fr 1fr; }

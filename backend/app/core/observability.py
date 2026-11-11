@@ -260,6 +260,205 @@ def record_step(name: str, detail: str = "", t0: Optional[float] = None,
     )
 
 
+# ---------------------------------------------------------------------------
+# Tool Routing 调用链分析（工具治理可观测性）
+# ---------------------------------------------------------------------------
+# 一次工具调用 = 一条 tool_routing 记录，由 tools.invoke.invoke_tool 在
+# 「约束钩子 → 执行」全链路落库；聚合出五项核心指标（见 tool_routing_metrics）。
+# 与 agent_spans(kind='tool') 互补：span 记录「调用内容/结果文本」，routing 记录
+# 「治理维度」（参数合法/越权/风险/限流/Schema Token/延迟），专供 Tool Routing 面板。
+
+def record_tool_routing(
+    *,
+    tool_name: str,
+    namespace: str = "",
+    user_id: str = "",
+    session_id: str = "",
+    trace_id: str = "",
+    routed_by: str = "",
+    args: Optional[dict] = None,
+    risk_level: str = "low",
+    schema_valid: bool = True,
+    permission_ok: bool = True,
+    risk_blocked: bool = False,
+    rate_limited: bool = False,
+    allowed: bool = True,
+    blocked_code: str = "",
+    status: str = "ok",
+    success: bool = True,
+    schema_tokens: int = 0,
+    t0: Optional[float] = None,
+    error: str = "",
+) -> None:
+    """落库一条 Tool Routing 记录（可观测性绝不影响主流程，失败静默忽略）。
+
+    trace_id 缺省时取当前活动 trace，使工具调用链可串联到所属请求。
+    """
+    tid = trace_id or _trace_id.get() or ""
+    latency = _latency(t0)
+    try:
+        db.execute(
+            "INSERT INTO tool_routing (id, trace_id, session_id, user_id, tool_name, namespace,"
+            " routed_by, args_json, risk_level, schema_valid, permission_ok, risk_blocked,"
+            " rate_limited, allowed, blocked_code, status, success, schema_tokens, latency_ms,"
+            " error, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                str(uuid.uuid4()), tid, session_id or "", user_id or "", tool_name or "",
+                namespace or "", routed_by or "",
+                json.dumps(args or {}, ensure_ascii=False)[:4000],
+                risk_level or "low",
+                1 if schema_valid else 0, 1 if permission_ok else 0,
+                1 if risk_blocked else 0, 1 if rate_limited else 0,
+                1 if allowed else 0, (blocked_code or "")[:64],
+                status or "ok", 1 if success else 0, int(schema_tokens or 0),
+                latency, (error or "")[:500], _now(),
+            ),
+        )
+    except Exception as e:
+        logger.warning("tool_routing 落库失败: %s", e)
+    logger.info(
+        "[TOOL_ROUTING] trace=%s tool=%s ns=%s routed_by=%s status=%s allowed=%s "
+        "schema_valid=%s permission_ok=%s latency=%dms schema_tokens=%d%s",
+        tid or "-", tool_name or "-", namespace or "-", routed_by or "-", status,
+        allowed, schema_valid, permission_ok, latency, int(schema_tokens or 0),
+        f" blocked={blocked_code}" if blocked_code else "",
+    )
+
+
+def tool_routing_metrics(days: int = 7, range_mode: str = "days") -> dict:
+    """聚合 Tool Routing 调用链五项核心指标 + 按工具/命名空间下钻 + 近期拦截事件。
+
+    五项核心指标（req2）：
+      - 参数合法率 param_validity_rate：schema_valid=1 占比
+      - 任务成功率 task_success_rate：status=ok 且 success=1 占比（放行后执行成功率）
+      - 工具 Schema Token schema_tokens：注入 LLM 的工具 schema token 总量/均值
+      - 端到端延迟 e2e_latency：avg/p95（钩子+执行全链路）
+      - 越权暴露率 privilege_exposure_rate：permission_ok=0 占比（越权尝试被拦截率）
+    """
+    since = _range_since(days, range_mode)
+    total_row = db.query_one(
+        "SELECT COUNT(*) AS n,"
+        " COALESCE(SUM(schema_valid), 0) AS schema_valid_n,"
+        " COALESCE(SUM(permission_ok = 0), 0) AS privilege_violations,"
+        " COALESCE(SUM(allowed), 0) AS allowed_n,"
+        " COALESCE(SUM(status = 'blocked'), 0) AS blocked_n,"
+        " COALESCE(SUM(status = 'ok' AND success = 1), 0) AS success_n,"
+        " COALESCE(SUM(status = 'error'), 0) AS error_n,"
+        " COALESCE(SUM(risk_blocked), 0) AS risk_blocked_n,"
+        " COALESCE(SUM(rate_limited), 0) AS rate_limited_n,"
+        " COALESCE(SUM(schema_tokens), 0) AS schema_tokens_sum,"
+        " COALESCE(AVG(latency_ms), 0) AS avg_latency"
+        " FROM tool_routing WHERE created_at >= ?",
+        (since,),
+    ) or {}
+    n = int(total_row.get("n", 0) or 0)
+    allowed_n = int(total_row.get("allowed_n", 0) or 0)
+    latencies = [
+        r["latency_ms"] for r in db.query(
+            "SELECT latency_ms FROM tool_routing WHERE created_at >= ? ORDER BY created_at DESC LIMIT 5000",
+            (since,),
+        )
+    ]
+    p95 = 0
+    if latencies:
+        latencies.sort()
+        p95 = latencies[min(len(latencies) - 1, int(len(latencies) * 0.95))]
+
+    by_tool = [
+        {
+            "tool": r["tool_name"],
+            "namespace": r["namespace"],
+            "total": int(r["total"]),
+            "allowed": int(r["allowed_n"]),
+            "blocked": int(r["blocked_n"]),
+            "success": int(r["success_n"]),
+            "errors": int(r["error_n"]),
+            "param_validity_rate": round(int(r["schema_valid_n"]) / int(r["total"]), 4) if int(r["total"]) else 0.0,
+            "task_success_rate": round(int(r["success_n"]) / int(r["allowed_n"]), 4) if int(r["allowed_n"]) else 0.0,
+            "privilege_exposure_rate": round(int(r["privilege_violations"]) / int(r["total"]), 4) if int(r["total"]) else 0.0,
+            "avg_latency_ms": int(r["avg_latency"] or 0),
+            "schema_tokens": int(r["schema_tokens_sum"]),
+        }
+        for r in db.query(
+            "SELECT tool_name, MAX(namespace) AS namespace, COUNT(*) AS total,"
+            " COALESCE(SUM(allowed), 0) AS allowed_n,"
+            " COALESCE(SUM(status = 'blocked'), 0) AS blocked_n,"
+            " COALESCE(SUM(schema_valid), 0) AS schema_valid_n,"
+            " COALESCE(SUM(permission_ok = 0), 0) AS privilege_violations,"
+            " COALESCE(SUM(status = 'ok' AND success = 1), 0) AS success_n,"
+            " COALESCE(SUM(status = 'error'), 0) AS error_n,"
+            " COALESCE(SUM(schema_tokens), 0) AS schema_tokens_sum,"
+            " COALESCE(AVG(latency_ms), 0) AS avg_latency"
+            " FROM tool_routing WHERE created_at >= ? GROUP BY tool_name ORDER BY total DESC",
+            (since,),
+        )
+    ]
+
+    by_namespace = [
+        {
+            "namespace": r["namespace"] or "(未分组)",
+            "total": int(r["total"]),
+            "blocked": int(r["blocked_n"]),
+            "success": int(r["success_n"]),
+        }
+        for r in db.query(
+            "SELECT namespace, COUNT(*) AS total,"
+            " COALESCE(SUM(status = 'blocked'), 0) AS blocked_n,"
+            " COALESCE(SUM(status = 'ok' AND success = 1), 0) AS success_n"
+            " FROM tool_routing WHERE created_at >= ? GROUP BY namespace ORDER BY total DESC",
+            (since,),
+        )
+    ]
+
+    # 近期被拦截/失败的调用链事件（供前端 drill-down 定位「哪次调用被哪个钩子拦截」）
+    blocked_events = [
+        {
+            "tool_name": r["tool_name"],
+            "namespace": r["namespace"],
+            "routed_by": r["routed_by"],
+            "blocked_code": r["blocked_code"],
+            "status": r["status"],
+            "risk_level": r["risk_level"],
+            "user_id": r["user_id"],
+            "error": r["error"],
+            "created_at": r["created_at"],
+        }
+        for r in db.query(
+            "SELECT tool_name, namespace, routed_by, blocked_code, status, risk_level,"
+            " user_id, error, created_at FROM tool_routing"
+            " WHERE created_at >= ? AND (status = 'blocked' OR status = 'error')"
+            " ORDER BY created_at DESC LIMIT 30",
+            (since,),
+        )
+    ]
+
+    return {
+        "days": days,
+        "overview": {
+            "total_calls": n,
+            "allowed": allowed_n,
+            "blocked": int(total_row.get("blocked_n", 0) or 0),
+            "success": int(total_row.get("success_n", 0) or 0),
+            "errors": int(total_row.get("error_n", 0) or 0),
+            # 五项核心指标
+            "param_validity_rate": round(int(total_row.get("schema_valid_n", 0) or 0) / n, 4) if n else 0.0,
+            "task_success_rate": round(int(total_row.get("success_n", 0) or 0) / allowed_n, 4) if allowed_n else 0.0,
+            "privilege_exposure_rate": round(int(total_row.get("privilege_violations", 0) or 0) / n, 4) if n else 0.0,
+            "schema_tokens_total": int(total_row.get("schema_tokens_sum", 0) or 0),
+            "schema_tokens_avg": round(int(total_row.get("schema_tokens_sum", 0) or 0) / n, 1) if n else 0.0,
+            "avg_latency_ms": int(total_row.get("avg_latency", 0) or 0),
+            "p95_latency_ms": int(p95),
+            # 约束闸命中分布
+            "risk_blocked": int(total_row.get("risk_blocked_n", 0) or 0),
+            "rate_limited": int(total_row.get("rate_limited_n", 0) or 0),
+        },
+        "by_tool": by_tool,
+        "by_namespace": by_namespace,
+        "blocked_events": blocked_events,
+    }
+
+
+
 # segment 级 Token 度量：按语义段沉淀上下文构成，供管理员定位 Token 大户与量化优化效果。
 # 标准段名（前端展示中文映射）：system / memory / history / knowledge / search / tool。
 # 口径约定：各段 token 与成本口径（LLM 真实 usage）同源——以最终生成调用的真实 prompt_tokens
@@ -317,13 +516,30 @@ def _since(days: int) -> str:
     ).isoformat()
 
 
-def personal_metrics(user_id: str, days: int = 7) -> dict:
+def _range_since(days: int, range_mode: str = "days") -> str:
+    """时间窗起点。
+
+    range_mode='today'：仅今天（起点=今日 00:00），页面只呈现今日数据；
+    其余（'days'/缺省）：按天数回溯（含今天），与 _since 同语义。
+    """
+    if (range_mode or "days") == "today":
+        return datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    return _since(days)
+
+
+def _range_days(days: int, range_mode: str) -> int:
+    """today 模式下的有效天数（用于日均/趋势横轴），恒为 1。"""
+    return 1 if (range_mode or "days") == "today" else max(1, days)
+
+
+def personal_metrics(user_id: str, days: int = 7, range_mode: str = "days") -> dict:
     """仅聚合当前账号的业务指标；不读取正文、步骤、模型或工具数据。"""
     if not user_id or user_id in {"guest", "system", "-"}:
         raise ValueError("个人统计需要有效的登录用户")
     days = max(1, min(days, RETENTION_DAYS))
+    eff_days = _range_days(days, range_mode)
     today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-    start = today - timedelta(days=days - 1)
+    start = today - timedelta(days=eff_days - 1)
     end = today + timedelta(days=1)
     rows = db.query(
         "SELECT substr(started_at, 1, 10) AS day,"
@@ -365,7 +581,7 @@ def personal_metrics(user_id: str, days: int = 7) -> dict:
         }
 
     overview = empty()
-    daily = {(start + timedelta(days=i)).date().isoformat(): empty() for i in range(days)}
+    daily = {(start + timedelta(days=i)).date().isoformat(): empty() for i in range(eff_days)}
     activities = {}
     for row in rows:
         activity = activities.setdefault(row["activity"], empty())
@@ -384,7 +600,7 @@ def personal_metrics(user_id: str, days: int = 7) -> dict:
     }
 
 
-def personal_context_overview(user_id: str, days: int = 7) -> dict:
+def personal_context_overview(user_id: str, days: int = 7, range_mode: str = "days") -> dict:
     """当前用户的「上下文窗口 + 记忆模块」使用概览（可观测性个人面板数据源）。
 
     - 上下文窗口：按语义段（系统/记忆/历史/知识/搜索/工具…）聚合该用户近期每次请求
@@ -396,7 +612,7 @@ def personal_context_overview(user_id: str, days: int = 7) -> dict:
     if not user_id or user_id in {"guest", "system", "-"}:
         raise ValueError("个人上下文概览需要有效的登录用户")
     days = max(1, min(days, RETENTION_DAYS))
-    since = _since(days)
+    since = _range_since(days, range_mode)
 
     # 上下文窗口：该用户单请求真实 prompt token（= 注入上下文总量）的分布
     win = db.query_one(
@@ -517,7 +733,8 @@ def session_context_usage(session_id: str) -> dict:
     }
 
 
-def personal_session_contexts(user_id: str, days: int = 7, limit: int = 20) -> dict:
+def personal_session_contexts(user_id: str, days: int = 7, limit: int = 20,
+                              range_mode: str = "days") -> dict:
     """按对话窗口下钻的上下文构成（个人面板总集口径的会话级子集切片）。
 
     个人面板的「上下文构成」是周期内该用户全部请求的按段累计（总集）；本函数按
@@ -529,7 +746,7 @@ def personal_session_contexts(user_id: str, days: int = 7, limit: int = 20) -> d
         raise ValueError("按对话下钻上下文需要有效的登录用户")
     days = max(1, min(days, RETENTION_DAYS))
     limit = max(1, min(limit, 50))
-    since = _since(days)
+    since = _range_since(days, range_mode)
     rows = db.query(
         "SELECT t.session_id, COUNT(*) AS n,"
         " COALESCE(AVG(t.prompt_tokens), 0) AS avg_pt,"
@@ -582,9 +799,137 @@ def personal_session_contexts(user_id: str, days: int = 7, limit: int = 20) -> d
     return {"days": days, "sessions": items}
 
 
-def metrics(days: int = 7) -> dict:
-    """聚合指标：总览 + 每日趋势 + 按 Agent + 按工具（Token/延迟/成功率/调用次数）。"""
-    since = _since(days)
+def session_observability(session_id: str, day: str = "", trace_id: str = "") -> dict:
+    """单个对话窗口的统一可观测视图（需求2：上下文构成 + 请求追踪 + 调用链 合一）。
+
+    同一个对话（session）下提供三种视角，前端以 tab 切换：
+      - 上下文构成：选定 trace 的各语义段 token 构成（与聊天页缩略图同口径）；
+      - 请求追踪：该会话全部 trace 列表（可按 day 过滤），即 Traces 的会话级切片；
+      - 调用链：选定 trace 的 span 序列（llm/tool/step），复用 get_trace 口径。
+    另附该会话的记忆注入概况（memory/memory_profile/memory_relevant 段累计）与
+    所属用户的记忆总览，使「上下文与记忆」可按对话/按用户查看而非仅全局累计。
+
+    Args:
+        session_id: 会话 id
+        day: 可选 'YYYY-MM-DD'，仅返回该天的 trace；空=全部
+        trace_id: 可选，指定查看某次请求的上下文/调用链；空=取（该天）最近一次
+    """
+    empty = {
+        "session_id": session_id, "title": "", "user_id": "", "username": "",
+        "days": [], "traces": [], "selected_trace_id": "", "segments": [],
+        "total_tokens": 0, "spans": [], "memory": None, "user_memory": None,
+    }
+    if not session_id:
+        return empty
+    meta = db.query_one(
+        "SELECT session_id, user_id, title FROM chat_sessions WHERE session_id = ?",
+        (session_id,),
+    )
+    params: list = [session_id]
+    day_filter = ""
+    if day:
+        day_filter = " AND date(started_at) = ?"
+        params.append(day)
+    traces = [
+        {
+            "trace_id": r["id"], "agent": r["agent"], "status": r["status"],
+            "input": (r["input"] or "").replace("\n", " ")[:60],
+            "prompt_tokens": int(r["prompt_tokens"] or 0),
+            "latency_ms": int(r["latency_ms"] or 0),
+            "started_at": r["started_at"], "day": (r["started_at"] or "")[:10],
+        }
+        for r in db.query(
+            "SELECT id, agent, status, input, prompt_tokens, latency_ms, started_at"
+            " FROM agent_traces WHERE session_id = ? AND status != 'running'" + day_filter +
+            " ORDER BY started_at DESC LIMIT 100",
+            tuple(params),
+        )
+    ]
+    days = sorted({t["day"] for t in traces if t["day"]}, reverse=True)
+    selected = None
+    if trace_id:
+        selected = next((t for t in traces if t["trace_id"] == trace_id), None)
+    if not selected and traces:
+        selected = traces[0]
+    sel_id = selected["trace_id"] if selected else ""
+
+    segments = []
+    total_tokens = 0
+    if sel_id:
+        rows = db.query(
+            "SELECT segment, COALESCE(SUM(tokens), 0) AS tokens"
+            " FROM agent_token_segments WHERE trace_id = ? GROUP BY segment ORDER BY tokens DESC",
+            (sel_id,),
+        )
+        seg_total = sum(int(r["tokens"]) for r in rows)
+        total_tokens = int(selected["prompt_tokens"]) or seg_total
+        segments = [
+            {
+                "segment": r["segment"],
+                "label": SEGMENT_LABELS.get(r["segment"], r["segment"]),
+                "tokens": int(r["tokens"]),
+                "share": round(int(r["tokens"]) / seg_total, 4) if seg_total else 0.0,
+            }
+            for r in rows
+        ]
+
+    spans = []
+    if sel_id:
+        trace = get_trace(sel_id)
+        spans = (trace or {}).get("spans", []) or []
+
+    # 该会话的记忆注入概况：memory 系 segment 跨 trace 累计（按对话查看记忆）
+    mem_rows = db.query(
+        "SELECT segment, COALESCE(SUM(tokens), 0) AS tokens, COUNT(*) AS n"
+        " FROM agent_token_segments WHERE trace_id IN"
+        " (SELECT id FROM agent_traces WHERE session_id = ?)"
+        " AND segment IN ('memory', 'memory_profile', 'memory_relevant')"
+        " GROUP BY segment ORDER BY tokens DESC",
+        (session_id,),
+    )
+    memory = {
+        "segments": [
+            {"segment": r["segment"], "label": SEGMENT_LABELS.get(r["segment"], r["segment"]),
+             "tokens": int(r["tokens"]), "count": int(r["n"])}
+            for r in mem_rows
+        ],
+        "total_tokens": sum(int(r["tokens"]) for r in mem_rows),
+    }
+    user_memory = None
+    uid = (meta or {}).get("user_id") or ""
+    if uid and uid not in _GUEST_USER_IDS:
+        try:
+            from app.services.memory import MemoryService
+            user_memory = MemoryService.usage_overview(uid)
+        except Exception:
+            user_memory = None
+
+    uname = _resolve_usernames({uid}).get(uid, uid)
+    return {
+        "session_id": session_id,
+        "title": (meta or {}).get("title") or "新对话",
+        "user_id": uid,
+        "username": uname,
+        "days": days,
+        "traces": traces,
+        "selected_trace_id": sel_id,
+        "selected_at": (selected or {}).get("started_at", ""),
+        "segments": segments,
+        "total_tokens": total_tokens,
+        "spans": spans,
+        "memory": memory,
+        "user_memory": user_memory,
+    }
+
+
+def metrics(days: int = 7, range_mode: str = "days") -> dict:
+    """聚合指标：总览 + 每日趋势 + 按 Agent + 按工具（Token/延迟/成功率/调用次数）。
+
+    range_mode='today' 时仅统计今日；并额外输出 golden_signals（对齐主流可观测性
+    四大黄金信号：流量 Rate / 错误 Errors / 延迟 Duration / 饱和度 Saturation）。
+    """
+    since = _range_since(days, range_mode)
+    eff_days = _range_days(days, range_mode)
     overview = db.query_one(
         "SELECT COUNT(*) AS total,"
         " COALESCE(SUM(status = 'ok'), 0) AS ok,"
@@ -755,8 +1100,32 @@ def metrics(days: int = 7) -> dict:
                 for it in seg_items.get(seg, [])
             ],
         })
+    finished_safe = finished or 0
+    golden = {
+        # 流量 Rate：窗口内请求吞吐（req/day）
+        "rate_per_day": round(finished_safe / eff_days, 1) if eff_days else 0.0,
+        # 错误 Errors：失败占比（error+timeout+interrupted / 完成数）
+        "error_rate": round(
+            (int(overview.get("errors", 0)) + int(overview.get("timeout", 0))
+             + int(overview.get("interrupted", 0))) / finished_safe, 4
+        ) if finished_safe else 0.0,
+        # 延迟 Duration：avg + p95
+        "duration": {
+            "avg_ms": int(overview.get("avg_latency", 0)),
+            "p95_ms": int(p95),
+        },
+        # 饱和度 Saturation：上下文/Token 水位相对告警阈值的占用
+        "saturation": {
+            "avg_tokens_per_request": avg_tokens,
+            "warn_threshold": warn_threshold,
+            "utilization": round(avg_tokens / warn_threshold, 4) if warn_threshold else 0.0,
+            "overuse": bool(finished_safe and avg_tokens > warn_threshold),
+        },
+    }
     return {
         "days": days,
+        "range": range_mode or "days",
+        "golden_signals": golden,
         "overview": {
             "total": int(overview.get("total", 0)),
             "ok": int(overview.get("ok", 0)),
@@ -793,6 +1162,117 @@ def metrics(days: int = 7) -> dict:
         },
         "segment_breakdown": segment_breakdown,
     }
+
+
+def monitor_metrics(days: int = 7, range_mode: str = "days") -> dict:
+    """指标监控四方面聚合：质量 / 安全 / 业务（性能方面复用 metrics() 口径）。
+
+    - 质量：点赞点踩反馈、最近回归运行均分、Skill 预审风险分布
+    - 安全：网关安全事件 + 工具拦截环节计数
+    - 业务：资产存量 + 活跃用户 + usage_daily 用量趋势（Token 用量融合于此）
+    """
+    since = _range_since(days, range_mode)
+    day_since = since[:10]
+    fb = db.query_one(
+        "SELECT COALESCE(SUM(rating = 'like'), 0) AS likes,"
+        " COALESCE(SUM(rating = 'dislike'), 0) AS dislikes"
+        " FROM message_feedbacks WHERE created_at >= ?", (since,)) or {}
+    eval_runs = [dict(r) for r in db.query(
+        "SELECT r.id, r.dataset_id, r.status, r.started_at, d.name AS dataset_name"
+        " FROM eval_runs r LEFT JOIN eval_datasets d ON d.id = r.dataset_id"
+        " WHERE r.status = 'done' AND r.started_at >= ?"
+        " ORDER BY r.started_at DESC LIMIT 5", (since,))]
+    for run in eval_runs:
+        agg = db.query_one(
+            "SELECT COALESCE(AVG(answer_relevance), 0) AS answer_relevance,"
+            " COALESCE(AVG(context_precision), 0) AS context_precision,"
+            " COALESCE(AVG(faithfulness), 0) AS faithfulness,"
+            " COALESCE(AVG(judge_score), 0) AS judge_score,"
+            " COALESCE(SUM(retrieval_hit), 0) AS hits, COUNT(*) AS total"
+            " FROM eval_results WHERE run_id = ?", (run["id"],)) or {}
+        run["avg"] = dict(agg)
+    reviews = db.query_one(
+        "SELECT COUNT(*) AS total, COALESCE(SUM(risk = 'high'), 0) AS high,"
+        " COALESCE(SUM(risk = 'unsupported'), 0) AS unsupported"
+        " FROM skill_review_logs WHERE created_at >= ?", (since,)) or {}
+    events = db.query_one(
+        "SELECT COUNT(*) AS total, COALESCE(SUM(status = 'pending'), 0) AS pending,"
+        " COALESCE(SUM(risk_level = 'high'), 0) AS high,"
+        " COALESCE(SUM(risk_level = 'critical'), 0) AS critical"
+        " FROM gateway_security_events WHERE created_at >= ?", (since,)) or {}
+    routing = tool_routing_metrics(days, range_mode)
+    counts = db.query_one(
+        "SELECT (SELECT COUNT(*) FROM chat_sessions WHERE created_at >= ?) AS sessions,"
+        " (SELECT COUNT(*) FROM chat_messages WHERE created_at >= ?) AS messages,"
+        " (SELECT COUNT(DISTINCT user_id) FROM usage_daily WHERE day >= ?) AS active_users,"
+        " (SELECT COUNT(*) FROM upload_records WHERE created_at >= ?) AS uploads,"
+        " (SELECT COUNT(*) FROM knowledge_bases WHERE created_at >= ?) AS knowledge_bases,"
+        " (SELECT COUNT(*) FROM wiki_pages WHERE created_at >= ?) AS wiki_pages,"
+        " (SELECT COUNT(*) FROM user_memories WHERE created_at >= ?) AS memories",
+        (since, since, day_since, since, since, since, since)) or {}
+    usage_daily = [dict(r) for r in db.query(
+        "SELECT day, COALESCE(SUM(query_count), 0) AS queries,"
+        " COALESCE(SUM(prompt_chars), 0) AS prompt_chars,"
+        " COALESCE(SUM(completion_chars), 0) AS completion_chars"
+        " FROM usage_daily WHERE day >= ? GROUP BY day ORDER BY day", (day_since,))]
+    return {
+        "quality": {
+            "likes": fb.get("likes", 0),
+            "dislikes": fb.get("dislikes", 0),
+            "eval_runs": eval_runs,
+            "skill_reviews": {
+                "total": reviews.get("total", 0),
+                "high": reviews.get("high", 0),
+                "unsupported": reviews.get("unsupported", 0),
+            },
+        },
+        "security": {
+            "events_total": events.get("total", 0),
+            "pending": events.get("pending", 0),
+            "high": events.get("high", 0),
+            "critical": events.get("critical", 0),
+            "tool_blocked": len(routing.get("blocked_events") or []),
+        },
+        "business": {
+            "counts": dict(counts or {}),
+            "usage_daily": usage_daily,
+        },
+    }
+
+
+def tool_chains(days: int = 7, range_mode: str = "days", limit: int = 50) -> dict:
+    """工具调用链路：按 trace 聚合工具 span（调用序列 / 失败数 / 总耗时）。"""
+    since = _range_since(days, range_mode)
+    rows = db.query(
+        "SELECT s.trace_id, COUNT(*) AS tool_count,"
+        " COALESCE(SUM(s.status = 'error'), 0) AS error_count,"
+        " COALESCE(SUM(s.latency_ms), 0) AS latency_ms,"
+        " (SELECT GROUP_CONCAT(x.name, ' → ') FROM"
+        "   (SELECT name FROM agent_spans WHERE trace_id = s.trace_id AND kind = 'tool' ORDER BY seq) x"
+        " ) AS tools"
+        " FROM agent_spans s JOIN agent_traces t ON t.id = s.trace_id"
+        " WHERE s.kind = 'tool' AND t.started_at >= ?"
+        " GROUP BY s.trace_id ORDER BY MAX(t.started_at) DESC LIMIT ?", (since, max(1, limit)))
+    items = []
+    for row in rows:
+        trace = db.query_one(
+            "SELECT id, agent, status, latency_ms, started_at, user_id, input"
+            " FROM agent_traces WHERE id = ?", (row["trace_id"],))
+        if not trace:
+            continue
+        items.append({
+            **dict(row),
+            "agent": trace["agent"],
+            "status": trace["status"],
+            "started_at": trace["started_at"],
+            "trace_latency_ms": trace["latency_ms"],
+            "input": trace["input"],
+            "user_id": trace["user_id"],
+        })
+    mapping = _resolve_usernames([it["user_id"] for it in items])
+    for item in items:
+        _attach_username(item, mapping)
+    return {"items": items}
 
 
 # ---------------------------------------------------------------------------
@@ -889,6 +1369,7 @@ def purge_old(days: int = RETENTION_DAYS) -> int:
         db.execute("DELETE FROM agent_spans WHERE trace_id IN"
                    " (SELECT id FROM agent_traces WHERE started_at < ?)", (cutoff,))
         db.execute("DELETE FROM agent_token_segments WHERE created_at < ?", (cutoff,))
+        db.execute("DELETE FROM tool_routing WHERE created_at < ?", (cutoff,))
         n = db.execute("DELETE FROM agent_traces WHERE started_at < ?", (cutoff,))
         if n:
             logger.info("已清理 %d 条过期 Agent trace（保留 %d 天）", n, days)

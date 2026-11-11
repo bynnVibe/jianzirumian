@@ -11,6 +11,24 @@ from app.services.tools.base import BaseTool, ToolContext, ToolResult, register_
 class ImageOCRTool(BaseTool):
     name = "image_ocr"
     description = "识别图片中的文字内容，不写入知识库"
+    namespace = "attachment"
+    tags = ("ocr", "image", "readonly", "extract")
+    scenarios = (
+        "用户拖入图片要求「识别一下/看看写了什么」",
+        "粘贴截图即问（图中文字并入检索）",
+        "仅提取图片文字而不入库",
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "file_path": {"type": "string", "description": "待识别的图片文件路径"},
+            "filename": {"type": "string", "description": "图片文件名"},
+        },
+        "required": ["file_path"],
+    }
+    permissions = ()
+    risk_level = "low"
+    status = "active"
 
     async def run(self, ctx: ToolContext, **kwargs) -> ToolResult:
         try:
