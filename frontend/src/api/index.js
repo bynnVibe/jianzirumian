@@ -582,20 +582,20 @@ export function listKbDocuments(kbId, q = '') {
   return api.get(`/knowledge/bases/${kbId}/documents`, { params: q ? { q } : {} })
 }
 
-export function getKbMindmap(kbId) {
-  return api.get(`/knowledge/bases/${kbId}/mindmap`)
+export function getKbMindmap(kbId, docPath = '') {
+  return api.get(`/knowledge/bases/${kbId}/mindmap`, { params: docPath ? { doc_path: docPath } : {} })
 }
 
-export function rebuildKbMindmap(kbId) {
-  return api.post(`/knowledge/bases/${kbId}/mindmap/rebuild`)
+export function rebuildKbMindmap(kbId, docPath = '') {
+  return api.post(`/knowledge/bases/${kbId}/mindmap/rebuild`, null, { params: docPath ? { doc_path: docPath } : {} })
 }
 
-export function getKbGraph(kbId) {
-  return api.get(`/knowledge/bases/${kbId}/graph`)
+export function getKbGraph(kbId, docPath = '') {
+  return api.get(`/knowledge/bases/${kbId}/graph`, { params: docPath ? { doc_path: docPath } : {} })
 }
 
-export function rebuildKbGraph(kbId) {
-  return api.post(`/knowledge/bases/${kbId}/graph/rebuild`)
+export function rebuildKbGraph(kbId, docPath = '') {
+  return api.post(`/knowledge/bases/${kbId}/graph/rebuild`, null, { params: docPath ? { doc_path: docPath } : {} })
 }
 
 export function clearKbGraph(kbId) {

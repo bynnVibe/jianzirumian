@@ -96,7 +96,7 @@
         type="file"
         class="hidden-file-input"
         multiple
-        accept=".jpg,.jpeg,.png,.bmp,.tiff,.webp,.docx,.pdf"
+        accept=".jpg,.jpeg,.png,.bmp,.tiff,.webp,.docx,.pdf,.md,.markdown"
         @change="handleFilePicked"
       />
       <textarea
@@ -143,7 +143,7 @@ const fileInputRef = ref(null)
 const attachments = ref([]) // [{ id, file, name, kind }]
 
 const ACCEPTED_IMAGE_EXTS = ['.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.webp']
-const ACCEPTED_DOC_EXTS = { '.docx': 'word', '.pdf': 'pdf' }
+const ACCEPTED_DOC_EXTS = { '.docx': 'word', '.pdf': 'pdf', '.md': 'markdown', '.markdown': 'markdown' }
 let attachmentSeq = 0
 
 const props = defineProps({

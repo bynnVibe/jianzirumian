@@ -30,7 +30,91 @@ MIN_RELEVANCE_PCT = 40
 DOC_TYPE_EXTENSIONS = {
     "word": {".docx"},
     "pdf": {".pdf"},
+    "markdown": {".md", ".markdown"},
 }
+
+# Markdown 章节整块上限：章节（含子小节）不超过该值时保持一个整块，
+# 保留模块完整性；超过则按子小节递归拆解，叶子章节仍超长时由调用方按 CHUNK_SIZE 二次切分。
+MARKDOWN_SECTION_MAX_CHARS = int(getattr(settings, "MARKDOWN_SECTION_MAX_CHARS", 1000))
+
+_MD_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
+_MD_FENCE_RE = re.compile(r"^(```|~~~)")
+
+
+def read_markdown_text(file_path: str) -> str:
+    """读取 Markdown 原文：优先 UTF-8（含 BOM），兼容旧 Windows 编码 GB18030。"""
+    raw = Path(file_path).read_bytes()
+    for enc in ("utf-8-sig", "utf-8", "gb18030"):
+        try:
+            return raw.decode(enc)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return raw.decode("utf-8", "replace")
+
+
+def split_markdown_sections(text: str, max_chars: int = 0) -> List[dict]:
+    """按 Markdown 标题层级拆解为章节块（章节脉络清晰，优先整模块成块）。
+
+    返回 [{"title": 标题路径（如「第一章 > 1.1 概述」）, "text": 章节全文（含标题行）, "level": 标题级}]:
+    - 首个标题前的内容归入「概述」节；代码块（```/~~~ 围栏）内不做标题识别；
+    - 章节（含全部子小节）不超过 max_chars 时整块保留；超过则递归下钻子小节，
+      父节仅保留自身标题+直属正文；
+    - 叶子章节仍超长时此处保持整节，由调用方在节内按字符二次切分。
+    """
+    limit = max_chars or MARKDOWN_SECTION_MAX_CHARS
+    nodes = []  # [level, 标题路径, 行列表]
+    stack = []  # 祖先标题栈 [(level, title)]
+    in_fence = False
+    preamble: List[str] = []
+    for line in (text or "").split("\n"):
+        if _MD_FENCE_RE.match(line.strip()):
+            in_fence = not in_fence
+        m = None if in_fence else _MD_HEADING_RE.match(line)
+        if m:
+            level = len(m.group(1))
+            title = m.group(2).strip().rstrip("#").strip()
+            while stack and stack[-1][0] >= level:
+                stack.pop()
+            stack.append((level, title))
+            nodes.append([level, " > ".join(t for _, t in stack), [line]])
+        elif nodes:
+            nodes[-1][2].append(line)
+        else:
+            preamble.append(line)
+
+    def _node_text(n) -> str:
+        return "\n".join(n[2]).strip()
+
+    def _subtree_end(i: int) -> int:
+        j = i + 1
+        while j < len(nodes) and nodes[j][0] > nodes[i][0]:
+            j += 1
+        return j
+
+    sections: List[dict] = []
+    pre = "\n".join(preamble).strip()
+    if pre:
+        sections.append({"title": "概述", "text": pre, "level": 0})
+
+    def _emit(i: int) -> None:
+        end = _subtree_end(i)
+        whole = "\n\n".join(_node_text(nodes[k]) for k in range(i, end)).strip()
+        if len(whole) <= limit or end == i + 1:
+            sections.append({"title": nodes[i][1], "text": whole, "level": nodes[i][0]})
+            return
+        own = _node_text(nodes[i])
+        if own:
+            sections.append({"title": nodes[i][1], "text": own, "level": nodes[i][0]})
+        j = i + 1
+        while j < end:
+            _emit(j)
+            j = _subtree_end(j)
+
+    i = 0
+    while i < len(nodes):
+        _emit(i)
+        i = _subtree_end(i)
+    return [s for s in sections if s["text"].strip()]
 
 
 def clean_ocr_text(text: str) -> str:
@@ -325,6 +409,40 @@ class KnowledgeService:
         """从 PDF 文档中提取文本，同时将页面中的表格转为 Markdown 表格。"""
         pages = KnowledgeService._extract_pdf_pages(file_path)
         return "\n\n".join(p.markdown for p in pages if p.markdown.strip())
+
+    @staticmethod
+    def _extract_markdown_pages(file_path: str) -> List[dict]:
+        """Markdown：按标题层级拆为「章节页」（page_number=章节序号，附 section_title 标题路径）。"""
+        sections = split_markdown_sections(read_markdown_text(file_path))
+        return [
+            {"page_number": i + 1, "text": s["text"], "markdown": s["text"],
+             "tables": [], "section_title": s["title"]}
+            for i, s in enumerate(sections)
+        ]
+
+    @staticmethod
+    def _markdown_chunks(pages: List[dict], file_path: str, visibility: str,
+                         owner_id: str, kb_id: str, pdf_preview_path: str = None) -> List[tuple]:
+        """Markdown 章节感知分块：短章节整块入库；超长章节在节内按字符二次切分，
+        子块前缀章节标题路径，保证检索时章节上下文不丢失。"""
+        limit = int(getattr(settings, "CHUNK_SIZE", 500))
+        chunks = []
+        for page in pages or []:
+            text = (page.get("text") or "").strip()
+            if not text:
+                continue
+            title = page.get("section_title") or ""
+            extra = {"page_number": page.get("page_number") or 0,
+                     "source_type": "markdown", "section_title": title, "kb_id": kb_id}
+            if pdf_preview_path:
+                extra["pdf_preview_path"] = pdf_preview_path
+            if len(text) <= limit:
+                chunks.append((text, {"source_image": file_path, "visibility": visibility,
+                                      "owner_id": owner_id, **extra}))
+            else:
+                for sub, meta in vector_store.split_text(text, file_path, visibility, owner_id, **extra):
+                    chunks.append((f"【{title}】\n{sub}" if title else sub, meta))
+        return chunks
 
     @staticmethod
     def _table_to_markdown(rows: List[List[str]]) -> str:
@@ -683,7 +801,7 @@ class KnowledgeService:
 
         Args:
             file_path: 文档文件路径
-            doc_type: 文档类型 ("word" | "pdf")
+            doc_type: 文档类型 ("word" | "pdf" | "markdown")
             visibility: 知识可见性 ("public", "private")
             owner_id: 所有者用户 ID
 
@@ -704,6 +822,8 @@ class KnowledgeService:
                 return KnowledgeService._extract_docx_text(file_path)
             if doc_type == "pdf":
                 return KnowledgeService._extract_pdf_text(file_path)
+            if doc_type == "markdown":
+                return read_markdown_text(file_path)
             raise ValueError(f"不支持的文档类型: {doc_type}")
 
         text = await asyncio.to_thread(_extract)
@@ -719,7 +839,14 @@ class KnowledgeService:
         def _vectorize():
             if write_guard:
                 write_guard()
-            chunks = vector_store.split_text(text, file_path, visibility, owner_id, kb_id=kb_id)
+            if doc_type == "markdown":
+                # Markdown 章节感知分块：按章节/模块整块入库，超长节内二次切分
+                chunks = KnowledgeService._markdown_chunks(
+                    KnowledgeService._extract_markdown_pages(file_path),
+                    file_path, visibility, owner_id, kb_id,
+                )
+            else:
+                chunks = vector_store.split_text(text, file_path, visibility, owner_id, kb_id=kb_id)
             if not chunks:
                 return 0, []
             texts = [c[0] for c in chunks]
@@ -756,6 +883,11 @@ class KnowledgeService:
             pages = await asyncio.to_thread(
                 KnowledgeService._extract_pdf_pages, file_path
             )
+        elif doc_type == "markdown":
+            pdf_preview_path = None
+            pages = await asyncio.to_thread(
+                KnowledgeService._extract_markdown_pages, file_path
+            )
         else:
             raise ValueError(f"不支持的文档类型: {doc_type}")
 
@@ -764,7 +896,7 @@ class KnowledgeService:
             "file_path": file_path,
             "doc_type": doc_type,
             "total_pages": len(pages),
-            "pages": [p.model_dump() for p in pages],
+            "pages": [p.model_dump() if hasattr(p, "model_dump") else p for p in pages],
             "pdf_preview_path": pdf_preview_path,
         }
 
@@ -849,16 +981,22 @@ class KnowledgeService:
 
             try:
                 def _save_one():
-                    chunks = vector_store.split_text(
-                        text,
-                        file_path,
-                        visibility,
-                        owner_id,
-                        page_number=page_number,
-                        pdf_preview_path=pdf_preview_path,
-                        source_type=doc_type,
-                        kb_id=kb_id,
-                    )
+                    if doc_type == "markdown":
+                        # Markdown 章节感知分块：短节整块入库，超长节内二次切分
+                        chunks = KnowledgeService._markdown_chunks(
+                            [page], file_path, visibility, owner_id, kb_id,
+                        )
+                    else:
+                        chunks = vector_store.split_text(
+                            text,
+                            file_path,
+                            visibility,
+                            owner_id,
+                            page_number=page_number,
+                            pdf_preview_path=pdf_preview_path,
+                            source_type=doc_type,
+                            kb_id=kb_id,
+                        )
                     if not chunks:
                         return []
                     return vector_store.add_texts(
@@ -872,7 +1010,10 @@ class KnowledgeService:
                 continue
 
             all_doc_ids.extend(doc_ids)
-            saved_pages.append({"page_number": page_number, "text": text})
+            saved_page = {"page_number": page_number, "text": text}
+            if doc_type == "markdown" and page.get("section_title"):
+                saved_page["section_title"] = page["section_title"]
+            saved_pages.append(saved_page)
             yield {
                 "event": "page_saved",
                 "page_number": page_number,

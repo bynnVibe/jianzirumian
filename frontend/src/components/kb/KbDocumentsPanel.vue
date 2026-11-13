@@ -103,7 +103,7 @@ async function applyFocus() {
 
 watch(() => props.focusSource, () => { _focusApplied = ''; applyFocus() })
 
-const TYPE_LABELS = { image: '图片', pdf: 'PDF', word: 'Word', url: '网页', wiki: '百科' }
+const TYPE_LABELS = { image: '图片', pdf: 'PDF', word: 'Word', url: '网页', wiki: '百科', markdown: 'Markdown' }
 function typeLabel(t) { return TYPE_LABELS[t] || t || '文件' }
 
 function formatSize(bytes) {
@@ -134,6 +134,12 @@ async function load() {
 
 function preview(doc) {
   const filename = (doc.source_image || '').split('/').pop()
+  // Markdown：在线渲染预览（/doc-preview 拉取原文渲染），不再直接打开原始文件触发下载
+  if (doc.source_type === 'markdown' || /\.(md|markdown)$/i.test(filename)) {
+    const title = encodeURIComponent(doc.title || filename)
+    window.open(`/doc-preview?file=${encodeURIComponent(filename)}&title=${title}`, '_blank')
+    return
+  }
   if (doc.source_type === 'word' && doc.pdf_preview_path) {
     const pdf = encodeURIComponent(doc.pdf_preview_path.split('/').pop())
     window.open(`/doc-preview?file=${encodeURIComponent(filename)}&pdf=${pdf}`, '_blank')

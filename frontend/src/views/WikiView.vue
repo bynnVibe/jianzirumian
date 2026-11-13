@@ -15,9 +15,13 @@
         <option value="source">来源卡片</option>
         <option value="digest">综合词条</option>
       </select>
-      <select v-if="!embedded" v-model="kbFilter" class="filter-select" @change="loadPages">
+      <select v-if="!embedded" v-model="kbFilter" class="filter-select" @change="onKbFilterChange">
         <option value="">全部知识库</option>
         <option v-for="kb in kbList" :key="kb.id" :value="kb.id">{{ kb.name }}</option>
+      </select>
+      <select v-if="kbFilter" v-model="docPathFilter" class="filter-select" title="百科范围：整库或单篇文档" @change="loadPages">
+        <option value="">整库</option>
+        <option v-for="d in kbDocs" :key="d.source_image" :value="d.source_image">{{ d.title || d.filename }}</option>
       </select>
       <button class="refresh-btn" @click="loadPages" :disabled="loading">刷新</button>
     </div>
@@ -67,7 +71,7 @@
     <!-- 空状态 -->
     <div v-else-if="wikiPages.length === 0" class="empty-state">
       <p>暂无百科词条</p>
-      <p class="empty-hint">在「知识库上传」入库后，系统会在后台自动编译生成百科词条</p>
+      <p class="empty-hint">{{ docPathFilter ? '该文档暂无关联百科词条，入库后系统会在后台自动编译生成' : '在「知识库上传」入库后，系统会在后台自动编译生成百科词条' }}</p>
     </div>
 
     <!-- 词条列表 -->
@@ -127,7 +131,7 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import MarkdownIt from 'markdown-it'
-import { getWikiPages, getWikiPage, deleteWikiPage, listKnowledgeBases, getConversationTopics, compileConversationTopics } from '@/api'
+import { getWikiPages, getWikiPage, deleteWikiPage, listKnowledgeBases, listKbDocuments, getConversationTopics, compileConversationTopics } from '@/api'
 import { useAuthStore } from '@/stores/auth'
 import { useAssistantStore } from '@/stores/assistant'
 
@@ -148,6 +152,23 @@ const kbFilter = ref(props.kbId)
 const detailPage = ref(null)
 const deleteTarget = ref(null)
 const deleting = ref(false)
+
+// 单篇文档范围：'' = 整库，否则为该文档 source_image（后端按 doc_path 过滤百科页）
+const docPathFilter = ref('')
+const kbDocs = ref([])
+async function loadKbDocs(kbId) {
+  kbDocs.value = []
+  if (!kbId) return
+  try {
+    const res = await listKbDocuments(kbId)
+    kbDocs.value = res.data.documents || []
+  } catch (e) { /* 文档清单加载失败不阻断整库视图 */ }
+}
+function onKbFilterChange() {
+  docPathFilter.value = ''
+  loadKbDocs(kbFilter.value)
+  loadPages()
+}
 
 // 对话沉淀（llm-wiki 路径A）
 const conv = ref({ enabled: false, min_hits: 3, candidates: [], digested: [] })
@@ -180,6 +201,7 @@ async function loadPages() {
     const params = {}
     if (typeFilter.value) params.page_type = typeFilter.value
     if (kbFilter.value) params.kb_id = kbFilter.value
+    if (docPathFilter.value) params.doc_path = docPathFilter.value
     const res = await getWikiPages(params)
     wikiPages.value = res.data.pages || []
   } catch (e) {
@@ -269,6 +291,7 @@ onMounted(async () => {
     console.error('加载知识库列表失败:', e)
   }
   await loadPages()
+  if (kbFilter.value) loadKbDocs(kbFilter.value)
   if (!props.embedded) await loadConversation(true)
   window.addEventListener('wiki:page-updated', onWikiPageUpdated)
 })
@@ -325,6 +348,8 @@ watch(detailPage, (p) => {
 watch(() => props.kbId, (id) => {
   if (!props.embedded) return
   kbFilter.value = id || ''
+  docPathFilter.value = ''
+  loadKbDocs(id)
   loadPages()
 })
 

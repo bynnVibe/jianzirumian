@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""单机部署保护：只操作明确 Compose 项目；迁移及恢复均需显式入口。"""
+"""单机部署保护：只操作明确 Compose 项目；迁移及恢复均需显式入口。
+
+兼容 Python 3.6+（老 ECS 系统自带 python3）：不使用 capture_output/text、
+Path.is_relative_to、copytree(dirs_exist_ok=)、time_ns 等 3.7+ API。
+"""
 import argparse
 import hashlib
 import ipaddress
@@ -17,11 +21,33 @@ class DeploymentError(RuntimeError):
 
 
 def run(args):
-    result = subprocess.run(args, capture_output=True, text=True)
+    # capture_output/text 为 3.7+ 参数；3.6 用 PIPE + universal_newlines 等价实现。
+    result = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            universal_newlines=True)
     if result.returncode:
         # Compose 输出可能包含插值后的密钥，禁止透传。
-        raise DeploymentError(f"命令失败：{args[0]} {args[1]}（退出码 {result.returncode}）；已停止后续步骤")
+        raise DeploymentError(f"命令失败：{' '.join(args[:2])}（退出码 {result.returncode}）；已停止后续步骤")
     return result.stdout
+
+
+def is_relative_to(path, parent):
+    """Path.is_relative_to 为 3.9+ API；3.6 等价实现。"""
+    try:
+        path.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+def copytree_merge(source, destination):
+    """shutil.copytree(dirs_exist_ok=) 为 3.8+ API；3.6 递归合并复制。"""
+    destination.mkdir(parents=True, exist_ok=True)
+    for item in sorted(source.iterdir()):
+        target = destination / item.name
+        if item.is_dir():
+            copytree_merge(item, target)
+        else:
+            shutil.copy2(str(item), str(target))
 
 
 def compose(root, env, config, project=None):
@@ -108,9 +134,9 @@ def migration_preflight(root, new, old_compose, old_env):
     if set(old_data) != {"/app/data", "/app/backend/data"} or old_data != data_mounts(new["services"]["agent"]):
         raise DeploymentError("新旧数据挂载不一致；不自动进行全量存储路径迁移")
     paths = sorted(set(old_data.values()), key=lambda p: len(p.parts))
-    roots = [p for p in paths if not any(p != parent and p.is_relative_to(parent) for parent in paths)]
+    roots = [p for p in paths if not any(p != parent and is_relative_to(p, parent) for parent in paths)]
     for path in roots:
-        if not path.is_relative_to(root) or path == root or not path.is_dir():
+        if not is_relative_to(path, root) or path == root or not path.is_dir():
             raise DeploymentError("数据目录必须为当前部署目录内的既有子目录")
         if path.is_symlink() or any(p.is_symlink() for p in path.rglob("*")):
             raise DeploymentError("数据快照不支持符号链接，请先人工核对存储布局")
@@ -139,9 +165,9 @@ def migration_preflight(root, new, old_compose, old_env):
             if mount.get("type") != "bind":
                 continue
             source = Path(mount["source"]).resolve()
-            if any(source == p or source.is_relative_to(p) for p in roots) or source.is_relative_to(root / "logs"):
+            if any(source == p or is_relative_to(source, p) for p in roots) or is_relative_to(source, root / "logs"):
                 continue
-            if not source.is_relative_to(root):
+            if not is_relative_to(source, root):
                 raise DeploymentError("旧配置包含部署目录之外的配置挂载，需人工处理")
             backup = old_env if mount["target"] == "/app/backend/.env" else old_compose.parent / source.relative_to(root)
             if not backup.exists() or backup.resolve() == source:
@@ -179,10 +205,10 @@ def clear_stopped_topology(project):
 
 
 def snapshot(root, roots, archive):
-    with tarfile.open(archive, "w:gz") as stream:
+    with tarfile.open(str(archive), "w:gz") as stream:
         for path in roots:
-            stream.add(path, arcname=str(path.relative_to(root)))
-    with tarfile.open(archive, "r:gz") as stream:
+            stream.add(str(path), arcname=str(path.relative_to(root)))
+    with tarfile.open(str(archive), "r:gz") as stream:
         for member in stream.getmembers():
             if member.issym() or member.islnk() or not (member.isfile() or member.isdir()):
                 raise DeploymentError("快照包含不支持的文件类型")
@@ -201,7 +227,7 @@ def start(args):
 def migrate(root, args, new, old_compose, old_env, bundle):
     old, current, roots, assets = migration_preflight(root, new, old_compose, old_env)
     bundle = bundle.resolve()
-    if bundle.exists() or any(bundle.is_relative_to(p) for p in roots):
+    if bundle.exists() or any(is_relative_to(bundle, p) for p in roots):
         raise DeploymentError("回滚目录必须不存在且位于数据目录之外")
     bundle.mkdir(parents=True, mode=0o700)
     shutil.copy2(old_compose, bundle / "original-compose.yml")
@@ -214,7 +240,7 @@ def migrate(root, args, new, old_compose, old_env, bundle):
             destination = bundle / "config" / Path(mount["source"]).relative_to(root)
             destination.parent.mkdir(parents=True, exist_ok=True)
             if backup.is_dir():
-                shutil.copytree(backup, destination, dirs_exist_ok=True)
+                copytree_merge(backup, destination)
             else:
                 shutil.copy2(backup, destination)
             mount["source"] = str(destination)
@@ -251,27 +277,27 @@ def rollback(root, bundle, confirmed):
         raise DeploymentError("回滚清单路径不符或缺少完整数据快照")
     for name, expected in manifest["checksums"].items():
         path = (bundle / name).resolve()
-        if not path.is_relative_to(bundle) or digest(path) != expected:
+        if not is_relative_to(path, bundle) or digest(path) != expected:
             raise DeploymentError("回滚产物校验失败")
     data_roots = [root / p for p in manifest["data_roots"]]
-    if not data_roots or any(p.resolve() == root or not p.resolve().is_relative_to(root) for p in data_roots):
+    if not data_roots or any(p.resolve() == root or not is_relative_to(p.resolve(), root) for p in data_roots):
         raise DeploymentError("回滚数据路径不合法")
-    with tarfile.open(bundle / "data.tar.gz", "r:gz") as stream:
+    with tarfile.open(str(bundle / "data.tar.gz"), "r:gz") as stream:
         members = stream.getmembers()
         for member in members:
             target = (root / member.name).resolve()
-            if member.issym() or member.islnk() or not (member.isfile() or member.isdir()) or not any(target == p or target.is_relative_to(p) for p in data_roots):
+            if member.issym() or member.islnk() or not (member.isfile() or member.isdir()) or not any(target == p or is_relative_to(target, p) for p in data_roots):
                 raise DeploymentError("回滚快照包含非法路径或链接")
         stop_project(manifest["project"])
         clear_stopped_topology(manifest["project"])
-        displaced = bundle / f"displaced-{time.time_ns()}"
+        displaced = bundle / f"displaced-{int(time.time() * 1e9)}"  # time_ns 为 3.7+ API
         displaced.mkdir(mode=0o700)
         for path in data_roots:
             if path.exists():
                 destination = displaced / path.relative_to(root)
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(path), str(destination))
-        stream.extractall(root, members=members)
+        stream.extractall(str(root), members=members)
     old_args = compose(root, bundle / "original.env", bundle / "rollback-compose.json", manifest["project"])
     try:
         run(["docker", "load", "-i", str(bundle / "images.tar")])

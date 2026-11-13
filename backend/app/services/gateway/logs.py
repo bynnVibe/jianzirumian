@@ -43,10 +43,10 @@ def write_log(entry: dict) -> str:
         db.execute(
             "INSERT INTO gateway_logs (id, key_id, key_name, model_requested, model_mapped,"
             " channel_id, channel_name, upstream_url, stream, status_code, status,"
-            " prompt_tokens, completion_tokens, total_tokens, latency_ms, retries,"
+            " prompt_tokens, completion_tokens, cached_tokens, total_tokens, latency_ms, retries,"
             " tool_calls, request_body, response_preview, risk_level, risk_score, risks,"
             " audit_action, trace_steps, client_ip, error, role, created_at)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING",
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING",
             (
                 log_id,
                 entry.get("key_id", ""), entry.get("key_name", ""),
@@ -55,6 +55,7 @@ def write_log(entry: dict) -> str:
                 entry.get("upstream_url", ""), 1 if entry.get("stream") else 0,
                 int(entry.get("status_code") or 0), entry.get("status", "ok"),
                 int(entry.get("prompt_tokens") or 0), int(entry.get("completion_tokens") or 0),
+                int(entry.get("cached_tokens") or 0),
                 int(entry.get("total_tokens") or 0), int(entry.get("latency_ms") or 0),
                 int(entry.get("retries") or 0),
                 _dumps(entry.get("tool_calls") or []),

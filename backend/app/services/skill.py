@@ -374,13 +374,15 @@ class SkillService:
         rows = db.query(
             "SELECT name, content FROM user_skills"
             " WHERE owner_id = ? AND enabled = 1 AND scope = 'chat' AND kind = 'prompt'"
-            " ORDER BY builtin DESC, updated_at DESC",
+            # 稳定排序（前缀缓存友好）：内置优先后按创建时间/id 升序，
+            # 避免 updated_at 变动导致 Skill 注入顺序抖动、U 区前缀失效。
+            " ORDER BY builtin DESC, created_at ASC, id ASC",
             (owner_id,),
         )
         shared = db.query(
             "SELECT name, content FROM user_skills"
             " WHERE visibility = 'public' AND owner_id != ? AND enabled = 1"
-            " AND scope = 'chat' AND kind = 'prompt' ORDER BY updated_at DESC",
+            " AND scope = 'chat' AND kind = 'prompt' ORDER BY created_at ASC, id ASC",
             (owner_id,),
         )
         out = [{"name": r["name"], "content": r["content"]} for r in rows]

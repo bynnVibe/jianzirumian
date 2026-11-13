@@ -238,7 +238,9 @@ class MemoryService:
         rows = db.query(
             "SELECT * FROM user_memories WHERE user_id = ?"
             " AND (importance >= ? OR memory_type = 'preference')"
-            " ORDER BY importance DESC, updated_at DESC LIMIT ?",
+            # 稳定排序（前缀缓存友好）：重要度降序后按创建时间/id 升序，
+            # 避免 updated_at 变动导致画像卡顺序抖动、U 区前缀失效。
+            " ORDER BY importance DESC, created_at ASC, id ASC LIMIT ?",
             (user_id, _PROFILE_IMPORTANCE, _PROFILE_MAX_ITEMS),
         )
         budget = int(getattr(settings, "MEMORY_PROFILE_CHARS", 300))

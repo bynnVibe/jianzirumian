@@ -13,6 +13,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.api.deps import get_current_user, require_admin
+from app.core import insight_cache
 from app.services import wiki_assistant
 from app.services.wiki import wiki_compile_enabled, wiki_priority_enabled, wiki_service
 
@@ -35,9 +36,13 @@ async def wiki_status(current_user: dict = Depends(get_current_user)):
 async def list_wiki_pages(
     kb_id: str = Query(""),
     page_type: str = Query("", pattern="^(|source|digest)$"),
+    doc_path: str = Query(""),
     current_user: dict = Depends(get_current_user),
 ):
-    """可见百科页面列表（私人页面仅属主/管理员可见）；Redis 缓存优先。"""
+    """可见百科页面列表（私人页面仅属主/管理员可见）；Redis 缓存优先。
+
+    doc_path 非空时仅返回归属该单篇文档的百科页（单文档知识百科视图）。
+    """
     cached = None
     if kb_id:
         cached = insight_cache.cache_get(insight_cache.wiki_list_key(kb_id))
@@ -47,6 +52,7 @@ async def list_wiki_pages(
             current_user.get("role") == "admin",
             kb_id=kb_id,
             page_type=page_type,
+            doc_path=doc_path,
         )
         rows = [
             {
@@ -69,6 +75,7 @@ async def list_wiki_pages(
     rows = [
         r for r in cached.get("rows", [])
         if (not page_type or r["page_type"] == page_type)
+        and (not doc_path or r["source_image"] == doc_path or doc_path in (r["source_refs"] or []))
         and (r["visibility"] == "public" or r["owner_id"] == _user_id(current_user)
              or current_user.get("role") == "admin")
     ]

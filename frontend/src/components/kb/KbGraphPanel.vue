@@ -1,7 +1,11 @@
 <template>
   <div class="kb-graph">
-    <!-- 工具栏：搜索 / 语义搜索 -->
+    <!-- 工具栏：范围 / 搜索 / 语义搜索 -->
     <div class="graph-toolbar">
+      <select v-model="docPath" class="scope-select" title="图谱范围：整库或单篇文档" @change="onScopeChange">
+        <option value="">整库</option>
+        <option v-for="d in docs" :key="d.source_image" :value="d.source_image">{{ d.title || d.filename }}</option>
+      </select>
       <div class="search-box">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
           <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
@@ -9,7 +13,7 @@
         <input v-model="nodeQuery" placeholder="搜索节点…" />
         <button v-if="nodeQuery" class="clear-btn" @click="nodeQuery = ''">&times;</button>
       </div>
-      <div class="semantic-group">
+      <div v-if="!docScope" class="semantic-group">
         <input v-model="semanticQuery" class="semantic-input" placeholder="语义搜索节点…" @keyup.enter="runSemantic" />
         <select v-model.number="topN" class="mini-select" title="TopN">
           <option :value="5">Top 5</option>
@@ -27,13 +31,13 @@
       <span class="graph-counts">{{ nodes.length }} 节点 · {{ edges.length }} 关系</span>
     </div>
 
-    <!-- 工具栏：操作 -->
+    <!-- 工具栏：操作（单篇文档子图为实时聚合视图，不提供手动维护） -->
     <div class="graph-actions">
-      <button class="btn-tool" @click="openNodeForm">新建节点</button>
-      <button class="btn-tool" @click="openEdgeForm">新建关系</button>
-      <button class="btn-tool" @click="importVisible = true">导入JSONL</button>
-      <button class="btn-tool" :disabled="rebuilding" :title="rebuilding ? '正在后台生成中' : '从知识百科重建图谱索引'" @click="rebuild">{{ rebuilding ? '重建中…' : '重建索引' }}</button>
-      <button class="btn-tool danger" @click="clearGraph">清空图谱</button>
+      <button v-if="!docScope" class="btn-tool" @click="openNodeForm">新建节点</button>
+      <button v-if="!docScope" class="btn-tool" @click="openEdgeForm">新建关系</button>
+      <button v-if="!docScope" class="btn-tool" @click="importVisible = true">导入JSONL</button>
+      <button class="btn-tool" :disabled="rebuilding" :title="rebuilding ? '正在后台生成中' : (docScope ? '重新聚合该文档的百科子图' : '从知识百科重建图谱索引')" @click="rebuild">{{ rebuilding ? '重建中…' : (docScope ? '刷新子图' : '重建索引') }}</button>
+      <button v-if="!docScope" class="btn-tool danger" @click="clearGraph">清空图谱</button>
       <div class="legend">
         <span v-for="(label, t) in TYPE_LABELS" :key="t" class="legend-item">
           <i :style="{ background: TYPE_COLORS[t] }"></i>{{ label }}
@@ -47,7 +51,7 @@
     <div ref="canvasRef" class="graph-canvas" :class="{ dragging: !!drag }">
       <div v-if="loading" class="canvas-state">加载中…</div>
       <div v-else-if="!nodes.length" class="canvas-state">
-        图谱为空。上传文档后由知识百科自动编译生成，或点击「重建索引」/「新建节点」
+        {{ docScope ? '该文档暂无关联百科页，入库后由知识百科自动编译生成子图' : '图谱为空。上传文档后由知识百科自动编译生成，或点击「重建索引」/「新建节点」' }}
       </div>
       <svg
         v-else
@@ -124,10 +128,10 @@
         <div v-if="relatedEdges.length" class="info-edges">
           <div v-for="e in relatedEdges" :key="e.id" class="info-edge">
             <span>{{ e.source }} → {{ e.target }}：{{ e.label }}</span>
-            <button class="link-btn danger" @click="removeEdge(e)">删除</button>
+            <button v-if="!docScope" class="link-btn danger" @click="removeEdge(e)">删除</button>
           </div>
         </div>
-        <button class="btn-tool danger block" @click="removeNode(selectedNode)">删除节点</button>
+        <button v-if="!docScope" class="btn-tool danger block" @click="removeNode(selectedNode)">删除节点</button>
       </div>
       <div v-else-if="selectedEdge" class="info-card">
         <div class="info-head">
@@ -135,7 +139,7 @@
           <button class="info-close" @click="selectedEdge = null">&times;</button>
         </div>
         <p class="info-note">关系：{{ selectedEdge.label }}</p>
-        <button class="btn-tool danger block" @click="removeEdge(selectedEdge)">删除关系</button>
+        <button v-if="!docScope" class="btn-tool danger block" @click="removeEdge(selectedEdge)">删除关系</button>
       </div>
     </div>
 
@@ -234,6 +238,7 @@ import {
   getKbGraph, rebuildKbGraph, clearKbGraph,
   addKbGraphNode, deleteKbGraphNode, addKbGraphEdge, deleteKbGraphEdge,
   importKbGraphJsonl, searchKbGraphSemantic, getKbGraphSourceContent, getImageUrl,
+  listKbDocuments,
 } from '@/api'
 
 const props = defineProps({
@@ -248,6 +253,22 @@ const edges = ref([])
 const loading = ref(true)
 const message = ref('')
 const messageError = ref(false)
+
+// 图谱范围：'' = 整库（含手动节点），否则为单篇文档 source_image（实时聚合子图，不落库）
+const docPath = ref('')
+const docs = ref([])
+const docScope = computed(() => !!docPath.value)
+async function loadDocs() {
+  try {
+    const res = await listKbDocuments(props.kbId)
+    docs.value = res.data.documents || []
+  } catch (e) { /* 文档清单加载失败不阻断整库视图 */ }
+}
+function onScopeChange() {
+  stopPolling()
+  job.value = null
+  load()
+}
 
 // 后台重建任务（需求4）：job.status==='running' 时按钮置灰 + 轮询，不阻主线程
 const job = ref(null)
@@ -450,7 +471,7 @@ async function load() {
   loading.value = true
   message.value = ''
   try {
-    const res = await getKbGraph(props.kbId)
+    const res = await getKbGraph(props.kbId, docPath.value)
     applyGraph(res.data.graph || {})
     job.value = res.data.job || null
     if (rebuilding.value) startPolling()
@@ -477,7 +498,7 @@ function stopPolling() {
 }
 async function pollJob() {
   try {
-    const res = await getKbGraph(props.kbId)
+    const res = await getKbGraph(props.kbId, docPath.value)
     job.value = res.data.job || null
     if (!rebuilding.value) {
       stopPolling()
@@ -494,7 +515,13 @@ async function pollJob() {
 async function rebuild() {
   message.value = ''
   try {
-    const res = await rebuildKbGraph(props.kbId)
+    const res = await rebuildKbGraph(props.kbId, docPath.value)
+    if (res.data.started === false) {
+      // 单篇文档子图：后端实时聚合直接返回，无需后台任务
+      applyGraph(res.data.graph || {})
+      notify(`已刷新该文档子图：${nodes.value.length} 节点 / ${edges.value.length} 关系`)
+      return
+    }
     job.value = res.data.job || { status: 'running' }
     notify('正在后台重建索引，完成后自动刷新…')
     startPolling()
@@ -680,7 +707,7 @@ async function removeEdge(e) {
   }
 }
 
-onMounted(load)
+onMounted(() => { loadDocs(); load() })
 onUnmounted(stopPolling)
 </script>
 
@@ -688,6 +715,11 @@ onUnmounted(stopPolling)
 .kb-graph { display: flex; flex-direction: column; height: 100%; padding: 16px 24px 20px; box-sizing: border-box; gap: 10px; }
 
 .graph-toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.scope-select {
+  border: 1px solid var(--color-border); border-radius: 8px; padding: 6px 10px;
+  font-size: 12.5px; background: #fff; color: var(--color-text); outline: none; max-width: 240px;
+}
+.scope-select:focus { border-color: var(--color-primary); }
 .search-box {
   display: flex; align-items: center; gap: 6px; background: #fff;
   border: 1px solid var(--color-border); border-radius: 8px; padding: 6px 10px;

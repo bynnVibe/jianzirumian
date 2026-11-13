@@ -351,7 +351,7 @@ def _suppress_utility_thinking(ctx: Ctx, eff: dict, payload) -> None:
 
 
 def _finalize(ctx: Ctx, *, status: str, status_code: int, prompt_tokens: int = 0,
-              completion_tokens: int = 0, response_preview: str = "",
+              completion_tokens: int = 0, cached_tokens: int = 0, response_preview: str = "",
               tool_calls: Optional[list] = None, error: str = "") -> None:
     """组装并写入最终日志，扣减密钥 Token 用量。"""
     if ctx.finalized:
@@ -382,6 +382,7 @@ def _finalize(ctx: Ctx, *, status: str, status_code: int, prompt_tokens: int = 0
         "model_mapped": ctx.model_mapped, "upstream_url": ctx.upstream_url,
         "status": status, "status_code": status_code, "retries": ctx.retries,
         "prompt_tokens": int(prompt_tokens or 0), "completion_tokens": int(completion_tokens or 0),
+        "cached_tokens": int(cached_tokens or 0),
         "total_tokens": total, "latency_ms": _latency(ctx),
         "response_preview": response_preview, "tool_calls": [{"name": t} for t in all_tools if t],
         "risk_level": ctx.risk_level, "risk_score": ctx.risk_score, "risks": ctx.findings,
@@ -523,6 +524,7 @@ async def _json_response(ctx: Ctx) -> tuple[int, dict]:
                         int((time.monotonic() - t0) * 1000))
             usage = normalized.get("usage") or {}
             pt, ct = int(usage.get("prompt_tokens") or 0), int(usage.get("completion_tokens") or 0)
+            cached = int((usage.get("prompt_tokens_details") or {}).get("cached_tokens") or 0)
             preview, tool_calls = _extract_preview(normalized)
             # 成功产出正文且非工具调用 → 回写语义缓存（按 public/personal + 实时阶梯 TTL）
             if sc < 400 and not tool_calls:
@@ -531,7 +533,7 @@ async def _json_response(ctx: Ctx) -> tuple[int, dict]:
                            f"tokens={pt}+{ct}，预览 {len(preview)} 字")
             ctx.tracer.add("log", "日志入库", "ok", "已留存调用记录与链路")
             _finalize(ctx, status="ok" if sc < 400 else "error", status_code=sc,
-                      prompt_tokens=pt, completion_tokens=ct,
+                      prompt_tokens=pt, completion_tokens=ct, cached_tokens=cached,
                       response_preview=preview, tool_calls=tool_calls)
             return sc, normalized
         except Exception as e:
@@ -678,7 +680,7 @@ async def stream_response(ctx: Ctx) -> AsyncGenerator[str, None]:
         _finalize(ctx, status="ok", status_code=200, response_preview=cached)
         return
     acc_text: List[str] = []
-    usage = {"pt": 0, "ct": 0}
+    usage = {"pt": 0, "ct": 0, "cached": 0}
     tool_names: List[str] = []
     final_status, final_code, final_err = "error", 502, "所有上游均调用失败"
     committed = False
@@ -765,6 +767,7 @@ async def stream_response(ctx: Ctx) -> AsyncGenerator[str, None]:
         ctx.tracer.add("response", "响应下游", final_status, final_err)
         _finalize(ctx, status=final_status, status_code=final_code,
                   prompt_tokens=usage["pt"], completion_tokens=usage["ct"],
+                  cached_tokens=usage["cached"],
                   response_preview="".join(acc_text), error=final_err,
                   tool_calls=[{"function": {"name": n}} for n in tool_names])
 
@@ -784,6 +787,10 @@ def _account_sse(sse: str, acc_text: List[str], usage: dict, tool_names: List[st
                 u = obj["usage"]
                 usage["pt"] = int(u.get("prompt_tokens") or usage["pt"])
                 usage["ct"] = int(u.get("completion_tokens") or usage["ct"])
+                # 前缀缓存命中量（OpenAI 形态 prompt_tokens_details.cached_tokens）
+                cached = int((u.get("prompt_tokens_details") or {}).get("cached_tokens") or 0)
+                if cached:
+                    usage["cached"] = cached
             for choice in obj.get("choices") or []:
                 delta = choice.get("delta") or {}
                 if delta.get("content"):

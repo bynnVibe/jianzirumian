@@ -10,6 +10,7 @@
         <span class="doc-toolbar-title">{{ displayTitle }}</span>
         <span v-if="pageNum" class="doc-toolbar-page">第 {{ pageNum }} 页</span>
         <span v-if="isPdfMode" class="doc-toolbar-page">原始文档分页预览</span>
+        <span v-else-if="isMdMode" class="doc-toolbar-page">Markdown 在线预览</span>
       </div>
       <div class="doc-toolbar-right">
         <a v-if="fileUrl" :href="fileUrl" :download="displayTitle" class="toolbar-btn">
@@ -28,7 +29,7 @@
       <!-- 加载中 -->
       <div v-if="loading" class="doc-state">
         <div class="doc-spinner"></div>
-        <span>正在加载 Word 文档...</span>
+        <span>{{ isMdMode ? '正在加载 Markdown 文档...' : '正在加载 Word 文档...' }}</span>
       </div>
       <!-- 错误 -->
       <div v-else-if="error" class="doc-state doc-error">
@@ -52,6 +53,10 @@
         <p>原始 Word 文档尚未生成 PDF 预览，可下载原文查看</p>
         <a v-if="fileUrl" :href="fileUrl" :download="displayTitle" class="toolbar-btn">下载原文</a>
       </div>
+      <!-- Markdown 在线预览：拉取原文渲染，无需下载 -->
+      <div v-else-if="isMdMode" class="doc-paper">
+        <MarkdownContent :content="mdText" />
+      </div>
       <!-- Word HTML 渲染（旧数据兼容：仅有 pdf 预览模式才走 iframe，其余不展示解析文本） -->
       <div v-else class="doc-paper">
         <!-- 页码导航锚点 -->
@@ -72,6 +77,7 @@
 import { ref, computed, onMounted, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
 import mammoth from 'mammoth'
+import MarkdownContent from '@/components/MarkdownContent.vue'
 import { getImageUrl as buildImageUrl } from '@/api'
 
 const route = useRoute()
@@ -96,12 +102,16 @@ const isWordWithoutPdf = computed(() => {
   return (name.endsWith('.docx') || name.endsWith('.doc')) && !pdfName.value
 })
 
+// Markdown 文档：按扩展名识别，拉取原文在线渲染（含 url-*.md 链接快照）
+const isMdMode = computed(() => /\.(md|markdown)$/i.test(filename.value))
+
 // 工具栏标题：优先用调用方传入的展示名 title，其次真实文件名，最后回退 pdf 名
 const displayTitle = computed(() => titleName.value || filename.value || pdfName.value || '')
 
 const loading = ref(true)
 const error = ref('')
 const docHtml = ref('')
+const mdText = ref('')
 const fileUrl = ref('')
 const htmlContainer = ref(null)
 const pageAnchors = ref([])
@@ -128,6 +138,21 @@ onMounted(async () => {
   // Word 文件未生成 PDF 预览：直接结束加载，模板显示下载提示
   if (isWordWithoutPdf.value) {
     loading.value = false
+    return
+  }
+
+  // Markdown 模式：拉取原文文本交给 MarkdownContent 渲染，无需 mammoth
+  if (isMdMode.value) {
+    try {
+      const response = await fetch(fileUrl.value)
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      mdText.value = await response.text()
+    } catch (err) {
+      console.error('Markdown 预览加载失败:', err)
+      error.value = err.message || '未知错误'
+    } finally {
+      loading.value = false
+    }
     return
   }
 

@@ -372,12 +372,15 @@ def init_db(conn: sqlite3.Connection):
             source_type      TEXT NOT NULL DEFAULT 'image',
             file_path        TEXT NOT NULL,
             status           TEXT NOT NULL DEFAULT 'pending',
+            phase            TEXT NOT NULL DEFAULT 'parse',
             parsed_text      TEXT NOT NULL DEFAULT '',
             pages            TEXT NOT NULL DEFAULT '[]',
             pdf_preview_path TEXT,
             ocr_provider     TEXT NOT NULL DEFAULT '',
             error            TEXT NOT NULL DEFAULT '',
             owner_id         TEXT NOT NULL DEFAULT '',
+            ingest_kb_id     TEXT NOT NULL DEFAULT '',
+            ingest_title     TEXT NOT NULL DEFAULT '',
             created_at       TEXT NOT NULL,
             updated_at       TEXT NOT NULL
         );
@@ -572,6 +575,7 @@ def init_db(conn: sqlite3.Connection):
             error             TEXT NOT NULL DEFAULT '',
             prompt_tokens     INTEGER NOT NULL DEFAULT 0,
             completion_tokens INTEGER NOT NULL DEFAULT 0,
+            cached_tokens     INTEGER NOT NULL DEFAULT 0,
             latency_ms        INTEGER NOT NULL DEFAULT 0,
             started_at        TEXT NOT NULL,
             ended_at          TEXT NOT NULL DEFAULT ''
@@ -768,6 +772,7 @@ def init_db(conn: sqlite3.Connection):
             status            TEXT NOT NULL DEFAULT 'ok',
             prompt_tokens     INTEGER NOT NULL DEFAULT 0,
             completion_tokens INTEGER NOT NULL DEFAULT 0,
+            cached_tokens     INTEGER NOT NULL DEFAULT 0,
             total_tokens      INTEGER NOT NULL DEFAULT 0,
             latency_ms        INTEGER NOT NULL DEFAULT 0,
             retries           INTEGER NOT NULL DEFAULT 0,
@@ -1332,6 +1337,29 @@ def init_db(conn: sqlite3.Connection):
             conn.execute("ALTER TABLE user_skills ADD COLUMN visibility TEXT NOT NULL DEFAULT 'personal'")
             logger.info("user_skills 补加列: visibility")
         conn.execute("INSERT INTO schema_migrations VALUES ('skill_visibility_v1',?)",
+                     (datetime.now().isoformat(),))
+    if not conn.execute("SELECT 1 FROM schema_migrations WHERE version='prefix_cache_v1'").fetchone():
+        # 前缀缓存可观测：agent_spans / gateway_logs 补 cached_tokens（上游命中前缀缓存的
+        # prompt token 数，OpenAI prompt_tokens_details.cached_tokens / Anthropic cache_read_input_tokens），
+        # 用于量化 Prompt 分区整改的缓存命中收益；存量行默认 0。
+        for table in ("agent_spans", "gateway_logs"):
+            cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+            if "cached_tokens" not in cols:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN cached_tokens INTEGER NOT NULL DEFAULT 0")
+                logger.info("%s 补加列: cached_tokens", table)
+        conn.execute("INSERT INTO schema_migrations VALUES ('prefix_cache_v1',?)",
+                     (datetime.now().isoformat(),))
+    if not conn.execute("SELECT 1 FROM schema_migrations WHERE version='pending_ingest_v1'").fetchone():
+        # 后台入库：phase 区分解析/入库两阶段错误；ingest_kb_id/ingest_title 落库
+        # 入库参数，重启后 recover 可按行恢复后台入库，不丢任务。
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(pending_uploads)")}
+        if "phase" not in cols:
+            conn.execute("ALTER TABLE pending_uploads ADD COLUMN phase TEXT NOT NULL DEFAULT 'parse'")
+        if "ingest_kb_id" not in cols:
+            conn.execute("ALTER TABLE pending_uploads ADD COLUMN ingest_kb_id TEXT NOT NULL DEFAULT ''")
+        if "ingest_title" not in cols:
+            conn.execute("ALTER TABLE pending_uploads ADD COLUMN ingest_title TEXT NOT NULL DEFAULT ''")
+        conn.execute("INSERT INTO schema_migrations VALUES ('pending_ingest_v1',?)",
                      (datetime.now().isoformat(),))
     conn.commit()
 

@@ -14,10 +14,14 @@ PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PROJECT_NAME="jianzirumian"
 
 # ============ 配置项（按需修改）============
-# 阿里云服务器信息
-REMOTE_USER="root"
-REMOTE_HOST="114.55.62.152"
-REMOTE_DIR="/opt/jianziruyang"
+# 阿里云服务器信息（修改方式详见 README「修改目标 ECS 与上传目录」小节）：
+#   方式一：直接修改下方默认值（长期生效）；
+#   方式二：环境变量临时覆盖，不改文件，例如：
+#     REMOTE_HOST=47.xx.xx.xx REMOTE_USER=root REMOTE_DIR=/opt/jianziruyang \
+#       bash scripts/deploy-aliyun.sh upload
+REMOTE_USER="${REMOTE_USER:-root}"
+REMOTE_HOST="${REMOTE_HOST:-39.107.12.196}"
+REMOTE_DIR="${REMOTE_DIR:-/opt/jianziruyang}"
 
 # 镜像标签
 BACKEND_IMAGE="${PROJECT_NAME}-backend:latest"
@@ -212,6 +216,7 @@ cmd_upload() {
     if [ "$REMOTE_HOST" = "your-server-ip" ]; then
         err "请先配置服务器信息："
         err "  编辑脚本顶部 REMOTE_HOST、REMOTE_USER、REMOTE_DIR 变量"
+        err "  或环境变量覆盖: REMOTE_HOST=<IP> REMOTE_USER=<用户> REMOTE_DIR=<目录> bash scripts/deploy-aliyun.sh upload"
         err "  或手动执行: scp $DEPLOY_PACKAGE root@your-server-ip:/opt/"
         exit 1
     fi

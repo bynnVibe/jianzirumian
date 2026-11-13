@@ -32,11 +32,11 @@ _UPLOAD_KEYWORDS = ("上传", "保存", "入库", "加入知识库", "存进知�
 _SUMMARIZE_KEYWORDS = ("总结", "提炼", "概括", "提取重点", "归纳", "摘要")
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"}
-DOC_EXTS = {".docx": "word", ".pdf": "pdf"}
+DOC_EXTS = {".docx": "word", ".pdf": "pdf", ".md": "markdown", ".markdown": "markdown"}
 
 
 def detect_kind(filename: str) -> Optional[str]:
-    """按扩展名判断附件类型：image | word | pdf | None（不支持）"""
+    """按扩展名判断附件类型：image | word | pdf | markdown | None（不支持）"""
     ext = Path(filename or "").suffix.lower()
     if ext in IMAGE_EXTS:
         return "image"

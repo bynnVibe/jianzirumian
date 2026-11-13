@@ -4,8 +4,9 @@
 借鉴 Claude Code 三层 compaction 设计：
 - 自动压缩：按 token headroom 触发（estimate_tokens 估算「摘要+tail 历史」超过
   CONTEXT_COMPACT_TRIGGER_TOKENS 即压缩；过小会话豁免；条数/字符阈值兜底）；
-- 微压缩：分级 clip——最近 KEEP_RECENT_FULL 条全文 → 中间档 CLIP_MID_CHARS →
-  更旧档 CLIP_OLD_CHARS 深度压缩（完整原文仍存会话记录）；
+- 微压缩：位置无关两档冻结 clip——最近 KEEP_RECENT_FULL 条全文，其余固定 CLIP_MID_CHARS
+  截断（完整原文仍存会话记录）；渲染只依赖消息自身内容，历史前缀 append-only 稳定，
+  利于模型前缀缓存命中；
 - 手动压缩：maybe_summarize(force=True, focus=...) 供 compact API 强制触发；
 - 结构化摘要契约：五节 checklist（意图/结论/约束/未决/下一步），prior+new 增量更新；
 - 再水化：注入「摘要 + continuation 指令」，已知信息不重复询问。
@@ -30,42 +31,36 @@ CONTEXT_COMPACT_TRIGGER_TOKENS = int(getattr(settings, "CONTEXT_COMPACT_TRIGGER_
 COMPACT_MIN_MESSAGES = 8
 # 压缩后仍保留最近 N 条消息不进摘要
 KEEP_RECENT_MESSAGES = 6
-# 深度压缩尾注（更旧档消息截断时附加）
-_OLD_CLIP_NOTE = "（更早消息已深度压缩，完整原文仍存会话记录）"
+# 摘要批更新门控：距上次摘要覆盖点新增「可摘要消息」（不含最近保留区）不足该值时
+# 不重算摘要（摘要前缀稳定，利于前缀缓存）
+SUMMARY_BATCH_MIN_MESSAGES = int(getattr(settings, "SUMMARY_BATCH_MIN_MESSAGES", 6))
+# 无摘要时的全量冻结窗口上限（固定容量：未达上限前历史前缀完全 append-only）
+FREEZE_MAX_MESSAGES = SUMMARY_TRIGGER_MESSAGE_COUNT * 2
 
 
 def _clip_history(messages: List[dict]) -> List[dict]:
-    """微压缩分级 clip：最近 keep_full 条全文 → 中间档 mid 截断 → 更旧档 old 深度压缩。
+    """微压缩两档冻结 clip：最近 keep_full 条全文，其余固定 mid 截断并附原长尾注。
 
-    system 角色消息（如摘要）不截断。避免历史窗口内单条超长回答撑大 prompt token。
+    位置无关设计（前缀缓存友好）：单条消息的渲染结果只取决于自身内容与「是否位于
+    最近 keep_full 条」，不随窗口滑动/总条数变化而重排；历史消息一旦渲染即冻结，
+    仅最近 keep_full 条在退出全文区时发生一次性截断迁移。system 角色消息（如摘要）
+    与短消息不截断。完整原文仍存会话记录。
     """
     mid = int(getattr(settings, "CLIP_MID_CHARS", 800))
-    old = int(getattr(settings, "CLIP_OLD_CHARS", 200))
     keep_full = int(getattr(settings, "KEEP_RECENT_FULL", 4))
     if mid <= 0 or not messages:
         return messages
     n = len(messages)
-    # 三档边界：全文区 [n-keep_full, n)；深度压缩区 [0, max(0, n-2*keep_full))；其余为中间档
-    old_end = max(0, n - 2 * keep_full)
     result = []
     for i, m in enumerate(messages):
         content = m.get("content", "") or ""
-        if m.get("role") == "system" or i >= n - keep_full:
+        if m.get("role") == "system" or i >= n - keep_full or len(content) <= mid:
             result.append(m)
             continue
-        limit = old if i < old_end else mid
-        if len(content) <= limit:
-            result.append(m)
-        elif i < old_end:
-            result.append({
-                "role": m.get("role", "user"),
-                "content": content[:limit] + f"\n…{_OLD_CLIP_NOTE}",
-            })
-        else:
-            result.append({
-                "role": m.get("role", "user"),
-                "content": content[:limit] + f"\n…（较早消息已截断，原长 {len(content)} 字符）",
-            })
+        result.append({
+            "role": m.get("role", "user"),
+            "content": content[:mid] + f"\n…（较早消息已截断，原长 {len(content)} 字符）",
+        })
     return result
 
 
@@ -118,6 +113,16 @@ async def maybe_summarize(session, llm_provider: str = None, force: bool = False
                 return None
 
     existing = get_summary(session.session_id)
+    # 批更新门控：已有摘要且新增「可摘要消息」（总条数 - 最近保留区 - 已覆盖数）不足 N 条
+    # 时不重算（摘要前缀稳定，利于前缀缓存）；force=True（手动 compact）绕过门控。
+    if not force and existing:
+        covered_id = existing.get("covered_until_message_id")
+        covered_idx = next(
+            (i for i, m in enumerate(messages) if m.message_id == covered_id), -1)
+        if covered_idx >= 0:
+            new_coverable = len(messages) - KEEP_RECENT_MESSAGES - (covered_idx + 1)
+            if new_coverable < SUMMARY_BATCH_MIN_MESSAGES:
+                return None
     to_summarize = messages[:-KEEP_RECENT_MESSAGES] if len(messages) > KEEP_RECENT_MESSAGES else []
     if not to_summarize:
         return None
@@ -173,14 +178,17 @@ async def maybe_summarize(session, llm_provider: str = None, force: bool = False
 
 def build_context_messages(session, max_recent: int) -> List[dict]:
     """构建带摘要压缩的历史消息：若有摘要，前置「摘要 + continuation 指令」system 消息
-    + 摘要覆盖点之后的 tail；否则按条数截断。
+    + 摘要覆盖点之后的 tail；否则取全量冻结窗口（固定容量，未达上限前 append-only）。
 
-    无论是否有摘要，较早消息均施加微压缩分级 clip（_clip_history），控制历史窗口 Token。
+    无论是否有摘要，较早消息均施加两档冻结 clip（_clip_history）：渲染位置无关，
+    历史前缀稳定，利于模型前缀缓存命中，同时控制历史窗口 Token。
     """
     summary = get_summary(session.session_id)
-    recent = session.messages[-max_recent * 2:]
     if not summary:
-        return _clip_history([{"role": m.role, "content": m.content} for m in recent])
+        msgs = session.messages
+        window = msgs if len(msgs) <= FREEZE_MAX_MESSAGES else msgs[-FREEZE_MAX_MESSAGES:]
+        return _clip_history([{"role": m.role, "content": m.content} for m in window])
+    recent = session.messages[-max_recent * 2:]
 
     covered_id = summary.get("covered_until_message_id")
     covered_idx = -1

@@ -1,7 +1,7 @@
 """
-见字如面 - 文档（Word/PDF）导入工具（解析全文 + 分割 + 向量入库）
+见字如面 - 文档（Word/PDF/Markdown）导入工具（解析全文 + 分割 + 向量入库）
 
-对应聊天框场景：用户拖入 Word/PDF 并要求"上传/保存/加入知识库"，
+对应聊天框场景：用户拖入 Word/PDF/Markdown 并要求"上传/保存/加入知识库"，
 复用 knowledge_service.process_document()，与 /api/knowledge/upload/document 一致的入库逻辑。
 """
 from app.services.knowledge import knowledge_service
@@ -11,11 +11,11 @@ from app.services.tools.base import BaseTool, ToolContext, ToolResult, register_
 
 class DocumentImportTool(BaseTool):
     name = "document_import"
-    description = "解析 Word/PDF 文档内容并存入知识库"
+    description = "解析 Word/PDF/Markdown 文档内容并存入知识库"
     namespace = "attachment"
     tags = ("document", "parse", "ingest", "write")
     scenarios = (
-        "用户拖入 Word/PDF 并要求「上传/保存/加入知识库」",
+        "用户拖入 Word/PDF/Markdown 并要求「上传/保存/加入知识库」",
         "把文档全文解析后入库",
     )
     parameters = {
@@ -23,7 +23,7 @@ class DocumentImportTool(BaseTool):
         "properties": {
             "file_path": {"type": "string", "description": "待入库的文档文件路径"},
             "filename": {"type": "string", "description": "文档文件名"},
-            "kind": {"type": "string", "enum": ["word", "pdf"], "description": "文档类型"},
+            "kind": {"type": "string", "enum": ["word", "pdf", "markdown"], "description": "文档类型"},
             "kb_id": {"type": "string", "description": "目标知识库 ID（空=默认库）"},
             "visibility": {"type": "string", "enum": ["private", "public"], "description": "可见性"},
         },
@@ -37,7 +37,7 @@ class DocumentImportTool(BaseTool):
         from app.services.chat_actions import validate_execution
         validate_execution(ctx)
         doc_type = ctx.kind
-        if doc_type not in ("word", "pdf"):
+        if doc_type not in ("word", "pdf", "markdown"):
             return ToolResult(
                 tool_name=self.name, success=False,
                 summary=f"不支持的文档类型: {doc_type}", error="unsupported_type",

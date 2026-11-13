@@ -1,6 +1,10 @@
 <template>
   <div class="kb-mindmap">
     <div class="mindmap-toolbar">
+      <select v-model="docPath" class="scope-select" title="生成范围：整库或单篇文档" @change="onScopeChange">
+        <option value="">整库</option>
+        <option v-for="d in docs" :key="d.source_image" :value="d.source_image">{{ d.title || d.filename }}</option>
+      </select>
       <span v-if="updatedAt" class="updated-at">生成于 {{ formatTime(updatedAt) }}</span>
       <span v-if="stale && !rebuilding" class="stale-badge">内容已更新，建议重新生成</span>
       <span v-if="rebuilding" class="gen-hint">正在后台生成中…</span>
@@ -15,9 +19,9 @@
     <p v-if="error" class="msg error">{{ error }}</p>
 
     <div v-if="loading" class="state-box">加载中…</div>
-    <div v-else-if="!tree && rebuilding" class="state-box">正在基于知识库内容生成思维导图，请稍候…</div>
+    <div v-else-if="!tree && rebuilding" class="state-box">正在基于{{ docPath ? '该文档' : '知识库' }}内容生成思维导图，请稍候…</div>
     <div v-else-if="!tree" class="state-box">
-      <p>{{ hasContent ? '尚未生成思维导图，点击右上角「生成思维导图」' : '知识库暂无内容，请先上传文档' }}</p>
+      <p>{{ hasContent ? '尚未生成思维导图，点击右上角「生成思维导图」' : (docPath ? '该文档暂无入库内容，请先完成入库' : '知识库暂无内容，请先上传文档') }}</p>
     </div>
 
     <div v-else-if="layout" class="canvas-scroll">
@@ -55,7 +59,7 @@
 
 <script setup>
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { getKbMindmap, rebuildKbMindmap } from '@/api'
+import { getKbMindmap, rebuildKbMindmap, listKbDocuments } from '@/api'
 
 const props = defineProps({
   kbId: { type: String, required: true },
@@ -72,6 +76,21 @@ const stale = ref(false)
 const hasContent = ref(false)
 const loading = ref(true)
 const error = ref('')
+
+// 生成范围：'' = 整库，否则为单篇文档 source_image（后端按 doc_path 独立存储）
+const docPath = ref('')
+const docs = ref([])
+async function loadDocs() {
+  try {
+    const res = await listKbDocuments(props.kbId)
+    docs.value = res.data.documents || []
+  } catch (e) { /* 文档清单加载失败不阻断整库视图 */ }
+}
+function onScopeChange() {
+  stopPolling()
+  job.value = null
+  load()
+}
 
 // 后台生成任务（需求4）：job.status==='running' 时按钮置灰 + 轮询，不阻主线程
 const job = ref(null)
@@ -151,7 +170,7 @@ async function load() {
   loading.value = true
   error.value = ''
   try {
-    const res = await getKbMindmap(props.kbId)
+    const res = await getKbMindmap(props.kbId, docPath.value)
     applyPayload(res.data)
     job.value = res.data.job || null
     if (rebuilding.value) startPolling()
@@ -179,7 +198,7 @@ function stopPolling() {
 }
 async function pollJob() {
   try {
-    const res = await getKbMindmap(props.kbId)
+    const res = await getKbMindmap(props.kbId, docPath.value)
     job.value = res.data.job || null
     if (!rebuilding.value) {
       stopPolling()
@@ -192,7 +211,7 @@ async function pollJob() {
 async function rebuild() {
   error.value = ''
   try {
-    const res = await rebuildKbMindmap(props.kbId)
+    const res = await rebuildKbMindmap(props.kbId, docPath.value)
     job.value = res.data.job || { status: 'running' }
     startPolling()
   } catch (e) {
@@ -210,7 +229,7 @@ function onNodeClick(n) {
   if (n.src) emit('jump-doc', n.src)
 }
 
-onMounted(load)
+onMounted(() => { loadDocs(); load() })
 onUnmounted(stopPolling)
 </script>
 
@@ -218,6 +237,11 @@ onUnmounted(stopPolling)
 .kb-mindmap { display: flex; flex-direction: column; height: 100%; padding: 20px 24px; box-sizing: border-box; }
 
 .mindmap-toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
+.scope-select {
+  border: 1px solid var(--color-border); border-radius: 8px; padding: 6px 10px;
+  font-size: 12.5px; background: #fff; color: var(--color-text); outline: none; max-width: 260px;
+}
+.scope-select:focus { border-color: var(--color-primary); }
 .updated-at { font-size: 12px; color: var(--color-text-secondary); }
 .stale-badge { font-size: 12px; color: #b8860b; background: #fff8e1; padding: 2px 10px; border-radius: 6px; }
 .gen-hint { font-size: 12px; color: var(--color-primary); background: var(--color-primary-light); padding: 2px 10px; border-radius: 6px; }

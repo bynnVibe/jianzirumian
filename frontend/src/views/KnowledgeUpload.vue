@@ -29,7 +29,7 @@
           </button>
         </div>
       </div>
-      <p v-if="!embedded" class="page-desc">上传图片 / Word / PDF，或导入公开文章链接；后台解析后在「知识入库」检查、修改并确认，写入知识库与 llm-wiki 百科</p>
+      <p v-if="!embedded" class="page-desc">上传图片 / Word / PDF / Markdown，或导入公开文章链接；后台解析后在「知识入库」检查、修改并确认，写入知识库与 llm-wiki 百科</p>
     </div>
 
     <!-- ==================== Tab 1：文件上传 ==================== -->
@@ -189,13 +189,13 @@
         </template>
       </div>
 
-      <!-- ---------- Word / PDF 上传 ---------- -->
+      <!-- ---------- Word / PDF / Markdown 上传 ---------- -->
       <div class="upload-section">
         <div class="module-head">
           <span class="module-badge doc">文</span>
           <div>
-            <div class="module-title">Word / PDF 上传</div>
-            <div class="module-sub">上传成功后后台自动逐页解析（Word 生成原始排版 PDF 预览），点击可预览原始文档</div>
+            <div class="module-title">Word / PDF / Markdown 上传</div>
+            <div class="module-sub">上传成功后后台自动解析（Word/PDF 逐页、Markdown 按章节；Word 生成原始排版 PDF 预览），点击可预览原始文档</div>
           </div>
         </div>
         <div
@@ -206,7 +206,7 @@
           @drop.prevent="handleDocDrop"
           @click="triggerDocInput"
         >
-          <input ref="docInputRef" type="file" accept=".docx,.pdf" multiple class="file-input-hidden" @change="handleDocSelect" />
+          <input ref="docInputRef" type="file" accept=".docx,.pdf,.md,.markdown" multiple class="file-input-hidden" @change="handleDocSelect" />
           <div class="upload-icon doc">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="38" height="38">
               <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
@@ -215,8 +215,8 @@
               <line x1="16" y1="17" x2="8" y2="17"/>
             </svg>
           </div>
-          <p class="upload-text">点击或拖拽 Word / PDF 文档到此处（可多选）</p>
-          <p class="upload-hint">支持 .docx、.pdf（≤20MB）</p>
+          <p class="upload-text">点击或拖拽 Word / PDF / Markdown 文档到此处（可多选）</p>
+          <p class="upload-hint">支持 .docx、.pdf、.md/.markdown（≤20MB，Markdown 按章节分块）</p>
           <div class="upload-actions" @click.stop>
             <button type="button" class="btn-upload-action" @click="triggerDocInput">选择文档</button>
           </div>
@@ -245,13 +245,14 @@
                 <template v-else-if="f.status === 'uploading'">上传中 {{ f.progress }}%</template>
                 <template v-else-if="f.status === 'pending'">排队等待解析…</template>
                 <template v-else-if="f.status === 'parsing'"><span class="spinner-xs"></span> 后台解析中…</template>
+                <template v-else-if="f.status === 'ingesting'"><span class="spinner-xs"></span> 后台入库中…</template>
                 <template v-else-if="f.status === 'done'">
                   <span class="status-ok">✓ 解析完成</span>
                   <span v-if="f.source_type === 'image'">{{ f.text_length }} 字</span>
-                  <span v-else>{{ f.page_count }} 页 / {{ f.text_length }} 字</span>
+                  <span v-else>{{ f.page_count }} {{ pageUnit(f) }} / {{ f.text_length }} 字</span>
                 </template>
                 <template v-else-if="f.status === 'error'">
-                  <span class="status-err">✗ 解析失败</span>
+                  <span class="status-err">{{ f.phase === 'ingest' ? '✗ 入库失败' : '✗ 解析失败' }}</span>
                 </template>
               </span>
               <span v-if="duplicateHints[f.id]" class="fi-dup" :title="duplicateHints[f.id].message">⚠ 重复来源</span>
@@ -265,7 +266,8 @@
             <button v-if="f.status === 'done' || f.source_type === 'url'" class="btn btn-sm btn-success" @click="goIngest(f)">{{ f.source_type === 'url' ? '查看／确认 →' : '去入库 →' }}</button>
             <button v-if="canPreview(f)" class="btn btn-sm btn-outline" @click="previewOriginal(f)">预览</button>
             <button v-if="f.status === 'error' && f.phase !== 'ingest'" class="btn btn-sm btn-primary" @click="retryParse(f)">重试</button>
-            <button v-if="f.status !== 'uploading' && f.phase !== 'ingest'" class="btn btn-sm btn-outline-danger" @click="removeFile(f)">删除</button>
+            <button v-if="f.status === 'error' && f.phase === 'ingest'" class="btn btn-sm btn-primary" @click="retryIngest(f)">重试入库</button>
+            <button v-if="f.status !== 'uploading' && f.status !== 'ingesting'" class="btn btn-sm btn-outline-danger" @click="removeFile(f)">删除</button>
           </div>
         </div>
       </div>
@@ -318,7 +320,7 @@
           <div class="ip-row">
             <span v-if="!ingestProgress.finished" class="ip-text">
               <span class="spinner-xs"></span>
-              入库中 {{ ingestProgress.done + ingestProgress.fail }} / {{ ingestProgress.total }} · 《{{ ingestProgress.currentName }}》
+              后台入库中 {{ ingestProgress.done + ingestProgress.fail }} / {{ ingestProgress.total }} · 《{{ ingestProgress.currentName }}》
             </span>
             <span v-else class="ip-text">
               <template v-if="ingestProgress.fail === 0">✓ 全部入库成功：{{ ingestProgress.done }} 个文件已写入知识库，后台编译百科卡片中</template>
@@ -337,7 +339,7 @@
             <polyline points="14 2 14 8 20 8"/>
           </svg>
           <p>暂无待入库文件</p>
-          <p class="empty-tip">在「文件上传」上传图片 / Word / PDF，解析完成后会出现在这里</p>
+          <p class="empty-tip">在「文件上传」上传图片 / Word / PDF / Markdown，解析完成后会出现在这里</p>
         </div>
 
         <template v-else>
@@ -356,10 +358,13 @@
                   <template v-if="it.source_type === 'url'">{{ urlStatusLabel(it) }} · {{ it.text_length }} 字</template>
                   <template v-else-if="it.status === 'done'">
                     <span class="status-ok">✓ 待入库</span>
-                    {{ it.source_type === 'image' ? `OCR ${it.text_length} 字` : `${it.page_count} 页 / ${it.text_length} 字` }}
+                    {{ it.source_type === 'image' ? `OCR ${it.text_length} 字` : `${it.page_count} ${pageUnit(it)} / ${it.text_length} 字` }}
+                  </template>
+                  <template v-else-if="it.status === 'ingesting'">
+                    <span class="spinner-xs"></span> 后台入库中…（可关闭弹窗）
                   </template>
                   <template v-else>
-                    <span class="status-err">✗ 解析失败，点击重试</span>
+                    <span class="status-err">{{ it.phase === 'ingest' ? '✗ 入库失败，点击重试' : '✗ 解析失败，点击重试' }}</span>
                   </template>
                 </div>
               </div>
@@ -404,10 +409,14 @@
             :kb-id="selectedKbId" :can-write="canWriteUrlTarget" @dirty="urlDirty = $event" @busy="urlBusy = $event"
             @updated="updateUrlDetail" @submitted="onUrlSubmitted" />
           <template v-else-if="detail.status === 'error'">
-            <div class="review-error">解析失败：{{ detail.error }}</div>
+            <div class="review-error">{{ detail.phase === 'ingest' ? '入库失败' : '解析失败' }}：{{ detail.error }}</div>
             <div class="review-actions">
-              <button class="btn btn-primary" @click="retryParse(detail)">重新解析</button>
+              <button v-if="detail.phase === 'ingest'" class="btn btn-primary" @click="retryIngest(detail)">重试入库</button>
+              <button v-else class="btn btn-primary" @click="retryParse(detail)">重新解析</button>
             </div>
+          </template>
+          <template v-else-if="detail.status === 'ingesting'">
+            <div class="review-ingesting"><span class="spinner-xs"></span> 后台入库中…向量化完成后自动从待入库列表移除，可关闭弹窗稍后查看</div>
           </template>
 
           <template v-else-if="detail.source_type === 'image'">
@@ -432,7 +441,7 @@
             <!-- 文档：逐页解析文本，可编辑，可跳回原始文档对应页 -->
             <div class="doc-pages-toolbar">
               <span class="doc-pages-info">
-                共 {{ detail.pages.length }} 页 · 合计 {{ detailTextLength }} 字
+                共 {{ detail.pages.length }} {{ pageUnit(detail) }} · 合计 {{ detailTextLength }} 字
                 <span v-if="pdfPreviewName(detail) && detail.source_type === 'word'" class="doc-preview-hint">（Word 已生成原始排版 PDF 预览）</span>
               </span>
               <a
@@ -445,7 +454,7 @@
             <div class="doc-pages-list">
               <div v-for="page in detail.pages" :key="page.page_number" class="doc-page-card">
                 <div class="doc-page-header">
-                  <span class="doc-page-title">第 {{ page.page_number }} 页</span>
+                  <span class="doc-page-title">第 {{ page.page_number }} {{ pageUnit(detail) }}{{ detail.source_type === 'markdown' && page.section_title ? ' · ' + page.section_title : '' }}</span>
                   <div class="doc-page-actions">
                     <a
                       v-if="pdfPreviewName(detail)"
@@ -456,8 +465,8 @@
                     <button
                       v-if="pageVersions(page).length"
                       class="btn btn-sm btn-outline"
-                      :title="`第 ${page.page_number} 页润色/恢复版本历史，可回溯恢复`"
-                      @click="openVersionModal(pageKey(page), `第 ${page.page_number} 页`)"
+                      :title="`第 ${page.page_number} ${pageUnit(detail)}润色/恢复版本历史，可回溯恢复`"
+                      @click="openVersionModal(pageKey(page), `第 ${page.page_number} ${pageUnit(detail)}`)"
                     >版本 {{ pageVersions(page).length }}</button>
                     <button
                       class="btn btn-sm btn-primary"
@@ -486,7 +495,7 @@
             </button>
             <button class="btn btn-success" :disabled="ingestBusy" @click="ingestSelected">
               <span v-if="ingestBusy" class="spinner-xs"></span>
-              {{ ingestBusy ? '入库中...' : '确认入库（知识库 + llm-wiki）' }}
+              {{ ingestBusy ? '提交中...' : '确认入库（后台执行，不阻塞界面）' }}
             </button>
           </div>
         </div>
@@ -892,6 +901,11 @@ function openHistorySource(item) {
     showStatus('该记录未生成原始排版预览', 'info')
     return
   }
+  // Markdown 无 PDF 排版预览，不能让 PDF 阅读器加载 .md，引导查看解析章节
+  if (item.source_type === 'markdown') {
+    showStatus('Markdown 记录无排版预览，请点「解析文档」查看章节内容', 'info')
+    return
+  }
   // pdf 参数：Word 用转换后的预览 PDF，PDF 直接用源文件本身
   const pdfPath = item.source_type === 'word' ? item.pdf_preview_path : item.source_path
   const pdfName = (pdfPath || '').split('/').pop()
@@ -1023,10 +1037,15 @@ function detectType(file) {
   if (IMAGE_EXTS.includes(ext)) return 'image'
   if (ext === '.docx') return 'word'
   if (ext === '.pdf') return 'pdf'
+  if (ext === '.md' || ext === '.markdown') return 'markdown'
   return null
 }
 function typeIcon(type) {
-  return type === 'url' ? '链' : type === 'image' ? '图' : type === 'word' ? 'W' : type === 'pdf' ? 'P' : '文'
+  return type === 'url' ? '链' : type === 'image' ? '图' : type === 'word' ? 'W' : type === 'pdf' ? 'P' : type === 'markdown' ? 'M' : '文'
+}
+// 分页单位：Markdown 按章节拆解，展示为「节」；其余文档为「页」
+function pageUnit(item) {
+  return item?.source_type === 'markdown' ? '节' : '页'
 }
 function formatSize(bytes) {
   if (!bytes && bytes !== 0) return ''
@@ -1056,7 +1075,7 @@ function handleImageFiles(files) {
   const images = []
   for (const f of files) {
     if (detectType(f) === 'image') images.push(f)
-    else showStatus(`《${f.name}》不是图片，请在下方 Word / PDF 区上传`, 'error')
+    else showStatus(`《${f.name}》不是图片，请在下方 Word / PDF / Markdown 区上传`, 'error')
   }
   if (!images.length) return
   // 选择图片后先做清晰度检测（模糊则弹窗确认），通过后进入编辑界面（裁剪 / 旋转）
@@ -1446,7 +1465,7 @@ function finishCropEdit(file, message) {
   }
 }
 
-// ---- Word / PDF 上传 ----
+// ---- Word / PDF / Markdown 上传 ----
 function triggerDocInput() {
   docInputRef.value?.click()
 }
@@ -1462,10 +1481,10 @@ function handleDocDrop(e) {
 function handleDocFiles(files) {
   for (const f of files) {
     const type = detectType(f)
-    if (type === 'word' || type === 'pdf') {
+    if (type === 'word' || type === 'pdf' || type === 'markdown') {
       uploadOne(f, type, f.name)
     } else {
-      showStatus(`《${f.name}》不是 Word / PDF 文档，图片请在上方图片区上传`, 'error')
+      showStatus(`《${f.name}》不是 Word / PDF / Markdown 文档，图片请在上方图片区上传`, 'error')
     }
   }
 }
@@ -1544,6 +1563,7 @@ async function refreshPending() {
     const urls = results[1].status === 'fulfilled' ? results[1].value.data.items || [] : serverItems.value.filter(i => i.source_type === 'url')
     if (results[1].status === 'fulfilled') rendererEnabled.value = !!results[1].value.data.renderer_enabled
     serverItems.value = [...files, ...urls].sort((a, b) => b.created_at.localeCompare(a.created_at))
+    reconcileIngestProgress()
     const current = urls.find(item => item.id === selectedItemId.value)
     if (current && detail.value?.source_type === 'url' && detail.value.phase === 'ingest') {
       // 状态轮询不得覆盖正在编辑的正文、标题和版本。
@@ -1561,6 +1581,8 @@ function canPreview(item) {
   if (item.source_type === 'url') return false
   if (item.status === 'uploading' || item.status === 'error') return false
   if (item.source_type === 'image') return true
+  // Markdown：原文在线渲染预览，落盘后即可预览
+  if (item.source_type === 'markdown') return true
   // 文档：PDF 随时可预览；Word 需解析阶段生成 PDF 预览后
   return item.source_type === 'pdf' || !!item.pdf_preview_path
 }
@@ -1568,6 +1590,13 @@ function canPreview(item) {
 function previewOriginal(item) {
   if (item.source_type === 'image') {
     previewImageSrc.value = buildImageUrl(item.file_path)
+    return
+  }
+  // Markdown：/doc-preview 在线渲染原文，无需下载
+  if (item.source_type === 'markdown') {
+    const diskName = item.file_path ? baseName(item.file_path) : ''
+    const title = item.source_name || item.filename || ''
+    window.open(`/doc-preview?file=${encodeURIComponent(diskName)}&title=${encodeURIComponent(title)}`, '_blank')
     return
   }
   const pdfName = item.pdf_preview_path
@@ -1635,7 +1664,7 @@ async function removeFile(item) {
 
 // ---- 知识入库模块 ----
 const ingestItems = computed(() =>
-  serverItems.value.filter((i) => i.status === 'done' || i.status === 'error' || (i.source_type === 'url' && ['ingesting', 'interrupted', 'succeeded'].includes(i.status)))
+  serverItems.value.filter((i) => i.status === 'done' || i.status === 'error' || i.status === 'ingesting' || (i.source_type === 'url' && ['ingesting', 'interrupted', 'succeeded'].includes(i.status)))
 )
 const doneCount = computed(() => serverItems.value.filter((i) => i.status === 'done').length)
 const fileDoneCount = computed(() => serverItems.value.filter((i) => i.status === 'done' && i.source_type !== 'url').length)
@@ -1860,36 +1889,21 @@ async function ingestCurrent() {
 async function ingestSelected() {
   if (!detail.value || ingestBusy.value) return
   ingestBusy.value = true
-  ingestProgress.value = {
-    total: 1,
-    done: 0,
-    fail: 0,
-    currentName: detail.value.filename,
-    finished: false,
-  }
+  const d = detail.value
   try {
-    const data = await ingestCurrent()
-    serverItems.value = serverItems.value.filter((x) => x.id !== detail.value.id)
-    const title = data.title || detail.value.filename
-    ingestProgress.value.done = 1
-    ingestProgress.value.currentName = title
-    showStatus(
-      `《${title}》已入库：${data.chunk_count} 个知识片段，后台正在编译 llm-wiki 百科卡片`,
-      'success'
-    )
-    clearVersions(detail.value.id)
+    // 后端仅预检并提交后台任务，立即返回；向量化重活后台执行，不阻塞界面
+    await ingestCurrent()
+    trackIngest([{ id: d.id, filename: d.filename }])
+    showStatus(`《${d.filename}》已提交后台入库，可关闭弹窗，在待入库列表查看进度`, 'success')
+    clearVersions(d.id)
     clearDetail()
+    startPolling()
+    refreshPending()
   } catch (e) {
-    ingestProgress.value.fail = 1
-    const detail = e.response?.data?.detail || e.message
-    // 409 = 重复入库：直接展示后端提示（不再重复入库），区别于一般入库失败
-    if (e.response?.status === 409) {
-      showStatus(detail, 'warning')
-    } else {
-      showStatus('入库失败：' + detail, 'error')
-    }
+    const msg = e.response?.data?.detail || e.message
+    // 409 = 重复入库：直接展示后端提示，区别于一般提交失败
+    showStatus(e.response?.status === 409 ? msg : '入库提交失败：' + msg, e.response?.status === 409 ? 'warning' : 'error')
   } finally {
-    ingestProgress.value.finished = true
     ingestBusy.value = false
   }
 }
@@ -1897,57 +1911,94 @@ async function ingestSelected() {
 async function ingestAll() {
   const targets = serverItems.value.filter((i) => i.status === 'done' && i.source_type !== 'url')
   if (!targets.length || ingestBusy.value) return
-  if (!confirm(`将 ${targets.length} 个文件依次入库到当前选中的知识库，继续吗？`)) return
+  if (!confirm(`将 ${targets.length} 个文件提交后台入库到当前选中的知识库（不阻塞界面），继续吗？`)) return
   ingestBusy.value = true
-  ingestProgress.value = {
-    total: targets.length,
-    done: 0,
-    fail: 0,
-    currentName: targets[0].filename,
-    finished: false,
-  }
-  let ok = 0
-  let fail = 0
+  const submitted = []
+  let syncFail = 0
   try {
-    // 当前选中且有编辑内容的条目走编辑入库，其余用服务端已存文本
-    if (detail.value && detail.value.status === 'done' && targets.some((t) => t.id === detail.value.id)) {
-      ingestProgress.value.currentName = detail.value.filename
-      try {
-        await ingestCurrent()
-        serverItems.value = serverItems.value.filter((x) => x.id !== detail.value.id)
-        ok++
-        ingestProgress.value.done = ok
-      } catch (e) {
-        fail++
-        ingestProgress.value.fail = fail
-      }
-      clearVersions(detail.value.id)
-      clearDetail()
-    }
+    // 当前选中且有编辑内容的条目走编辑入库，其余用服务端已存文本；均只提交不等待入库完成
     for (const item of targets) {
-      if (detail.value && item.id === detail.value.id) continue
-      if (!serverItems.value.some((x) => x.id === item.id)) continue
-      ingestProgress.value.currentName = item.filename
       try {
-        await ingestPendingUpload(item.id, { kb_id: selectedKbId.value })
-        serverItems.value = serverItems.value.filter((x) => x.id !== item.id)
-        clearVersions(item.id)
-        ok++
-        ingestProgress.value.done = ok
+        if (detail.value && item.id === detail.value.id) {
+          await ingestCurrent()
+          clearVersions(item.id)
+          clearDetail()
+        } else {
+          await ingestPendingUpload(item.id, { kb_id: selectedKbId.value })
+        }
+        submitted.push({ id: item.id, filename: item.filename })
       } catch (e) {
-        fail++
-        ingestProgress.value.fail = fail
+        syncFail++
+        showStatus(`《${item.filename}》提交失败：${e.response?.data?.detail || e.message}`, 'error')
       }
     }
-    showStatus(
-      fail === 0
-        ? `全部入库完成：${ok} 个文件已写入知识库，后台正在编译百科卡片`
-        : `入库完成：成功 ${ok} 个，失败 ${fail} 个`,
-      fail === 0 ? 'success' : 'error'
-    )
+    if (submitted.length) {
+      trackIngest(submitted, syncFail)
+      showStatus(`已提交 ${submitted.length} 个文件后台入库，可关闭弹窗，进度见待入库列表`, 'success')
+      startPolling()
+      refreshPending()
+    }
   } finally {
-    ingestProgress.value.finished = true
     ingestBusy.value = false
+  }
+}
+
+// 后台入库进度跟踪：提交后只记录 id，由列表轮询对账（行被移除=成功，error+phase=ingest=失败）
+function trackIngest(entries, preFail = 0) {
+  const ids = {}
+  entries.forEach((e) => { ids[e.id] = e.filename })
+  ingestProgress.value = {
+    total: entries.length + preFail,
+    done: 0,
+    fail: preFail,
+    currentName: entries[0]?.filename || '',
+    finished: entries.length === 0,
+    ids,
+  }
+}
+
+function reconcileIngestProgress() {
+  const p = ingestProgress.value
+  if (!p || p.finished || !p.ids) return
+  const byId = new Map(serverItems.value.map((i) => [i.id, i]))
+  for (const id of Object.keys(p.ids)) {
+    const it = byId.get(id)
+    if (!it) {
+      p.done++
+      delete p.ids[id]
+      continue
+    }
+    if (it.status === 'error' && it.phase === 'ingest') {
+      const name = p.ids[id]
+      p.fail++
+      delete p.ids[id]
+      showStatus(`《${name}》后台入库失败：${it.error || '未知错误'}，可在列表重试`, 'error')
+    }
+  }
+  const remain = Object.keys(p.ids)
+  if (remain.length) p.currentName = byId.get(remain[0])?.filename || p.currentName
+  else {
+    p.finished = true
+    showStatus(
+      p.fail === 0
+        ? `全部入库成功：${p.done} 个文件已写入知识库，后台编译百科卡片中`
+        : `入库结束：成功 ${p.done} 个，失败 ${p.fail} 个`,
+      p.fail === 0 ? 'success' : 'error'
+    )
+  }
+}
+
+async function retryIngest(item) {
+  try {
+    // 重试时后端沿用上次提交的目标库/标题
+    await ingestPendingUpload(item.id, {})
+    trackIngest([{ id: item.id, filename: item.filename }])
+    showStatus(`《${item.filename}》已重新提交后台入库`, 'info')
+    if (selectedItemId.value === item.id) clearDetail()
+    startPolling()
+    refreshPending()
+  } catch (e) {
+    showStatus('重试入库失败：' + (e.response?.data?.detail || e.message), 'error')
   }
 }
 
@@ -2206,6 +2257,7 @@ defineExpose({ allowLeave })
 .fi-icon.image { background: #f9eddb; color: #c98a4b; }
 .fi-icon.word { background: #e4edf9; color: #4a6fa5; }
 .fi-icon.pdf { background: #f9e2e2; color: #b05555; }
+.fi-icon.markdown { background: #e6f2e8; color: #4a8a5c; }
 .fi-icon.small { width: 28px; height: 28px; font-size: 11px; }
 .fi-main { flex: 1; min-width: 0; }
 .fi-name {
@@ -2314,6 +2366,11 @@ defineExpose({ allowLeave })
 }
 .doc-page-textarea:focus { border-color: #c98a4b; background: #fff; }
 .review-actions { display: flex; gap: 10px; margin-top: 12px; justify-content: flex-end; }
+.review-ingesting {
+  display: flex; align-items: center; gap: 8px; margin-top: 12px;
+  padding: 12px 14px; border-radius: 10px; font-size: 13px;
+  background: var(--color-primary-light); color: var(--color-primary);
+}
 
 /* ---------- 空态 ---------- */
 .result-empty {

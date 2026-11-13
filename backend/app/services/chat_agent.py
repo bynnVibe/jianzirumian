@@ -273,47 +273,61 @@ async def _exec_web_search(state: _AgentState, query: str) -> str:
 # 消息构建
 # ---------------------------------------------------------------------------
 
-def _memory_messages(memory_text: str) -> List[dict]:
-    if not (memory_text or "").strip():
+def _profile_messages(profile_text: str) -> List[dict]:
+    """U 区（半静态·同用户跨会话）：常驻画像卡，紧跟静态系统提示，前缀缓存友好。"""
+    if not (profile_text or "").strip():
         return []
     return [{"role": "system",
-             "content": f"【关于该用户的长期记忆，供参考，不要逐字复述】\n{memory_text.strip()}"}]
+             "content": f"【用户画像（常驻），供参考，不要逐字复述】\n{profile_text.strip()}"}]
 
 
-def _build_decision_messages(memory_text: str, history_ctx: List[dict], query: str,
-                             use_knowledge: bool, use_search: bool) -> List[dict]:
+def _relevant_messages(relevant_text: str) -> List[dict]:
+    """D 区（动态·每轮变化）：按需检索的相关记忆，置于历史之后、提问之前，
+    避免每轮变化的内容污染头部前缀（前缀缓存整改 P0-1）。"""
+    if not (relevant_text or "").strip():
+        return []
+    return [{"role": "system",
+             "content": f"【关于该用户的相关记忆，供参考，不要逐字复述】\n{relevant_text.strip()}"}]
+
+
+def _build_decision_messages(profile_text: str, relevant_text: str, history_ctx: List[dict],
+                             query: str, use_knowledge: bool, use_search: bool) -> List[dict]:
     messages = [{"role": "system",
                  "content": _DECISION_SYSTEM_TMPL.format(tools=_build_tool_lines(use_knowledge, use_search))}]
-    messages.extend(_memory_messages(memory_text))
+    messages.extend(_profile_messages(profile_text))
     for h in (history_ctx or [])[-6:]:
         role = h.get("role") if h.get("role") in ("user", "assistant") else "user"
         content = (h.get("content") or "").strip()
         if content:
             messages.append({"role": role, "content": content})
+    messages.extend(_relevant_messages(relevant_text))
     messages.append({"role": "user", "content": query})
     return messages
 
 
-def _build_plan_messages(memory_text: str, history_ctx: List[dict], query: str,
-                         use_knowledge: bool, use_search: bool) -> List[dict]:
+def _build_plan_messages(profile_text: str, relevant_text: str, history_ctx: List[dict],
+                         query: str, use_knowledge: bool, use_search: bool) -> List[dict]:
     messages = [{"role": "system",
                  "content": _PLAN_SYSTEM_TMPL.format(tools=_build_tool_lines(use_knowledge, use_search),
                                                      max_steps=MAX_PLAN_STEPS)}]
-    messages.extend(_memory_messages(memory_text))
+    messages.extend(_profile_messages(profile_text))
     for h in (history_ctx or [])[-4:]:
         role = h.get("role") if h.get("role") in ("user", "assistant") else "user"
         content = (h.get("content") or "").strip()
         if content:
             messages.append({"role": role, "content": content})
+    messages.extend(_relevant_messages(relevant_text))
     messages.append({"role": "user", "content": query})
     return messages
 
 
-def _build_answer_messages(system_prompt: List[dict], memory_text: str,
+def _build_answer_messages(system_prompt: List[dict], profile_text: str, relevant_text: str,
                            history_ctx: List[dict], augmented_query: str) -> List[dict]:
+    """分区装配：静态头 → U 区画像 → C 区历史 → D 区相关记忆 → 用户提问。"""
     messages = list(system_prompt or [])
-    messages.extend(_memory_messages(memory_text))
+    messages.extend(_profile_messages(profile_text))
     messages.extend(history_ctx or [])
+    messages.extend(_relevant_messages(relevant_text))
     messages.append({"role": "user", "content": augmented_query})
     return messages
 
@@ -339,7 +353,8 @@ async def run_chat_agent(
     use_search: bool,
     skip_search_prompt: bool,
     history_ctx: List[dict],
-    memory_text: str,
+    memory_profile: str = "",
+    memory_relevant: str = "",
     system_prompt: List[dict],
     result: dict,
 ) -> AsyncGenerator[str, None]:
@@ -391,14 +406,14 @@ async def run_chat_agent(
     try:
         if mode == "plan_execute":
             async for ev in _plan_and_execute(
-                agent_llm, state, query, user_id, history_ctx, memory_text,
+                agent_llm, state, query, user_id, history_ctx, memory_profile, memory_relevant,
                 use_knowledge, use_search, skip_search_prompt, allowed_tools,
                 _run_tool, _remaining, _emit_timeout, result, session_id=session_id,
             ):
                 yield ev
         else:
             async for ev in _react_loop(
-                agent_llm, state, query, user_id, history_ctx, memory_text,
+                agent_llm, state, query, user_id, history_ctx, memory_profile, memory_relevant,
                 use_knowledge, use_search, skip_search_prompt, allowed_tools,
                 _run_tool, _remaining, _emit_timeout, result, session_id=session_id,
             ):
@@ -409,9 +424,9 @@ async def run_chat_agent(
             return  # HITL 暂停（clarify / need_search）：本轮结束，不进入回答阶段
         # ---- 回答阶段（流式） ----
         async for ev in _answer_phase(
-            agent_llm, state, query, user_id, history_ctx, memory_text, system_prompt,
-            use_knowledge, use_search, skip_search_prompt, _remaining, _emit_timeout, result,
-            session_id=session_id,
+            agent_llm, state, query, user_id, history_ctx, memory_profile, memory_relevant,
+            system_prompt, use_knowledge, use_search, skip_search_prompt,
+            _remaining, _emit_timeout, result, session_id=session_id,
         ):
             yield ev
     except (asyncio.CancelledError, GeneratorExit):
@@ -423,11 +438,12 @@ async def run_chat_agent(
         yield sse("error", {"message": f"复杂问答处理失败：{e}"})
 
 
-async def _react_loop(agent_llm, state, query, user_id, history_ctx, memory_text,
+async def _react_loop(agent_llm, state, query, user_id, history_ctx, memory_profile, memory_relevant,
                       use_knowledge, use_search, skip_search_prompt, allowed_tools,
                       _run_tool, _remaining, _emit_timeout, result, session_id=""):
     """ReAct 决策 / 工具循环（Thought→Action→Observation 回喂下一轮）。"""
-    messages = _build_decision_messages(memory_text, history_ctx, query, use_knowledge, use_search)
+    messages = _build_decision_messages(memory_profile, memory_relevant, history_ctx, query,
+                                        use_knowledge, use_search)
     for step in range(MAX_TOOL_STEPS):
         if _remaining() <= 0:
             yield _emit_timeout(f"decision#{step + 1} deadline exceeded")
@@ -504,12 +520,13 @@ async def _react_loop(agent_llm, state, query, user_id, history_ctx, memory_text
         messages.append({"role": "user", "content": f"[工具 {tool} 返回]\n{_clip(observation)}"})
 
 
-async def _plan_and_execute(agent_llm, state, query, user_id, history_ctx, memory_text,
+async def _plan_and_execute(agent_llm, state, query, user_id, history_ctx, memory_profile, memory_relevant,
                             use_knowledge, use_search, skip_search_prompt, allowed_tools,
                             _run_tool, _remaining, _emit_timeout, result, session_id=""):
     """Plan&Execute：规划步骤清单 → 顺序执行（失败标记后继续，v1 不动态重规划）。"""
     yield sse("status", {"phase": "planning", "message": "正在规划解题步骤..."})
-    messages = _build_plan_messages(memory_text, history_ctx, query, use_knowledge, use_search)
+    messages = _build_plan_messages(memory_profile, memory_relevant, history_ctx, query,
+                                    use_knowledge, use_search)
     t0 = time.monotonic()
     try:
         raw = await asyncio.wait_for(_llm_complete(messages, agent_llm), timeout=_remaining())
@@ -577,8 +594,8 @@ async def _plan_and_execute(agent_llm, state, query, user_id, history_ctx, memor
             return
 
 
-async def _answer_phase(agent_llm, state, query, user_id, history_ctx, memory_text, system_prompt,
-                        use_knowledge, use_search, skip_search_prompt,
+async def _answer_phase(agent_llm, state, query, user_id, history_ctx, memory_profile, memory_relevant,
+                        system_prompt, use_knowledge, use_search, skip_search_prompt,
                         _remaining, _emit_timeout, result, session_id=""):
     """回答阶段：统一格式化累积命中 → 流式生成 → 引用核对 → obs 度量 → 回填 result。"""
     if _remaining() <= 0:
@@ -653,7 +670,8 @@ async def _answer_phase(agent_llm, state, query, user_id, history_ctx, memory_te
 
     # 4. 流式生成
     yield sse("status", {"phase": "generating", "message": "正在生成回答..."})
-    answer_messages = _build_answer_messages(system_prompt, memory_text, history_ctx, augmented_query)
+    answer_messages = _build_answer_messages(system_prompt, memory_profile, memory_relevant,
+                                             history_ctx, augmented_query)
     result["prompt_chars"] = sum(len(m.get("content", "")) for m in answer_messages)
     full_response = ""
     t0 = time.monotonic()

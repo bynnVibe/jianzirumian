@@ -79,12 +79,16 @@ def estimate_tokens(text: str) -> int:
     return cjk + math.ceil((len(text) - cjk) / 4)
 
 
-def note_usage(prompt_tokens: int, completion_tokens: int) -> None:
-    """LLM 层上报真实 token usage（供下一次 record_llm 消费，优先于估算）。"""
+def note_usage(prompt_tokens: int, completion_tokens: int, cached_tokens: int = 0) -> None:
+    """LLM 层上报真实 token usage（供下一次 record_llm 消费，优先于估算）。
+
+    cached_tokens：上游命中前缀缓存的 prompt token 数（OpenAI prompt_tokens_details.cached_tokens /
+    Anthropic cache_read_input_tokens），用于量化 Prompt 分区整改的缓存命中收益。
+    """
     try:
-        pt, ct = int(prompt_tokens or 0), int(completion_tokens or 0)
+        pt, ct, cached = int(prompt_tokens or 0), int(completion_tokens or 0), int(cached_tokens or 0)
         if pt or ct:
-            _pending_usage.set((pt, ct))
+            _pending_usage.set((pt, ct, cached))
     except (TypeError, ValueError):
         pass
 
@@ -187,19 +191,20 @@ def _latency(t0: Optional[float]) -> int:
 
 
 def _insert_span(kind: str, name: str, input_text: str, output_text: str,
-                 status: str, error: str, pt: int, ct: int, latency: int) -> None:
+                 status: str, error: str, pt: int, ct: int, latency: int,
+                 cached: int = 0) -> None:
     tid = _trace_id.get()
     if not tid:
         return
     try:
         db.execute(
             "INSERT INTO agent_spans (id, trace_id, seq, kind, name, input, output, status, error,"
-            " prompt_tokens, completion_tokens, latency_ms, started_at, ended_at)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " prompt_tokens, completion_tokens, cached_tokens, latency_ms, started_at, ended_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 str(uuid.uuid4()), tid, _next_seq(), kind, name or "",
                 _clip(input_text), _clip(output_text), status, (error or "")[:500],
-                pt, ct, latency, _now(), _now(),
+                pt, ct, cached, latency, _now(), _now(),
             ),
         )
     except Exception as e:
@@ -215,17 +220,20 @@ def record_llm(name: str, prompt, response: str = "", t0: Optional[float] = None
     prompt_text = prompt if isinstance(prompt, str) else json.dumps(prompt, ensure_ascii=False)
     usage = _pending_usage.get()
     _pending_usage.set(None)
+    cached = 0
     if usage:
-        pt, ct = usage
+        # 兼容旧 2-tuple 上报（无 cached_tokens）与新 3-tuple
+        pt, ct = usage[0], usage[1]
+        cached = usage[2] if len(usage) > 2 else 0
     else:
         pt, ct = estimate_tokens(prompt_text), estimate_tokens(response or "")
     latency = _latency(t0)
     if status != "ok" and fail_trace:
         mark_failed(error)
-    _insert_span("llm", name, prompt_text, response or "", status, error, pt, ct, latency)
+    _insert_span("llm", name, prompt_text, response or "", status, error, pt, ct, latency, cached)
     logger.info(
-        "[AGENT] trace=%s llm=%s status=%s latency=%dms tokens=%d+%d | response: %s",
-        _trace_id.get() or "-", name or "-", status, latency, pt, ct,
+        "[AGENT] trace=%s llm=%s status=%s latency=%dms tokens=%d+%d cached=%d | response: %s",
+        _trace_id.get() or "-", name or "-", status, latency, pt, ct, cached,
         (response or "").replace("\n", " ")[:200],
     )
     return pt, ct

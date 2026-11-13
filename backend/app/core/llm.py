@@ -104,12 +104,22 @@ def _get_openai_client(base_url: str, api_key: str, model: str) -> AsyncOpenAI:
 
 
 def _report_openai_usage(response) -> None:
-    """可观测性：非流式响应携带 usage 时上报真实 token 用量（流式接口无 usage 由业务层估算）。"""
+    """可观测性：非流式响应携带 usage 时上报真实 token 用量（流式接口无 usage 由业务层估算）。
+
+    同时采集 prompt_tokens_details.cached_tokens（上游前缀缓存命中量，前缀缓存可观测）。
+    """
     usage = getattr(response, "usage", None)
-    if usage is not None:
-        agent_obs.note_usage(
-            getattr(usage, "prompt_tokens", 0), getattr(usage, "completion_tokens", 0)
-        )
+    if usage is None:
+        return
+
+    def _get(obj, key, default=0):
+        return obj.get(key, default) if isinstance(obj, dict) else getattr(obj, key, default)
+
+    details = _get(usage, "prompt_tokens_details", None) or {}
+    agent_obs.note_usage(
+        _get(usage, "prompt_tokens", 0), _get(usage, "completion_tokens", 0),
+        _get(details, "cached_tokens", 0),
+    )
 
 
 def _log_llm_failure(stage: str, e: Exception):

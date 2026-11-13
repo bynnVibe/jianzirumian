@@ -237,12 +237,15 @@ def _anthropic_to_openai(channel: dict, raw: dict) -> dict:
     usage = raw.get("usage") or {}
     pt = int(usage.get("input_tokens") or 0)
     ct = int(usage.get("output_tokens") or 0)
+    # Anthropic 前缀缓存命中量 → OpenAI 形态 prompt_tokens_details.cached_tokens（可观测）
+    cached = int(usage.get("cache_read_input_tokens") or 0)
     return {
         "id": raw.get("id") or f"chatcmpl-{uuid.uuid4().hex[:12]}", "object": "chat.completion",
         "created": int(time.time()), "model": raw.get("model") or channel.get("name", ""),
         "choices": [{"index": 0, "message": message,
                      "finish_reason": "tool_calls" if tool_calls else "stop"}],
-        "usage": {"prompt_tokens": pt, "completion_tokens": ct, "total_tokens": pt + ct},
+        "usage": {"prompt_tokens": pt, "completion_tokens": ct, "total_tokens": pt + ct,
+                  "prompt_tokens_details": {"cached_tokens": cached}},
     }
 
 
@@ -326,7 +329,9 @@ async def iter_anthropic_sse(channel: dict, aiter_lines) -> AsyncGenerator[str, 
             obj = _chunk(cid, channel, {"role": "assistant"})
             usage = (ev.get("message") or {}).get("usage") or {}
             obj["usage"] = {"prompt_tokens": int(usage.get("input_tokens") or 0),
-                            "completion_tokens": int(usage.get("output_tokens") or 0)}
+                            "completion_tokens": int(usage.get("output_tokens") or 0),
+                            "prompt_tokens_details": {
+                                "cached_tokens": int(usage.get("cache_read_input_tokens") or 0)}}
         elif etype == "message_delta":
             usage = (ev.get("usage") or {})
             obj = _chunk(cid, channel, {}, finish_reason="stop")

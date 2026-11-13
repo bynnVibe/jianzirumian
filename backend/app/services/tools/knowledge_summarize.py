@@ -27,7 +27,7 @@ class KnowledgeSummarizeTool(BaseTool):
         "properties": {
             "file_path": {"type": "string", "description": "待总结的附件文件路径"},
             "filename": {"type": "string", "description": "附件文件名"},
-            "kind": {"type": "string", "enum": ["image", "word", "pdf"], "description": "附件类型"},
+            "kind": {"type": "string", "enum": ["image", "word", "pdf", "markdown"], "description": "附件类型"},
             "save_to_kb": {"type": "boolean", "description": "是否将摘要写入知识库（默认 false）"},
         },
         "required": ["file_path", "kind"],

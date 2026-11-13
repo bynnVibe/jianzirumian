@@ -23,6 +23,7 @@ from datetime import datetime
 
 from app.core import db
 from app.core.insight_cache import cache_delete, cache_get, cache_set, graph_key
+from app.services.kb_content import _row_in_doc
 
 logger = logging.getLogger("jianziruyang.kb_graph")
 
@@ -68,8 +69,13 @@ def _save(kb_id: str, data: dict) -> dict:
     return data
 
 
-def get_graph(kb_id: str) -> dict:
-    """读取图谱：Redis 缓存优先，未命中回源 SQLite 并回写缓存。"""
+def get_graph(kb_id: str, doc_path: str = "") -> dict:
+    """读取图谱：Redis 缓存优先，未命中回源 SQLite 并回写缓存。
+
+    单篇文档范围：实时聚合该文档关联的 wiki 页子图（不落库、不含手动节点）。
+    """
+    if doc_path:
+        return doc_graph(kb_id, doc_path)
     cached = cache_get(graph_key(kb_id))
     if cached is not None:
         cached.setdefault("nodes", [])
@@ -182,18 +188,8 @@ def _title_by_image(kb_id: str) -> dict:
     return out
 
 
-def rebuild_from_wiki(kb_id: str) -> dict:
-    """从 llm-wiki 编译产物聚合图谱；保留手动节点/边，替换 wiki 派生部分。"""
-    old = _load(kb_id)
-    nodes = {n["name"]: n for n in old["nodes"] if n.get("origin") == "manual"}
-    edges = {(e["source"], e["target"], e["label"]): e
-             for e in old["edges"] if e.get("origin") == "manual"}
-
-    rows = db.query(
-        "SELECT id, page_type, title, content, analysis, source_refs FROM wiki_pages WHERE kb_id = ?",
-        (kb_id,),
-    )
-    title_by_image = _title_by_image(kb_id)
+def _aggregate(rows: list, title_by_image: dict, nodes: dict, edges: dict) -> None:
+    """将 wiki 页的 entities/entity_relations/digest 关联段聚合到 nodes/edges。"""
     for row in rows:
         try:
             analysis = json.loads(row["analysis"] or "{}")
@@ -240,6 +236,34 @@ def rebuild_from_wiki(kb_id: str) -> dict:
                         break
                 if pairs >= 12:
                     break
+
+
+def _wiki_rows(kb_id: str) -> list:
+    return db.query(
+        "SELECT id, page_type, title, content, analysis, source_image, source_refs"
+        " FROM wiki_pages WHERE kb_id = ?",
+        (kb_id,),
+    )
+
+
+def doc_graph(kb_id: str, doc_path: str) -> dict:
+    """单篇文档子图：仅聚合归属该文档的 wiki 页，实时计算不落库，不含手动节点/边。"""
+    rows = [r for r in _wiki_rows(kb_id) if _row_in_doc(r, doc_path)]
+    nodes: dict = {}
+    edges: dict = {}
+    _aggregate(rows, _title_by_image(kb_id), nodes, edges)
+    return {"nodes": list(nodes.values()), "edges": list(edges.values()), "updated_at": ""}
+
+
+def rebuild_from_wiki(kb_id: str) -> dict:
+    """从 llm-wiki 编译产物聚合图谱；保留手动节点/边，替换 wiki 派生部分。"""
+    old = _load(kb_id)
+    nodes = {n["name"]: n for n in old["nodes"] if n.get("origin") == "manual"}
+    edges = {(e["source"], e["target"], e["label"]): e
+             for e in old["edges"] if e.get("origin") == "manual"}
+
+    rows = _wiki_rows(kb_id)
+    _aggregate(rows, _title_by_image(kb_id), nodes, edges)
 
     data = {"nodes": list(nodes.values()), "edges": list(edges.values())}
     saved = _save(kb_id, data)

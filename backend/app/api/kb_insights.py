@@ -93,35 +93,55 @@ async def list_kb_documents(
 # 思维导图
 # ============================================
 @router.get("/{kb_id}/mindmap")
-async def get_kb_mindmap(kb_id: str, current_user: dict = Depends(get_current_user)):
+async def get_kb_mindmap(
+    kb_id: str,
+    doc_path: str = Query(""),
+    current_user: dict = Depends(get_current_user),
+):
     _check_kb(kb_id, current_user)
-    payload = kb_mindmap.get_mindmap(kb_id)
-    return {"success": True, **payload, "job": kb_mindmap.job_status(kb_id)}
+    payload = kb_mindmap.get_mindmap(kb_id, doc_path)
+    return {"success": True, **payload, "job": kb_mindmap.job_status(kb_id, doc_path)}
 
 
 @router.post("/{kb_id}/mindmap/rebuild")
-async def rebuild_kb_mindmap(kb_id: str, current_user: dict = Depends(get_current_user)):
+async def rebuild_kb_mindmap(
+    kb_id: str,
+    doc_path: str = Query(""),
+    current_user: dict = Depends(get_current_user),
+):
     kb = _check_kb(kb_id, current_user)
-    if not kb_mindmap.start_rebuild_background(kb_id, kb["name"], kb["topic"]):
+    if not kb_mindmap.start_rebuild_background(kb_id, kb["name"], kb["topic"], doc_path):
         raise HTTPException(status_code=409, detail="思维导图正在后台生成中，请稍后刷新查看")
-    logger.info("[KB_MINDMAP] 用户发起后台生成 kb=%s user=%s", kb_id, _user_id(current_user))
+    logger.info("[KB_MINDMAP] 用户发起后台生成 kb=%s doc=%s user=%s", kb_id, doc_path or "(整库)", _user_id(current_user))
     return {"success": True, "started": True, "status": "running",
-            "job": kb_mindmap.job_status(kb_id)}
+            "job": kb_mindmap.job_status(kb_id, doc_path)}
 
 
 # ============================================
 # 知识图谱
 # ============================================
 @router.get("/{kb_id}/graph")
-async def get_kb_graph(kb_id: str, current_user: dict = Depends(get_current_user)):
+async def get_kb_graph(
+    kb_id: str,
+    doc_path: str = Query(""),
+    current_user: dict = Depends(get_current_user),
+):
     _check_kb(kb_id, current_user)
-    return {"success": True, "graph": knowledge_graph.get_graph(kb_id),
-            "job": knowledge_graph.job_status(kb_id)}
+    return {"success": True, "graph": knowledge_graph.get_graph(kb_id, doc_path),
+            "job": None if doc_path else knowledge_graph.job_status(kb_id)}
 
 
 @router.post("/{kb_id}/graph/rebuild")
-async def rebuild_kb_graph(kb_id: str, current_user: dict = Depends(get_current_user)):
+async def rebuild_kb_graph(
+    kb_id: str,
+    doc_path: str = Query(""),
+    current_user: dict = Depends(get_current_user),
+):
     _check_kb(kb_id, current_user)
+    if doc_path:
+        # 单篇文档子图实时聚合，无需后台重建，直接返回结果
+        return {"success": True, "started": False,
+                "graph": knowledge_graph.doc_graph(kb_id, doc_path), "job": None}
     if not knowledge_graph.start_rebuild_background(kb_id):
         raise HTTPException(status_code=409, detail="图谱索引正在后台重建中，请稍后刷新查看")
     logger.info("[KB_GRAPH] 用户发起后台重建 kb=%s user=%s", kb_id, _user_id(current_user))

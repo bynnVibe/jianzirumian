@@ -85,6 +85,8 @@ class Settings:
     )
     CHUNK_SIZE: int = int(os.getenv("CHUNK_SIZE", "500"))
     CHUNK_OVERLAP: int = int(os.getenv("CHUNK_OVERLAP", "50"))
+    # Markdown 章节整块上限：章节（含子小节）不超过该值时保持一个整块，保留模块完整性
+    MARKDOWN_SECTION_MAX_CHARS: int = int(os.getenv("MARKDOWN_SECTION_MAX_CHARS", "1000"))
     TOP_K_RETRIEVAL: int = int(os.getenv("TOP_K_RETRIEVAL", "3"))
 
     # ---- Reranker ----
@@ -151,9 +153,12 @@ class Settings:
     MEMORY_CTX_CHARS: int = int(os.getenv("MEMORY_CTX_CHARS", "600"))
     # 压缩触发：历史 token 估算超过该值即触发（优先于条数/字符阈值）。
     CONTEXT_COMPACT_TRIGGER_TOKENS: int = int(os.getenv("CONTEXT_COMPACT_TRIGGER_TOKENS", "6000"))
-    # 微压缩分级 clip：中间档逐条字符上限 / 更旧档深度压缩字符上限。
+    # 微压缩冻结 clip：较早消息逐条字符上限（两档位置无关设计，历史前缀 append-only 稳定）。
     CLIP_MID_CHARS: int = int(os.getenv("CLIP_MID_CHARS", "800"))
+    # 已退役：原三档 clip 的更旧档深度压缩上限（保留配置项仅为兼容旧 .env，不再使用）。
     CLIP_OLD_CHARS: int = int(os.getenv("CLIP_OLD_CHARS", "200"))
+    # 摘要批更新门控：距上次摘要覆盖点新增可摘要消息（不含最近保留区）≥ 该值才重算（前缀缓存友好）。
+    SUMMARY_BATCH_MIN_MESSAGES: int = int(os.getenv("SUMMARY_BATCH_MIN_MESSAGES", "6"))
     # 结构化摘要正文字符上限（五节 checklist 契约）。
     SUMMARY_MAX_CHARS: int = int(os.getenv("SUMMARY_MAX_CHARS", "400"))
     # ---- 用户 Skill 配置（可管理的技能：chat 提示注入 / url_import 站点抓取策略）----

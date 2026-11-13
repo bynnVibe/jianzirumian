@@ -533,13 +533,14 @@ function getImageUrl(imagePath) {
  * 附件点击预览（新页面打开）：
  *  - image → /attachment-preview 图片预览页
  *  - word  → 复用 /doc-preview（mammoth 渲染，url 参数指向附件分发接口）
+ *  - markdown → 复用 /doc-preview（原文在线渲染，url 参数指向附件分发接口）
  *  - pdf   → 浏览器内置 PDF 阅读器
  */
 function attachmentPreviewUrl(att) {
   if (!att.file_id) return '#'
   const fileUrl = getAttachmentFileUrl(att.file_id)
   const name = encodeURIComponent(att.name || att.filename || '')
-  if (att.kind === 'word') {
+  if (att.kind === 'word' || att.kind === 'markdown') {
     return `/doc-preview?file=${name}&url=${encodeURIComponent(fileUrl)}`
   }
   if (att.kind === 'pdf') return fileUrl

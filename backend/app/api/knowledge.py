@@ -402,7 +402,7 @@ async def upload_document(
     title: str = Form(""),
     current_user: dict = Depends(get_current_user),
 ):
-    """上传 Word/PDF 文档，提取文本后向量化存储（可指定目标知识库）"""
+    """上传 Word/PDF/Markdown 文档，提取文本后向量化存储（可指定目标知识库）"""
     if doc_type not in DOC_TYPE_EXTENSIONS:
         raise HTTPException(status_code=400, detail=f"不支持的文档类型: {doc_type}")
 
@@ -489,7 +489,7 @@ _IMAGE_EXTS = ALLOWED_TYPES
 
 
 def _detect_source_type(filename: str) -> str:
-    """按扩展名自动识别文件类型：image / word / pdf"""
+    """按扩展名自动识别文件类型：image / word / pdf / markdown"""
     ext = Path(filename).suffix.lower()
     if ext in _IMAGE_EXTS:
         return "image"
@@ -497,9 +497,11 @@ def _detect_source_type(filename: str) -> str:
         return "word"
     if ext in DOC_TYPE_EXTENSIONS["pdf"]:
         return "pdf"
+    if ext in DOC_TYPE_EXTENSIONS["markdown"]:
+        return "markdown"
     raise HTTPException(
         status_code=400,
-        detail=f"不支持的文件类型: {ext}，支持图片({', '.join(sorted(_IMAGE_EXTS))})、.docx、.pdf",
+        detail=f"不支持的文件类型: {ext}，支持图片({', '.join(sorted(_IMAGE_EXTS))})、.docx、.pdf、.md/.markdown",
     )
 
 
@@ -550,7 +552,7 @@ async def pending_upload_file(
     ocr_provider: str = Form(""),
     current_user: dict = Depends(get_current_user),
 ):
-    """统一文件上传（图片/Word/PDF 同一入口）：仅落盘登记，
+    """统一文件上传（图片/Word/PDF/Markdown 同一入口）：仅落盘登记，
     后台多线程自动解析（图片 OCR / 文档解析），不入库"""
     source_type = _detect_source_type(file.filename)
     owner_id = current_user.get("id") or current_user.get("username") or ""
@@ -649,14 +651,15 @@ async def ingest_pending_file(
     body: PendingIngestRequest,
     current_user: dict = Depends(get_current_user),
 ):
-    """确认入库：向量化写入知识库 + 上传记录 + 后台编译 llm-wiki 卡片。
-    与旧上传链路的原始文档/处理后文本对应逻辑完全一致"""
+    """确认入库：提交后台任务立即返回（向量化重活不阻塞请求线程）。
+    同步仅做轻量预检（重复指纹 409 / 空内容 400）；进度经待入库列表
+    status=ingesting 轮询可见，成功后台移除行、失败标记 error+phase=ingest 可重试。"""
     item = upload_pipeline.get(item_id)
     if not item:
         raise HTTPException(status_code=404, detail="文件不存在或已入库")
     _check_pending_owner(item, current_user)
     try:
-        result = await upload_pipeline.ingest(
+        result = upload_pipeline.schedule_ingest(
             item_id,
             kb_id=body.kb_id,
             title=body.title,
@@ -669,9 +672,10 @@ async def ingest_pending_file(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        logger.warning("知识入库失败 [%s]: %s", item.get("filename"), e)
-        raise HTTPException(status_code=500, detail=f"入库失败: {str(e)}")
-    return {"success": True, **result}
+        logger.warning("知识入库提交失败 [%s]: %s", item.get("filename"), e)
+        raise HTTPException(status_code=500, detail=f"入库提交失败: {str(e)}")
+    return {"success": True, **result,
+            "message": "已提交后台入库，可关闭弹窗，在待入库列表查看进度"}
 
 
 @router.delete("/pending/{item_id}")
@@ -699,7 +703,7 @@ async def preview_document(
     doc_type: str = Form(...),
     current_user: dict = Depends(get_current_user),
 ):
-    """上传 Word/PDF 文档，按页解析返回内容，不入库。"""
+    """上传 Word/PDF/Markdown 文档，按页/章节解析返回内容，不入库。"""
     if doc_type not in DOC_TYPE_EXTENSIONS:
         raise HTTPException(status_code=400, detail=f"不支持的文档类型: {doc_type}")
 

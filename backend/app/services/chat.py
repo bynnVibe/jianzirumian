@@ -462,7 +462,9 @@ class ChatService:
                 )
                 yield f"data: {self._json_event('status', {'phase': 'ocr_retrieval', 'message': f'已识别图片文字（{len(ocr_excerpt)} 字），将结合图中内容检索作答', 'ocr_chars': len(ocr_excerpt)})}\n\n"
 
-        # 3. 构建 LLM 消息列表：系统 prompt + 用户跨会话记忆 + 历史消息（摘要压缩后）+ 工具结果
+        # 3. 构建 LLM 消息列表（前缀缓存分区装配）：
+        #    静态头 → U 区画像/Skill（半静态）→ C 区摘要+冻结历史 → D 区工具上下文/相关记忆 → 用户提问。
+        #    每轮变化的内容（相关记忆/OCR/知识上下文）一律置尾，避免污染头部前缀。
         # 统一走网关 chat_answer 业务路由（规则+模型由网关解析；llm_provider 参数已废弃）
         # model 为聊天页用户显式选择的模型（空=按业务路由/规则内均衡解析）
         llm = LLMFactory.create_for_role("chat_answer", user_id, rule_id, model or None)
@@ -495,10 +497,8 @@ class ChatService:
             sections.append(f"相关记忆:\n{relevant_text}")
         if sections:
             memory_text = "\n".join(sections)
-            llm_messages.append({
-                "role": "system",
-                "content": f"【关于该用户的长期记忆，供参考，不要逐字复述】\n{memory_text}",
-            })
+        # U 区：画像卡紧跟静态头（同用户跨会话稳定）；相关记忆属 D 区，延后到历史之后注入
+        llm_messages.extend(chat_agent._profile_messages(profile_text))
 
         # 已启用的用户 Skill（prompt 类）注入：用户可在侧边栏「Skill 配置」定制并开关
         skills_text = skill_service.build_prompt_text(user_id)
@@ -529,6 +529,9 @@ class ChatService:
             llm_messages.append({"role": "system", "content": tool_context_text})
             obs.note_segment("tool", tool_context_text)
 
+        # D 区：相关记忆每轮随 query 变化，置于历史/工具上下文之后、提问之前
+        llm_messages.extend(chat_agent._relevant_messages(relevant_text))
+
         # 3.5 复杂度分流：simple→fast（下方现有流水线不变），moderate→ReAct，complex→Plan&Execute。
         # 带附件工具结果时强制 fast（附件为专用流程，Agent 不处理工具上下文）。
         if not tool_context_text:
@@ -546,7 +549,8 @@ class ChatService:
                         model=model, session_id=session.session_id,
                         use_knowledge=use_knowledge, use_search=use_search,
                         skip_search_prompt=skip_search_prompt, history_ctx=history_ctx,
-                        memory_text=memory_text, system_prompt=self._build_system_prompt(),
+                        memory_profile=profile_text, memory_relevant=relevant_text,
+                        system_prompt=self._build_system_prompt(),
                         result=agent_result,
                     ):
                         yield ev

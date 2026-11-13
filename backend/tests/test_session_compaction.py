@@ -1,8 +1,8 @@
 """会话压缩升级回归测试（内存 DB，不出网）。
 
-覆盖 C1/C2/C3/C5 四项改造：
+覆盖 C1/C2/C3/C5 四项改造（含前缀缓存整改阶段一）：
   C1  token headroom 触发与小会话豁免（maybe_summarize 阈值判定）；
-  C2  微压缩三档 clip（全文区/中间档/深度压缩区边界与尾注）；
+  C2  微压缩两档冻结 clip（全文区/截断区边界、位置无关性）与摘要批更新门控；
   C3  结构化摘要契约（五节 checklist prompt、focus 侧重点、SUMMARY_MAX_CHARS）
       与 continuation 再水化包装、token_estimate 真实估算值；
   C5  压缩统计返回（force 强制触发时 covered_messages/before_chars/after_chars）。
@@ -99,33 +99,45 @@ def test_fallback_char_threshold_still_works(mem_db, monkeypatch):
 
 
 # ============================================
-# C2 微压缩三档 clip
+# C2 微压缩两档冻结 clip（前缀缓存友好）
 # ============================================
 
-def test_clip_three_tiers(mem_db, monkeypatch):
-    """三档边界：最近 keep_full 全文；中间档 mid 截断；更旧档 old 深度压缩+尾注。"""
+def test_clip_two_tiers_frozen(mem_db, monkeypatch):
+    """两档冻结：最近 keep_full 全文；其余统一 mid 截断 + 原长尾注（无深度压缩档）。"""
     monkeypatch.setattr(ss.settings, "KEEP_RECENT_FULL", 2)
     monkeypatch.setattr(ss.settings, "CLIP_MID_CHARS", 30)
-    monkeypatch.setattr(ss.settings, "CLIP_OLD_CHARS", 10)
     long_text = "字" * 100
     msgs = [{"role": "user", "content": long_text} for _ in range(6)]
     clipped = ss._clip_history(msgs)
     # 全文区：最近 2 条不截断
     assert clipped[4]["content"] == long_text and clipped[5]["content"] == long_text
-    # 中间档：index 2..3（n-2*keep_full=2 起为中间档），截断至 30 字 + 原长尾注
-    assert clipped[2]["content"].startswith("字" * 30)
-    assert "原长 100 字符" in clipped[2]["content"]
-    # 深度压缩区：index 0..1，截断至 10 字 + 深度压缩尾注
-    assert clipped[0]["content"].startswith("字" * 10)
-    assert ss._OLD_CLIP_NOTE in clipped[0]["content"]
-    assert clipped[1]["content"].startswith("字" * 10)
+    # 截断区：index 0..3 统一截断至 30 字 + 原长尾注（不再按位置分深浅档）
+    expected = "字" * 30 + "\n…（较早消息已截断，原长 100 字符）"
+    for i in range(4):
+        assert clipped[i]["content"] == expected
+
+
+def test_clip_position_independent(mem_db, monkeypatch):
+    """位置无关：窗口追加新消息后，已冻结消息的渲染逐字节不变（前缀 append-only）。"""
+    monkeypatch.setattr(ss.settings, "KEEP_RECENT_FULL", 2)
+    monkeypatch.setattr(ss.settings, "CLIP_MID_CHARS", 30)
+    long_text = "字" * 100
+    base = [{"role": "user", "content": long_text} for _ in range(6)]
+    clipped1 = ss._clip_history(base)
+    extended = base + [{"role": "user", "content": "新问"},
+                       {"role": "assistant", "content": "新答"}]
+    clipped2 = ss._clip_history(extended)
+    # 冻结区（全文区之外）渲染不变；原全文区 index 4..5 退出全文区时一次性截断迁移
+    for i in range(4):
+        assert clipped1[i] == clipped2[i]
+    assert clipped2[4]["content"].startswith("字" * 30)
+    assert clipped2[6]["content"] == "新问" and clipped2[7]["content"] == "新答"
 
 
 def test_clip_system_and_short_messages_untouched(mem_db, monkeypatch):
     """system 消息与不足上限的短消息不截断。"""
     monkeypatch.setattr(ss.settings, "KEEP_RECENT_FULL", 2)
     monkeypatch.setattr(ss.settings, "CLIP_MID_CHARS", 30)
-    monkeypatch.setattr(ss.settings, "CLIP_OLD_CHARS", 10)
     msgs = [
         {"role": "system", "content": "摘" * 100},
         {"role": "user", "content": "短消息"},
@@ -226,6 +238,68 @@ def test_llm_failure_degrades_silently(mem_db, monkeypatch):
     session = _make_session(10, content_len=40)
     assert asyncio.run(ss.maybe_summarize(session)) is None
     assert ss.get_summary("s1") is None
+
+
+# ============================================
+# 前缀缓存整改阶段一：摘要批更新门控 + 无摘要冻结窗口
+# ============================================
+
+def _append_messages(session, n):
+    """追加 n 条新消息（message_id 接续，避免与存量 id 冲突）。"""
+    start = len(session.messages)
+    for i in range(start, start + n):
+        session.messages.append(SimpleNamespace(
+            message_id=f"m{i}", role="user" if i % 2 == 0 else "assistant",
+            content=f"消息{i}：" + "养" * 36,
+        ))
+
+
+def test_summary_batch_gate_skips_small_delta(mem_db, monkeypatch):
+    """首次摘要后新增可摘要消息不足 N 条 → 不重算（摘要前缀稳定）。"""
+    _patch_llm(monkeypatch)
+    monkeypatch.setattr(ss, "CONTEXT_COMPACT_TRIGGER_TOKENS", 10)
+    session = _make_session(10, content_len=40)
+    assert asyncio.run(ss.maybe_summarize(session)) is not None
+    first = ss.get_summary("s1")
+    # 覆盖点 m3；+2 条 → 新增可摘要 2 条 < 6 → 门控拦截
+    _append_messages(session, 2)
+    assert asyncio.run(ss.maybe_summarize(session)) is None
+    assert ss.get_summary("s1")["updated_at"] == first["updated_at"]
+    # 再 +4 条 → 新增可摘要 6 条 ≥ 6 → 重算，覆盖点推进到 m9
+    _append_messages(session, 4)
+    stats = asyncio.run(ss.maybe_summarize(session))
+    assert stats and stats["covered_messages"] == 10
+    assert ss.get_summary("s1")["covered_until_message_id"] == "m9"
+
+
+def test_summary_batch_gate_force_bypass(mem_db, monkeypatch):
+    """force=True（手动 compact）绕过批门控，零新增也重算。"""
+    _patch_llm(monkeypatch)
+    monkeypatch.setattr(ss, "CONTEXT_COMPACT_TRIGGER_TOKENS", 10)
+    session = _make_session(10, content_len=40)
+    assert asyncio.run(ss.maybe_summarize(session)) is not None
+    assert asyncio.run(ss.maybe_summarize(session, force=True)) is not None
+
+
+def test_no_summary_full_freeze_window(mem_db, monkeypatch):
+    """无摘要时取全量冻结窗口：不再按 max_recent 滑动截断，未达上限前前缀 append-only。"""
+    session = _make_session(10, content_len=40)
+    ctx1 = ss.build_context_messages(session, max_recent=3)
+    assert len(ctx1) == 10
+    _append_messages(session, 2)
+    ctx2 = ss.build_context_messages(session, max_recent=3)
+    assert len(ctx2) == 12
+    keep_full = int(ss.settings.KEEP_RECENT_FULL)
+    for i in range(len(ctx1) - keep_full):
+        assert ctx1[i] == ctx2[i]
+
+
+def test_no_summary_window_cap(mem_db, monkeypatch):
+    """超过冻结窗口上限时取最近 cap 条（固定容量，控制 Token）。"""
+    session = _make_session(ss.FREEZE_MAX_MESSAGES + 4, content_len=20)
+    ctx = ss.build_context_messages(session, max_recent=3)
+    assert len(ctx) == ss.FREEZE_MAX_MESSAGES
+    assert ctx[0]["content"].startswith("消息4")
 
 
 # ============================================

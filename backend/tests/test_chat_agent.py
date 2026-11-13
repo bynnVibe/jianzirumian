@@ -65,7 +65,8 @@ def _base(**overrides):
     kwargs = dict(
         mode="react", query="黄芪的功效", user_id="u1", rule_id="",
         use_knowledge=True, use_search=False, skip_search_prompt=False,
-        history_ctx=[], memory_text="", system_prompt=[{"role": "system", "content": "sys"}],
+        history_ctx=[], memory_profile="", memory_relevant="",
+        system_prompt=[{"role": "system", "content": "sys"}],
     )
     kwargs.update(overrides)
     return kwargs

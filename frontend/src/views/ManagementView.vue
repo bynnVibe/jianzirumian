@@ -910,6 +910,16 @@
             </svg>
             <span class="doc-type-label">网页</span>
           </div>
+          <div v-else-if="entry.source_type === 'markdown'" class="entry-thumb entry-thumb-doc" @click.stop="openPreview(entry)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="32" height="32">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+              <polyline points="14 2 14 8 20 8"/>
+              <line x1="16" y1="13" x2="8" y2="13"/>
+              <line x1="16" y1="17" x2="8" y2="17"/>
+              <polyline points="10 9 9 9 8 9"/>
+            </svg>
+            <span class="doc-type-label">Markdown</span>
+          </div>
           <div v-else-if="entry.source_image" class="entry-thumb" @click.stop="openPreview(entry)">
             <img :src="getImageUrl(entry.source_image)" alt="" @error="onThumbError" />
           </div>
@@ -1125,6 +1135,15 @@
             </h4>
             <div class="preview-text-content">{{ previewFullText }}</div>
           </div>
+          <!-- Markdown 类型：原文在线渲染预览 + 下载原文 -->
+          <div class="preview-text-section" v-if="previewSourceType === 'markdown'">
+            <h4 class="preview-text-title">Markdown 在线预览
+              <a v-if="previewItem && previewItem.source_image" :href="getDocFileUrl(previewItem.source_image)" :download="previewFilename" class="chunk-link">下载原文 ↓</a>
+            </h4>
+            <div v-if="previewMdLoading" class="preview-doc-loading"><span>正在加载 Markdown 文档...</span></div>
+            <div v-else-if="previewMdError" class="preview-word-error">{{ previewMdError }}</div>
+            <MarkdownContent v-else :content="previewMdText" />
+          </div>
         </div>
       </div>
     </div>
@@ -1191,6 +1210,7 @@ import { ref, reactive, computed, onMounted, onUnmounted, nextTick, watch } from
 import { useRoute, onBeforeRouteLeave } from 'vue-router'
 import MarkdownIt from 'markdown-it'
 import UrlSource from '@/components/UrlSource.vue'
+import MarkdownContent from '@/components/MarkdownContent.vue'
 import { safeArticleUrl } from '@/utils/urlArticles'
 import { useAuthStore } from '@/stores/auth'
 import { useAssistantStore } from '@/stores/assistant'
@@ -2397,6 +2417,9 @@ const previewPdfUrl = ref('')
 const previewSourceType = ref('image')
 const previewSourceUrl = ref('')
 const previewDocPages = ref([])  // Word/PDF 分页内容
+const previewMdText = ref('')  // Markdown 原文（在线渲染预览）
+const previewMdLoading = ref(false)
+const previewMdError = ref('')
 const wordHtmlLoading = ref(false)
 const wordHtmlError = ref('')
 
@@ -2506,7 +2529,19 @@ function openPreview(entry) {
     previewImageUrl.value = ''
   } else {
     previewPdfUrl.value = ''
-    previewImageUrl.value = (isDocument || entry.source_type === 'url') ? '' : getImageUrl(entry.source_image)
+    previewImageUrl.value = (isDocument || entry.source_type === 'url' || entry.source_type === 'markdown') ? '' : getImageUrl(entry.source_image)
+  }
+
+  // Markdown：拉取原文在线渲染（不再把 .md 当图片展示）
+  previewMdText.value = ''
+  previewMdError.value = ''
+  previewMdLoading.value = entry.source_type === 'markdown'
+  if (entry.source_type === 'markdown') {
+    fetch(getDocFileUrl(entry.source_image))
+      .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.text() })
+      .then((t) => { previewMdText.value = t })
+      .catch((e) => { previewMdError.value = e.message || '加载失败' })
+      .finally(() => { previewMdLoading.value = false })
   }
   showPreview.value = true
   // 同步到知识助手：注入用户正在阅读的文档标题与正文，供其结合上下文分析

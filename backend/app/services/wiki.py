@@ -772,6 +772,7 @@ class WikiService:
         kb_id: str = "",
         page_type: str = "",
         limit: int = 100,
+        doc_path: str = "",
     ) -> List[dict]:
         sql = "SELECT * FROM wiki_pages WHERE 1=1"
         params: list = []
@@ -785,6 +786,10 @@ class WikiService:
         params.append(limit)
         rows = db.query(sql, tuple(params))
         pages = [_row_to_page(r) for r in rows]
+        # 单篇文档范围：仅保留归属该文档的百科页（source_image 直命中或 source_refs 包含）
+        if doc_path:
+            pages = [p for p in pages
+                     if p["source_image"] == doc_path or doc_path in p["source_refs"]]
         # 权限：公共所有人可见，私人仅属主与管理员可见
         return [
             p for p in pages
