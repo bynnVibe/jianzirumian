@@ -204,6 +204,16 @@ def stats(days: int = 7) -> dict:
         " COALESCE(SUM(risk_level!='none'),0) AS risky"
         " FROM gateway_logs WHERE created_at >= ? AND key_name!=''"
         " GROUP BY key_name ORDER BY total DESC LIMIT 10", (since,))]
+    # Token 分析：按密钥的完整用量口径（prompt/completion/总量/请求数/风险数 + 密钥类型）
+    by_key = [dict(r) for r in db.query(
+        "SELECT l.key_id, l.key_name AS name, COALESCE(k.key_type, '') AS key_type,"
+        " COUNT(*) AS total, COALESCE(SUM(l.prompt_tokens),0) AS prompt_tokens,"
+        " COALESCE(SUM(l.completion_tokens),0) AS completion_tokens,"
+        " COALESCE(SUM(l.total_tokens),0) AS tokens,"
+        " COALESCE(SUM(l.risk_level!='none'),0) AS risky"
+        " FROM gateway_logs l LEFT JOIN gateway_keys k ON k.id = l.key_id"
+        " WHERE l.created_at >= ? AND l.key_name!=''"
+        " GROUP BY l.key_id, l.key_name ORDER BY tokens DESC LIMIT 20", (since,))]
     return {
         "days": days,
         "overview": {
@@ -220,7 +230,7 @@ def stats(days: int = 7) -> dict:
             "success_rate": round(int(overview.get("ok", 0)) / total, 4) if total else 0.0,
         },
         "daily": daily, "by_channel": by_channel, "by_model": by_model,
-        "by_risk": by_risk, "top_keys": top_keys,
+        "by_risk": by_risk, "top_keys": top_keys, "by_key": by_key,
     }
 
 

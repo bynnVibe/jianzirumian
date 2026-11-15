@@ -96,6 +96,8 @@
       />
       <ObsLogs v-else-if="opsTab === 'logs'" @open-trace="openTrace" />
       <template v-else-if="opsTab === 'metrics'">
+      <!-- 实时告警分析：质量/性能越限自动归因 + 原因分析 + 优化建议（全局铃铛深链 focus=alerts 定位到此） -->
+      <ObsAlerts />
       <div class="aspect-title">性能指标（请求 / 延迟 / Token / 黄金信号）</div>
       <!-- ============ 指标总览 ============ -->
       <section class="cards" v-if="metrics">
@@ -192,6 +194,10 @@
           <span class="metric-num" :class="{ warn: monitor.quality.skill_reviews.high }">{{ monitor.quality.skill_reviews.high }}</span>
           <span class="metric-label">Skill 预审高危</span>
         </div>
+        <div class="metric-card drillable" title="在线采样评测（DeepEval 风格），点击前往评测概览·在线评测" @click="router.push({ name: 'EvalOverview', query: { tab: 'online' } })">
+          <span class="metric-num" :class="{ warn: monitor.quality.online_eval?.low_count }">{{ onlineEvalText }}</span>
+          <span class="metric-label">在线评测均分（{{ monitor.quality.online_eval?.samples || 0 }} 样本 · 低分 {{ monitor.quality.online_eval?.low_count || 0 }}）</span>
+        </div>
       </section>
       <!-- ============ 能力缺口沉淀建议（需求6：系统可进化性） ============ -->
       <section class="panel" v-if="sediment && sediment.suggestions && sediment.suggestions.length">
@@ -267,6 +273,10 @@
           <span class="metric-num" :class="{ warn: monitor.security.pending }">{{ monitor.security.pending }}</span>
           <span class="metric-label">待处置</span>
         </div>
+        <div class="metric-card drillable" title="未确认安全告警（全局弹窗同源），点击前往网关安全审计中心处置" @click="router.push({ name: 'Gateway', query: { tab: 'security' } })">
+          <span class="metric-num" :class="{ warn: monitor.security.unacked_alerts }">{{ monitor.security.unacked_alerts || 0 }}</span>
+          <span class="metric-label">待处置告警（去网关处理 →）</span>
+        </div>
         <div class="metric-card drillable" title="高危/极高事件，点击查看明细" @click="openDrill('sec_events', '高危/极高事件')">
           <span class="metric-num" :class="{ warn: monitor.security.high + monitor.security.critical }">{{ monitor.security.high + monitor.security.critical }}</span>
           <span class="metric-label">高危/极高事件</span>
@@ -276,7 +286,7 @@
           <span class="metric-label">工具约束拦截</span>
         </div>
       </section>
-      <div class="aspect-title">业务指标（资产存量 / 活跃用户 / 上下文与 Token 用量 / 记忆）</div>
+      <div class="aspect-title">业务指标（资产存量 / 活跃用户 / 语义缓存 / 记忆）</div>
       <section class="cards" v-if="monitor">
         <div class="metric-card drillable" title="会话总数，点击查看明细" @click="openDrill('sessions', '会话总数')"><span class="metric-num">{{ monitor.business.counts.sessions || 0 }}</span><span class="metric-label">会话总数</span></div>
         <div class="metric-card drillable" title="消息总数，点击查看明细" @click="openDrill('messages', '消息总数')"><span class="metric-num">{{ monitor.business.counts.messages || 0 }}</span><span class="metric-label">消息总数</span></div>
@@ -286,6 +296,9 @@
         <div class="metric-card drillable" title="百科页面，点击查看明细" @click="openDrill('wiki', '百科页面')"><span class="metric-num">{{ monitor.business.counts.wiki_pages || 0 }}</span><span class="metric-label">百科页面</span></div>
         <div class="metric-card drillable" title="记忆条数，点击查看明细" @click="openDrill('memories', '记忆条数')"><span class="metric-num">{{ monitor.business.counts.memories || 0 }}</span><span class="metric-label">记忆条数</span></div>
       </section>
+
+      <!-- ============ 语义缓存监控（命中率 / 节省 / 空间 / 语义详情） ============ -->
+      <ObsCachePanel :days="days" />
 
       <!-- ============ 每日趋势 ============ -->
       <section class="panel" v-if="metrics">
@@ -314,102 +327,12 @@
         <p v-else class="empty-hint">暂无数据</p>
       </section>
 
-      <!-- ============ Token 用量分析 ============ -->
-      <section class="panel" v-if="metrics">
-        <div class="panel-head">
-          <span class="panel-title">Token 用量分析</span>
-          <span v-if="metrics.overview.token_overuse" class="token-warn-badge">用量偏高</span>
-        </div>
-
-        <!-- 历史基线对比：回答“使用量是否下降/优化” -->
-        <div class="token-compare">
-          <div class="compare-item">
-            <span class="compare-num">{{ formatNum(metrics.token_comparison.current_avg) }}</span>
-            <span class="compare-label">近期平均 Token/请求</span>
-          </div>
-          <div class="compare-arrow" :class="metrics.token_comparison.trend">
-            <template v-if="metrics.token_comparison.delta_pct != null">
-              <span class="delta">{{ metrics.token_comparison.trend === 'down' ? '▼' : (metrics.token_comparison.trend === 'up' ? '▲' : '—') }} {{ Math.abs(metrics.token_comparison.delta_pct) }}%</span>
-              <span class="compare-hint">近期 vs 前期（本周期内）</span>
-            </template>
-            <span v-else class="compare-hint">数据不足（需≥2次）</span>
-          </div>
-          <div class="compare-item">
-            <span class="compare-num">{{ formatNum(metrics.token_comparison.previous_avg) }}</span>
-            <span class="compare-label">前期平均 Token/请求</span>
-          </div>
-        </div>
-        <p class="token-note down" v-if="metrics.token_comparison.trend === 'down'">✓ 平均用量较前期下降 {{ Math.abs(metrics.token_comparison.delta_pct) }}%，优化见效。</p>
-        <p class="token-note up" v-else-if="metrics.token_comparison.trend === 'up'">↑ 平均用量较前期上升 {{ metrics.token_comparison.delta_pct }}%，建议关注下方各段构成定位增量来源。</p>
-        <p class="token-note warn" v-if="metrics.overview.token_overuse">⚠ 单请求平均 Token（{{ formatNum(metrics.overview.avg_tokens_per_request) }}）已超过告警阈值 {{ formatNum(metrics.overview.token_warn_threshold) }}，可收紧历史窗口（SESSION_MAX_HISTORY）或附件上下文预算。</p>
-
-        <!-- segment 级构成（需求3：全站累计 × 本人累计 合并为同一模块，按对话下钻见下方统一会话视图） -->
-        <div class="segment-title">上下文构成 · 按语义段（全站累计 × 本人累计 合并视图）</div>
-        <table v-if="mergedSegments.length" class="obs-table">
-          <thead>
-            <tr><th>上下文段</th><th>全站累计 Token</th><th>全站占比</th><th>本人累计</th><th>本人平均/次</th><th>本人峰值</th><th>较前期</th></tr>
-          </thead>
-          <tbody>
-            <template v-for="seg in mergedSegments" :key="seg.segment">
-              <tr class="seg-merge-row" @click="toggleSegment(seg.segment)">
-                <td>
-                  <span class="seg-caret" :class="{ open: expandedSegments.has(seg.segment) }">▸</span>
-                  {{ seg.label }}
-                </td>
-                <td>{{ seg.global_tokens != null ? formatNum(seg.global_tokens) : '-' }}</td>
-                <td class="share-cell">
-                  <div v-if="seg.global_share != null" class="share-bar"><span :style="{ width: (seg.global_share * 100).toFixed(1) + '%' }"></span></div>
-                  {{ seg.global_share != null ? (seg.global_share * 100).toFixed(1) + '%' : '-' }}
-                </td>
-                <td>{{ seg.my_tokens != null ? formatNum(seg.my_tokens) : '-' }}</td>
-                <td>{{ seg.my_avg != null ? formatNum(seg.my_avg) : '-' }}</td>
-                <td>{{ seg.my_peak != null ? formatNum(seg.my_peak) : '-' }}</td>
-                <td>
-                  <span v-if="seg.delta_pct != null" class="seg-delta" :class="seg.trend"
-                    :title="`本人近期 ${seg.recent_avg} vs 前期 ${seg.prev_avg}`">{{ seg.trend === 'down' ? '▼' : (seg.trend === 'up' ? '▲' : '—') }}{{ Math.abs(seg.delta_pct) }}%</span>
-                  <span v-else class="seg-delta flat">—</span>
-                </td>
-              </tr>
-              <!-- 需求4：详情展开在被点击行的正下方（而非表格底部） -->
-              <tr v-if="expandedSegments.has(seg.segment)" class="seg-drill-row">
-                <td colspan="7">
-                  <div class="segment-items">
-                    <p class="seg-drill-title">「{{ seg.label }}」最近 {{ (seg.items || []).length }} 次会话（点击行查看该请求全链路追踪）</p>
-                    <div
-                      v-for="it in seg.items || []"
-                      :key="seg.segment + it.trace_id"
-                      class="segment-item"
-                      :title="`点击查看该请求全链路追踪：${it.input}`"
-                      @click="openTrace(it.trace_id)"
-                    >
-                      <span class="seg-item-time">{{ formatTime(it.started_at) }}</span>
-                      <span class="seg-item-user">{{ it.username }}</span>
-                      <span class="seg-item-input">{{ it.input || '-' }}</span>
-                      <span class="seg-item-tok">{{ formatNum(it.tokens) }} tok</span>
-                    </div>
-                    <p v-if="!(seg.items || []).length" class="empty-hint">该段暂无会话明细</p>
-                  </div>
-                </td>
-              </tr>
-            </template>
-          </tbody>
-        </table>
-        <p v-else class="empty-hint">暂无 segment 度量数据（发起一次带知识检索的对话后即可看到）</p>
-
-        <!-- 每日平均 token 趋势 -->
-        <div class="segment-title">每日平均 Token/请求趋势</div>
-        <div class="trend-chart" v-if="metrics.daily.length">
-          <div v-for="row in metrics.daily" :key="'tk-' + row.day" class="trend-col"
-            @mouseenter="showTip($event, tokenDayTipLines(row))"
-            @mousemove="moveTip"
-            @mouseleave="hideTip">
-            <div class="trend-bar-wrap">
-              <div class="trend-bar token-bar" :style="{ height: tokenBarHeight(row.avg_tokens) + '%' }"></div>
-            </div>
-            <span class="trend-label">{{ row.day.slice(5) }}</span>
-          </div>
-        </div>
-      </section>
+      <!-- ============ Token 用量分析已迁移至模型网关（与按密钥用量统计合并） ============ -->
+      <p class="token-moved">
+        Token 用量分析已移至
+        <router-link class="token-moved-link" :to="{ name: 'Gateway', query: { tab: 'tokens' } }">模型网关 → Token 分析</router-link>
+        （网关密钥用量 / 配额水位 × Agent 上下文段构成 合并呈现）
+      </p>
 
       <!-- ============ 按 Agent / 按工具 ============ -->
       <section class="two-col" v-if="metrics">
@@ -921,7 +844,7 @@
             <span>已加载 {{ traceLogs.length }} 条记录</span>
             <button class="btn btn-ghost sm" :disabled="logsLoading" @click="loadTraceLogs(false)">刷新日志</button>
           </div>
-          <p class="log-notice">按请求 ID 展示已落盘日志（含异常堆栈），常见凭据已脱敏。旧日志仅能关联带 trace ID 的记录；未记录、已清理或独立进程中未关联的日志无法补齐。</p>
+          <p class="log-notice">按请求 ID 展示已落盘日志（含异常堆栈），凭据与个人信息（手机号/证件号/银行卡/邮箱）已脱敏，原始文件不改写。旧日志仅能关联带 trace ID 的记录；未记录、已清理或独立进程中未关联的日志无法补齐。</p>
           <p v-for="warning in logWarnings" :key="warning" class="log-notice">{{ warning }}</p>
           <p v-if="logsError" class="inline-error" role="alert">{{ logsError }}</p>
           <div v-if="traceLogs.length" class="log-entries">
@@ -1140,14 +1063,24 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, nextTick, watch, onMounted } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import ObsDashboard from '@/components/observability/ObsDashboard.vue'
 import ObsLogs from '@/components/observability/ObsLogs.vue'
+import ObsAlerts from '@/components/observability/ObsAlerts.vue'
+import ObsCachePanel from '@/components/observability/ObsCachePanel.vue'
 import { getMyObservabilityMetrics, getMyContextOverview, getMyContextSessions, getObservabilityMetrics, getObservabilityTraces, getObservabilityTrace, getObservabilityTraceLogs, getSkillReviews, getToolRoutingMetrics, getToolRegistry, getSessionObservability, getSedimentSuggestions, getObsMonitor, getObsToolChains, getObsDrill, createSkill, searchSkillMarket, getMyMemoryDrill } from '@/api'
 
 const auth = useAuthStore()
+const route = useRoute()
+const router = useRouter()
 const canOps = computed(() => auth.canOps)
+// 在线评测均分（GEval 归一化 0-1；无样本显示 —）
+const onlineEvalText = computed(() => {
+  const v = monitor.value?.quality?.online_eval?.avg_geval
+  return v != null ? Number(v).toFixed(2) : '—'
+})
 const businessMetrics = ref(null)
 const myContext = ref(null)
 const mySessions = ref([])
@@ -1176,8 +1109,21 @@ function showToast(message, error = false) {
   if (toastTimer) clearTimeout(toastTimer)
   toastTimer = setTimeout(() => { toast.value = null }, 2600)
 }
-// 四大模块页签（需求：DashBoard / 日志记录 / 指标监控 / 链路追踪）
-const opsTab = ref('dashboard')
+// 四大模块页签（需求：DashBoard / 日志记录 / 指标监控 / 链路追踪）；支持 ?tab= 深链（全局告警铃铛跳转）
+const opsTab = ref(['dashboard', 'logs', 'metrics', 'traces'].includes(route.query.tab) ? route.query.tab : 'dashboard')
+// 深链定位：?tab=metrics&focus=alerts → 切页签并滚动到告警区
+function applyRouteQuery() {
+  const tab = route.query.tab
+  if (['dashboard', 'logs', 'metrics', 'traces'].includes(tab)) opsTab.value = tab
+  if (route.query.focus === 'alerts') {
+    nextTick(() => {
+      setTimeout(() => {
+        document.getElementById('obs-alerts')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      }, 300)
+    })
+  }
+}
+watch(() => route.query, applyRouteQuery)
 // 链路追踪子页签：对话型链路 / 工具调用链路
 const traceTab = ref('chat')
 const monitor = ref(null)
@@ -1207,7 +1153,7 @@ const logWarnings = ref([])
 let traceRequestId = 0
 let logsRequestId = 0
 
-onMounted(() => loadAll(0))
+onMounted(() => { loadAll(0); applyRouteQuery() })
 
 async function loadAll(refresh = 0) {
   loading.value = true
@@ -1730,12 +1676,6 @@ function barHeight(count) {
   return Math.max(6, Math.round((count / max) * 100))
 }
 
-function tokenBarHeight(avg) {
-  const max = Math.max(1, ...(metrics.value?.daily || []).map((r) => r.avg_tokens || 0))
-  if (!avg) return 3
-  return Math.max(6, Math.round((avg / max) * 100))
-}
-
 // ---- 图表 hover tooltip（鼠标悬停即时显示对应数字）----
 const tooltip = ref({ show: false, x: 0, y: 0, lines: [] })
 
@@ -1761,68 +1701,6 @@ function dayTipLines(row) {
     `平均 ${row.avg_tokens ?? 0} token/请求`,
     `平均延迟 ${formatMs(row.avg_latency_ms)}`,
   ]
-}
-
-function tokenDayTipLines(row) {
-  return [
-    row.day,
-    `平均 ${row.avg_tokens ?? 0} token/请求`,
-    `Token 总量 ${formatNum(row.tokens)}`,
-    `请求 ${row.total}`,
-  ]
-}
-
-function segmentTipLines(seg) {
-  const lines = [
-    seg.label,
-    `总 ${formatNum(seg.tokens)} token · 占比 ${(seg.share * 100).toFixed(1)}%`,
-    `平均 ${seg.avg_tokens} token/次 · ${seg.count} 次`,
-  ]
-  if (seg.delta_pct != null) {
-    lines.push(`近期 ${seg.recent_avg} vs 前期 ${seg.prev_avg}：${seg.delta_pct > 0 ? '+' : ''}${seg.delta_pct}%（${seg.trend === 'down' ? '下降=优化' : seg.trend === 'up' ? '上升' : '持平'}）`)
-  } else {
-    lines.push('数据不足（需≥2次）')
-  }
-  lines.push('点击可展开查看对应会话')
-  return lines
-}
-
-// 需求3：全站 segment_breakdown（ops）× 本人 context_window.segments 合并为同一模块，
-// 按 segment 键对齐；任一侧缺失时对应列显示 '-'。按对话下钻见统一会话视图。
-const mergedSegments = computed(() => {
-  const globalSegs = metrics.value?.segment_breakdown || []
-  const mySegs = myContext.value?.context_window?.segments || []
-  const myByKey = new Map(mySegs.map((s) => [s.segment, s]))
-  const globalByKey = new Map(globalSegs.map((s) => [s.segment, s]))
-  const keys = [...new Set([...globalSegs.map((s) => s.segment), ...mySegs.map((s) => s.segment)])]
-  return keys.map((k) => {
-    const g = globalByKey.get(k)
-    const m = myByKey.get(k)
-    return {
-      segment: k,
-      label: (g || m).label,
-      global_tokens: g ? g.tokens : null,
-      global_share: g ? g.share : null,
-      my_tokens: m ? m.tokens : null,
-      my_avg: m ? m.avg_tokens : null,
-      my_peak: m ? m.peak_tokens : null,
-      delta_pct: g && g.delta_pct != null ? g.delta_pct : null,
-      trend: g ? g.trend : '',
-      recent_avg: g ? g.recent_avg : null,
-      prev_avg: g ? g.prev_avg : null,
-      items: g ? g.items || [] : [],
-    }
-  }).sort((a, b) => (b.global_tokens || b.my_tokens || 0) - (a.global_tokens || a.my_tokens || 0))
-})
-
-// ---- segment drill-down：展开查看该段对应哪几次会话 ----
-const expandedSegments = ref(new Set())
-
-function toggleSegment(seg) {
-  const next = new Set(expandedSegments.value)
-  if (next.has(seg)) next.delete(seg)
-  else next.add(seg)
-  expandedSegments.value = next
 }
 </script>
 
@@ -2100,218 +1978,25 @@ function toggleSegment(seg) {
   background: #c62828;
 }
 
-/* ---- Token 用量分析 ---- */
-.token-bar {
-  background: linear-gradient(180deg, #7f9bd1, #4f6bab);
-}
-
-.token-warn-badge {
-  padding: 2px 10px;
-  border-radius: 10px;
-  font-size: 11px;
-  font-weight: 700;
-  background: #fdecea;
-  color: #c62828;
-}
-
-.token-compare {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 12px 14px;
-  background: #faf8f5;
-  border: 1px solid var(--color-border);
-  border-radius: 10px;
-  margin-bottom: 10px;
-}
-
-.compare-item {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.compare-num {
-  font-size: 20px;
-  font-weight: 700;
-  color: var(--color-text);
-}
-
-.compare-label {
-  font-size: 11px;
+/* ---- Token 用量分析已迁移至模型网关（原位留跳转链接） ---- */
+.token-moved {
+  margin: 0 0 18px;
+  font-size: 12.5px;
   color: var(--color-text-secondary);
-}
-
-.compare-arrow {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 2px;
-}
-
-.compare-arrow .delta {
-  font-size: 15px;
-  font-weight: 700;
-}
-
-.compare-arrow.down .delta { color: #2e7d32; }
-.compare-arrow.up .delta { color: #c62828; }
-.compare-arrow.flat .delta { color: var(--color-text-secondary); }
-
-.compare-hint {
-  font-size: 10px;
-  color: var(--color-text-secondary);
-}
-
-.token-note {
-  margin: 0 0 8px;
-  font-size: 12px;
+  background: #faf6f0;
+  border: 1px dashed var(--color-border);
+  border-radius: 10px;
+  padding: 12px 16px;
   line-height: 1.7;
-  color: var(--color-text-secondary);
 }
 
-.token-note.down { color: #2e7d32; }
-.token-note.up { color: #b26a00; }
-.token-note.warn { color: #c62828; }
-
-.segment-title {
-  font-size: 12px;
-  font-weight: 700;
-  color: var(--color-text);
-  margin: 14px 0 8px;
-}
-
-.segment-bars {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.segment-group {
-  display: flex;
-  flex-direction: column;
-}
-
-.segment-row {
-  width: 100%;
-  display: grid;
-  grid-template-columns: 88px 1fr 168px 18px;
-  align-items: center;
-  gap: 10px;
-  padding: 4px 0;
-  background: none;
-  border: none;
-  cursor: pointer;
-  text-align: left;
-}
-
-.segment-row:hover .segment-label {
+.token-moved-link {
   color: var(--color-primary);
-}
-
-.segment-label {
-  font-size: 12px;
-  color: var(--color-text);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.segment-bar-wrap {
-  height: 14px;
-  background: #f0ebe3;
-  border-radius: 7px;
-  overflow: hidden;
-}
-
-.segment-bar {
-  height: 100%;
-  background: linear-gradient(90deg, #d9a76a, #c98a4b);
-  border-radius: 7px;
-  min-width: 2px;
-  transition: width 0.3s;
-}
-
-.segment-val {
-  font-size: 11px;
-  color: var(--color-text-secondary);
-  text-align: right;
-  white-space: nowrap;
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 6px;
-}
-
-.seg-delta {
   font-weight: 700;
+  text-decoration: none;
 }
 
-.seg-delta.down { color: #2e7d32; }
-.seg-delta.up { color: #c62828; }
-.seg-delta.flat { color: var(--color-text-secondary); }
-
-.segment-arrow {
-  color: var(--color-text-secondary);
-  font-size: 10px;
-  transition: transform 0.2s;
-  text-align: center;
-}
-
-.segment-arrow.open {
-  transform: rotate(180deg);
-}
-
-.segment-items {
-  margin: 4px 0 8px 98px;
-  border-left: 2px solid var(--color-border);
-  padding-left: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.segment-item {
-  display: grid;
-  grid-template-columns: 92px 72px 1fr 76px;
-  gap: 10px;
-  align-items: center;
-  font-size: 11px;
-  color: var(--color-text);
-  padding: 3px 6px;
-  border-radius: 6px;
-  cursor: pointer;
-}
-
-.segment-item:hover {
-  background: var(--color-primary-light);
-}
-
-.seg-item-time,
-.seg-item-user {
-  color: var(--color-text-secondary);
-  white-space: nowrap;
-}
-
-.seg-item-input {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.seg-item-tok {
-  text-align: right;
-  white-space: nowrap;
-  font-weight: 600;
-  color: var(--color-primary);
-}
-
-.seg-items-hint {
-  margin: 4px 0 0;
-  font-size: 10px;
-  color: var(--color-text-secondary);
-}
+.token-moved-link:hover { text-decoration: underline; }
 
 /* ---- 图表 hover tooltip ---- */
 .chart-tooltip {
@@ -2987,20 +2672,6 @@ function toggleSegment(seg) {
 .obs-toast.error { background: #b4553d; }
 .fade-enter-active, .fade-leave-active { transition: opacity .25s; }
 .fade-enter-from, .fade-leave-to { opacity: 0; }
-
-/* ---- 需求3：合并后的段构成表 ---- */
-.seg-merge-row { cursor: pointer; }
-.seg-merge-row:hover { background: var(--color-primary-light); }
-.seg-caret {
-  display: inline-block;
-  color: var(--color-primary);
-  font-size: 11px;
-  margin-right: 5px;
-  transition: transform 0.15s ease;
-}
-.seg-caret.open { transform: rotate(90deg); }
-.seg-drill-row > td { background: #fbf7ef; padding: 6px 10px; }
-.seg-drill-title { margin: 4px 0; font-size: 12px; font-weight: 600; color: var(--color-text-secondary); }
 
 /* ---- 需求2：对话维度统一视图 ---- */
 .sess-select-row {

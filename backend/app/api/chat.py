@@ -371,6 +371,36 @@ async def compact_session(session_id: str, request: Request, user: dict = Depend
     return {"success": True, **stats}
 
 
+@router.get("/sessions/{session_id}/note")
+async def get_session_note(session_id: str, user: dict = Depends(get_current_user)):
+    """会话笔记（L3 Session Memory 显性化）：查看结构化摘要，本人限定。"""
+    session = chat_service.get_user_session(session_id, user["id"])
+    if not session:
+        raise HTTPException(status_code=404, detail="会话不存在或无权访问")
+    from app.services import session_summary
+
+    return {"success": True, **session_summary.get_session_note(session_id)}
+
+
+@router.put("/sessions/{session_id}/note")
+async def update_session_note(session_id: str, request: Request, user: dict = Depends(get_current_user)):
+    """编辑会话笔记：置 edited_by_user=1，自动压缩不再覆盖（用户笔记优先）。"""
+    session = chat_service.get_user_session(session_id, user["id"])
+    if not session:
+        raise HTTPException(status_code=404, detail="会话不存在或无权访问")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    text = str((body or {}).get("note") or (body or {}).get("content") or "")
+    from app.services import session_summary
+
+    res = session_summary.update_session_note(session_id, user["id"], text)
+    if res is None:
+        raise HTTPException(status_code=403, detail="无权编辑该会话笔记")
+    return {"success": True, **res}
+
+
 @router.get("/sessions/{session_id}/context-usage")
 async def get_session_context_usage(session_id: str, user: dict = Depends(get_current_user)):
     """对话窗口上下文用量：最近一次真实请求各语义段 token 构成（缩略图+明细弹层数据源）"""

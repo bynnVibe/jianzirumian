@@ -122,6 +122,8 @@ class Ctx:
         self.cache_scope = "personal"
         self.cache_realtime = False
         self.cache_hit = False
+        # 监控埋点：未命中事件 id（上游成功后按真实 usage 补记 est_tokens）
+        self.cache_event_id = ""
 
 
 def _requested_tool_names(body: dict) -> List[str]:
@@ -399,20 +401,36 @@ def _cache_min_answer() -> int:
 
 
 async def _cache_lookup(ctx: Ctx) -> Optional[str]:
-    """出网前查缓存；命中返回缓存回答文本并记入链路，未命中/异常返回 None。"""
+    """出网前查缓存；命中返回缓存回答文本并记入链路，未命中/异常返回 None。
+
+    监控埋点：命中/未命中各记一条 semantic_cache_events（失败静默）；
+    miss 事件 id 存 ctx.cache_event_id，上游成功后按真实 usage 补记。
+    """
     if not ctx.cache_enabled:
         return None
+    t0 = time.monotonic()
     try:
         hit = await semantic_cache.lookup(
             ctx.user_id, ctx.cache_query, scope=ctx.cache_scope, is_realtime=ctx.cache_realtime)
     except Exception as e:
         logger.warning("[网关语义缓存] 查询失败，走上游: %s", e)
         return None
+    latency_ms = int((time.monotonic() - t0) * 1000)
     if hit and (hit.get("answer") or "").strip():
+        answer = hit.get("answer") or ""
+        # 命中即省去上游消耗：估算缓存答案+问题的 Token 作为节省量
+        est = agent_obs.estimate_tokens(answer) + agent_obs.estimate_tokens(ctx.cache_query)
+        semantic_cache.record_event(
+            user_id=ctx.user_id, scope=hit.get("scope") or ctx.cache_scope, hit=True,
+            entry_id=hit.get("id") or "", score=hit.get("score"), latency_ms=latency_ms,
+            est_tokens=est, saved_tokens=est, question=ctx.cache_query)
         ctx.tracer.add("cache", "语义缓存", "ok",
                        f"命中（scope={hit.get('scope')} 相似度={hit.get('score')} "
                        f"ttl={hit.get('ttl_label')}），跳过上游 LLM")
-        return hit.get("answer") or ""
+        return answer
+    ctx.cache_event_id = semantic_cache.record_event(
+        user_id=ctx.user_id, scope=ctx.cache_scope, hit=False,
+        latency_ms=latency_ms, question=ctx.cache_query) or ""
     ctx.tracer.add("cache", "语义缓存", "ok",
                    f"未命中（scope={ctx.cache_scope} realtime={ctx.cache_realtime}），调用上游")
     return None
@@ -524,6 +542,9 @@ async def _json_response(ctx: Ctx) -> tuple[int, dict]:
                         int((time.monotonic() - t0) * 1000))
             usage = normalized.get("usage") or {}
             pt, ct = int(usage.get("prompt_tokens") or 0), int(usage.get("completion_tokens") or 0)
+            # 监控埋点补记：miss 事件按本次真实 usage 补记 Token（失败静默）
+            if ctx.cache_event_id and (pt or ct):
+                semantic_cache.update_event_tokens(ctx.cache_event_id, pt + ct)
             cached = int((usage.get("prompt_tokens_details") or {}).get("cached_tokens") or 0)
             preview, tool_calls = _extract_preview(normalized)
             # 成功产出正文且非工具调用 → 回写语义缓存（按 public/personal + 实时阶梯 TTL）
@@ -770,6 +791,9 @@ async def stream_response(ctx: Ctx) -> AsyncGenerator[str, None]:
                   cached_tokens=usage["cached"],
                   response_preview="".join(acc_text), error=final_err,
                   tool_calls=[{"function": {"name": n}} for n in tool_names])
+        # 监控埋点补记：miss 事件按本次真实 usage 补记 Token（失败静默）
+        if final_status == "ok" and ctx.cache_event_id and (usage["pt"] or usage["ct"]):
+            semantic_cache.update_event_tokens(ctx.cache_event_id, usage["pt"] + usage["ct"])
 
 
 def _account_sse(sse: str, acc_text: List[str], usage: dict, tool_names: List[str]) -> None:

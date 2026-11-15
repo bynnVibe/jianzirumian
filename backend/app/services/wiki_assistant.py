@@ -754,6 +754,39 @@ def delete_assistant_session(user_id: str, session_id: str) -> bool:
 # Agent 主循环（SSE 异步生成器）
 # ---------------------------------------------------------------------------
 
+def _memory_system_messages(ctx: AssistantContext, query: str) -> List[dict]:
+    """五层记忆注入（wiki 助手）：L1 用户指令 + L2 用户画像（只读）+ L4 助手分域记忆。
+
+    与 chat 同源复用 user_instructions / memory_service / agent_memory_service；
+    L2 画像只读复用（不写用户层），L4 仅注入 wiki_assistant 域（预算 200 字符）。
+    失败静默降级为空，不阻断问答主链路。注入位置：静态系统头之后、界面上下文之前。
+    """
+    msgs: List[dict] = []
+    user_id = ctx.user_id or ""
+    if not user_id or user_id in {"guest", "system", "-"}:
+        return msgs
+    try:
+        from app.services import user_instructions
+        from app.services.memory import memory_service, memory_line
+        from app.services.agent_memory import agent_memory_service
+
+        # L1 用户指令（类比 CLAUDE.md User 层，与 chat 同源）
+        msgs.extend(user_instructions.instruction_messages(user_id))
+        # L2 用户画像卡（只读复用，新鲜度渲染同源 memory_line）
+        profile = memory_service.profile_memories(user_id)
+        if profile:
+            profile_text = "\n".join(memory_line(m) for m in profile)
+            msgs.append({"role": "system", "content": f"【用户画像（常驻参考）】\n{profile_text}"})
+        # L4 助手分域记忆（wiki_assistant 域：常分析主题/分析风格偏好）
+        agent_text = agent_memory_service.context_text(user_id, "wiki_assistant", query)
+        if agent_text:
+            msgs.append({"role": "system",
+                         "content": f"【助手记忆（本助手域，供分析风格参考）】\n{agent_text}"})
+    except Exception as e:
+        logger.warning("[ASSISTANT] 记忆注入失败（忽略，不阻断问答）: %s", e)
+    return msgs
+
+
 def _build_decision_messages(ctx: AssistantContext, message: str, history: List[dict]) -> List[dict]:
     page_title = (
         f"《{ctx.page_title}》(id={ctx.page_id})" if ctx.page_id else "（无，用户未打开具体词条）"
@@ -801,8 +834,10 @@ def _build_decision_messages(ctx: AssistantContext, message: str, history: List[
     context_system = "\n".join(context_lines)
     messages = [
         {"role": "system", "content": _DECISION_SYSTEM},
-        {"role": "system", "content": context_system},
     ]
+    # 五层记忆注入（L1 指令 / L2 画像 / L4 助手域）：静态头之后、界面上下文之前
+    messages.extend(_memory_system_messages(ctx, message))
+    messages.append({"role": "system", "content": context_system})
     for h in (history or [])[-6:]:
         role = h.get("role") if h.get("role") in ("user", "assistant") else "user"
         content = (h.get("content") or "").strip()
@@ -816,6 +851,8 @@ def _build_answer_messages(
     ctx: AssistantContext, message: str, history: List[dict], observations: List[str]
 ) -> List[dict]:
     messages = [{"role": "system", "content": _ANSWER_SYSTEM}]
+    # 五层记忆注入（与决策阶段同源）：静态头之后、资料上下文之前
+    messages.extend(_memory_system_messages(ctx, message))
     context_block = ""
     # 用户通过 @ 显式引用的当前界面文档/片段（回答必须围绕这些对象联合展开）
     if ctx.has_mentions:
@@ -922,6 +959,15 @@ async def run_assistant(
             await asyncio.to_thread(_append_message, session_id, "assistant", "".join(parts), meta)
         except Exception as e:
             logger.warning("[ASSISTANT] 助手消息落库失败（不阻断问答）: %s", e)
+        # L4 助手分域记忆后台抽取（wiki_assistant 域：常分析主题/分析风格偏好；
+        # 不记用户个人健康事实——那归用户记忆层）。失败静默，不阻断问答主链路。
+        try:
+            from app.services.agent_memory import agent_memory_service
+            await agent_memory_service.extract_from_turn(
+                ctx.user_id, "wiki_assistant", session_id, message, "".join(parts)
+            )
+        except Exception as e:
+            logger.warning("[ASSISTANT] 助手域记忆抽取失败（忽略）: %s", e)
 
 
 async def _run_assistant_inner(

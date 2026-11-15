@@ -39,6 +39,7 @@ def _new_id() -> str:
 class DatasetCreate(BaseModel):
     name: str
     description: str = ""
+    kind: str = "rag"           # rag | agent（Agent 轨迹评测集）
 
 
 class CaseCreate(BaseModel):
@@ -46,6 +47,9 @@ class CaseCreate(BaseModel):
     expected_keywords: List[str] = []
     reference_answer: str = ""
     expected_source: str = ""
+    # Agent 用例扩展：期望工具序列（有序）与期望结果描述
+    expected_tools: List[str] = []
+    expected_outcome: str = ""
 
 
 class CaseImportItem(BaseModel):
@@ -106,9 +110,10 @@ async def create_dataset(body: DatasetCreate, _admin: dict = Depends(require_ops
     if not name:
         raise HTTPException(status_code=400, detail="评测集名称不能为空")
     ds_id = _new_id()
+    kind = body.kind if body.kind in ("rag", "agent") else "rag"
     db.execute(
-        "INSERT INTO eval_datasets (id, name, description, created_at) VALUES (?,?,?,?)",
-        (ds_id, name, body.description.strip(), _now()),
+        "INSERT INTO eval_datasets (id, name, description, kind, created_at) VALUES (?,?,?,?,?)",
+        (ds_id, name, body.description.strip(), kind, _now()),
     )
     row = db.query_one("SELECT * FROM eval_datasets WHERE id = ?", (ds_id,))
     return {"success": True, "dataset": {**row, "case_count": 0, "last_run": None}}
@@ -127,6 +132,7 @@ async def delete_dataset(dataset_id: str, _admin: dict = Depends(require_ops)):
         db.execute("DELETE FROM eval_results WHERE run_id = ?", (rid,))
     db.execute("DELETE FROM eval_runs WHERE dataset_id = ?", (dataset_id,))
     db.execute("DELETE FROM eval_cases WHERE dataset_id = ?", (dataset_id,))
+    db.execute("DELETE FROM eval_case_candidates WHERE dataset_id = ?", (dataset_id,))
     db.execute("DELETE FROM eval_datasets WHERE id = ?", (dataset_id,))
     return {"success": True, "message": "评测集已删除"}
 
@@ -140,6 +146,10 @@ def _case_to_dict(row: dict) -> dict:
         d["expected_keywords"] = json.loads(d.get("expected_keywords") or "[]")
     except (json.JSONDecodeError, TypeError):
         d["expected_keywords"] = []
+    try:
+        d["expected_tools"] = json.loads(d.get("expected_tools") or "[]")
+    except (json.JSONDecodeError, TypeError):
+        d["expected_tools"] = []
     return d
 
 
@@ -165,11 +175,14 @@ async def create_case(dataset_id: str, body: CaseCreate, _admin: dict = Depends(
     case_id = _new_id()
     db.execute(
         "INSERT INTO eval_cases (id, dataset_id, question, expected_keywords,"
-        " reference_answer, expected_source, created_at) VALUES (?,?,?,?,?,?,?)",
+        " reference_answer, expected_source, expected_tools, expected_outcome, created_at)"
+        " VALUES (?,?,?,?,?,?,?,?,?)",
         (
             case_id, dataset_id, question,
             json.dumps(body.expected_keywords or [], ensure_ascii=False),
-            body.reference_answer or "", body.expected_source or "", _now(),
+            body.reference_answer or "", body.expected_source or "",
+            json.dumps(body.expected_tools or [], ensure_ascii=False),
+            body.expected_outcome or "", _now(),
         ),
     )
     row = db.query_one("SELECT * FROM eval_cases WHERE id = ?", (case_id,))
@@ -275,13 +288,190 @@ async def import_cases_from_feedback(dataset_id: str, _admin: dict = Depends(req
 
 
 # ---------------------------------------------------------------------------
+# 测试集构建：候选池（LLM 基于 KB 生成 / 日志挖掘）+ 人工审核
+# ---------------------------------------------------------------------------
+class CandidateGenerate(BaseModel):
+    dataset_id: str
+    kb_id: str
+    count: int = 5
+
+
+class CandidateApprove(BaseModel):
+    # 审核时可编辑字段（缺省沿用候选原值）
+    question: Optional[str] = None
+    reference_answer: Optional[str] = None
+    expected_keywords: Optional[List[str]] = None
+    expected_source: Optional[str] = None
+    review_note: str = ""
+
+
+class CandidateReject(BaseModel):
+    review_note: str = ""
+
+
+class CandidateBatchApprove(BaseModel):
+    ids: List[str]
+
+
+@router.post("/candidates/generate")
+async def generate_candidates(body: CandidateGenerate, admin: dict = Depends(require_ops)):
+    """LLM 基于知识库生成候选用例（pending，不直入评测集，待人工审核）。"""
+    from app.services import testset_builder
+    try:
+        result = await testset_builder.generate_from_kb(
+            body.dataset_id, body.kb_id, body.count, admin)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.warning("[测试集构建] KB 生成候选失败: %s", e)
+        raise HTTPException(status_code=502, detail="LLM 生成失败，请稍后重试")
+    return {"success": True, **result}
+
+
+@router.post("/candidates/mine")
+async def mine_candidates(dataset_id: str = Query(""), _admin: dict = Depends(require_ops)):
+    """立即触发一轮日志挖掘（新增配对达量才产出候选；dataset_id 缺省用日志挖掘候选集）。"""
+    from app.services import testset_builder
+    try:
+        result = await testset_builder.mine_from_logs(dataset_id or None)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"success": True, **result}
+
+
+@router.get("/candidates")
+async def list_candidates(
+    dataset_id: str = Query(""),
+    status: str = Query(""),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    _admin: dict = Depends(require_ops),
+):
+    """候选列表（分页 + 状态过滤 + pending 计数；返回前脱敏）。"""
+    from app.services import testset_builder
+    return {"success": True,
+            **testset_builder.list_candidates(dataset_id, status, limit, offset)}
+
+
+@router.post("/candidates/{candidate_id}/approve")
+async def approve_candidate(candidate_id: str, body: Optional[CandidateApprove] = None,
+                            admin: dict = Depends(require_ops)):
+    """审核通过：可编辑字段后入 eval_cases（origin 继承候选来源）。"""
+    from app.services import testset_builder
+    try:
+        result = testset_builder.approve_candidate(
+            candidate_id, admin, body.model_dump(exclude_none=True) if body else None)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"success": True, **result}
+
+
+@router.post("/candidates/{candidate_id}/reject")
+async def reject_candidate(candidate_id: str, body: Optional[CandidateReject] = None,
+                           admin: dict = Depends(require_ops)):
+    """审核拒绝（保留记录可追溯）。"""
+    from app.services import testset_builder
+    try:
+        result = testset_builder.reject_candidate(
+            candidate_id, admin, body.review_note if body else "")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"success": True, **result}
+
+
+@router.post("/candidates/batch-approve")
+async def batch_approve_candidates(body: CandidateBatchApprove, admin: dict = Depends(require_ops)):
+    """批量通过（仅处理 pending，逐条隔离）。"""
+    from app.services import testset_builder
+    return {"success": True, **testset_builder.batch_approve(body.ids, admin)}
+
+
+# ---------------------------------------------------------------------------
+# BadCase 分析框架（多源收集 / 归因 / 转用例闭环 / 标记）
+# ---------------------------------------------------------------------------
+class BadCaseToCase(BaseModel):
+    dataset_id: str
+    question: Optional[str] = None
+    reference_answer: Optional[str] = None
+    expected_keywords: Optional[List[str]] = None
+    expected_source: Optional[str] = None
+
+
+class BadCaseMark(BaseModel):
+    status: str                 # fixed | ignored | open
+    note: str = ""
+
+
+@router.get("/badcases")
+async def list_badcases(
+    status: str = Query(""),
+    category: str = Query(""),
+    source_type: str = Query(""),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    _admin: dict = Depends(require_ops),
+):
+    """BadCase 列表（过滤+分页+分类/状态计数；返回前脱敏）。"""
+    from app.services import badcase
+    return {"success": True,
+            **badcase.list_badcases(status, category, source_type, limit, offset)}
+
+
+@router.post("/badcases/{badcase_id}/analyze")
+async def analyze_badcase(badcase_id: str, _admin: dict = Depends(require_ops)):
+    """LLM 归因增强（超时/失败降级规则化模板，不阻断）。"""
+    from app.services import badcase
+    try:
+        analysis = await badcase.analyze(badcase_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {"success": True, "analysis": analysis}
+
+
+@router.post("/badcases/{badcase_id}/to-case")
+async def badcase_to_case(badcase_id: str, body: BadCaseToCase,
+                          admin: dict = Depends(require_ops)):
+    """转评测用例（origin=badcase，可编辑参考答案）→ 用户跑回归 → 自动复现判定。"""
+    from app.services import badcase
+    try:
+        result = badcase.to_case(badcase_id, body.dataset_id, admin,
+                                 body.model_dump(exclude_none=True, exclude={"dataset_id"}))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"success": True, **result}
+
+
+@router.post("/badcases/{badcase_id}/mark")
+async def mark_badcase(badcase_id: str, body: BadCaseMark,
+                       admin: dict = Depends(require_ops)):
+    """人工标记已修复/忽略/重新打开。"""
+    from app.services import badcase
+    try:
+        result = badcase.mark(badcase_id, body.status, admin, body.note)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"success": True, **result}
+
+
+# ---------------------------------------------------------------------------
 # 运行
 # ---------------------------------------------------------------------------
+class RunCreate(BaseModel):
+    # 可选：经评估器发起时携带其 id，按评估器的 DeepEval 风格指标配置执行；
+    # 缺省保持 Ragas 四指标（存量行为不变）。
+    evaluator_id: str = ""
+
+
 @router.post("/datasets/{dataset_id}/runs")
-async def start_run(dataset_id: str, admin: dict = Depends(require_ops)):
+async def start_run(dataset_id: str, body: Optional[RunCreate] = None,
+                    admin: dict = Depends(require_ops)):
     """发起评测运行（后台逐用例执行，立即返回 run_id）"""
+    evaluator_id = (body.evaluator_id if body else "") or ""
+    metrics, criteria = evaluation.evaluator_metric_config(evaluator_id)
     try:
-        run_id = evaluation.start_run(dataset_id, admin)
+        run_id = evaluation.start_run(
+            dataset_id, admin, metrics=metrics, geval_criteria=criteria,
+            hit_k=evaluation.evaluator_hit_k(evaluator_id))
     except evaluation.ConcurrentRunError as e:
         # 并发保护：统一 code/message 结构 + 409
         return JSONResponse(
@@ -405,11 +595,38 @@ class EvaluatorCreate(BaseModel):
     name: str
     dataset_id: str
     description: str = ""
+    # DeepEval 风格指标配置：空=默认 Ragas 四指标；可选 hallucination/geval 等
+    metrics: Optional[List[str]] = None
+    geval_criteria: str = ""
+    hit_k: int = 5              # 检索层 Hit@K 的 K（排名指标窗口）
+
+
+def _metric_config_json(metrics: Optional[List[str]], criteria: str) -> str:
+    """评估器指标配置序列化（空配置存空串=默认 Ragas 四指标，兼容存量）。"""
+    from app.services.deepeval_metrics import ALL_METRICS
+    names = [str(m).strip() for m in (metrics or []) if str(m).strip() in ALL_METRICS]
+    if not names and not (criteria or "").strip():
+        return ""
+    return json.dumps({"metrics": names, "geval_criteria": (criteria or "").strip()[:500]},
+                      ensure_ascii=False)
+
+
+def _parse_metric_config(raw: str) -> dict:
+    """评估器 metrics 列 → 前端展示结构 {metrics: [...], geval_criteria: str}。"""
+    try:
+        cfg = json.loads(raw) if (raw or "").strip() else {}
+    except (json.JSONDecodeError, TypeError):
+        cfg = {}
+    if isinstance(cfg, list):
+        cfg = {"metrics": cfg}
+    if not isinstance(cfg, dict):
+        cfg = {}
+    return {"metrics": cfg.get("metrics") or [], "geval_criteria": cfg.get("geval_criteria") or ""}
 
 
 @router.get("/evaluators")
 async def list_evaluators(_admin: dict = Depends(require_ops)):
-    """评估器列表（绑定评测集名称/用例数 + 运行次数与最近一次运行）"""
+    """评估器列表（绑定评测集名称/用例数 + 运行次数与最近一次运行 + 指标配置）"""
     rows = db.query("SELECT * FROM eval_evaluators ORDER BY created_at DESC")
     result = []
     for e in rows:
@@ -427,6 +644,7 @@ async def list_evaluators(_admin: dict = Depends(require_ops)):
         )
         result.append({
             **e,
+            "metric_config": _parse_metric_config(e.get("metrics") or ""),
             "dataset_name": ds["name"] if ds else "(评测集已删除)",
             "dataset_exists": bool(ds),
             "case_count": case_count,
@@ -438,7 +656,7 @@ async def list_evaluators(_admin: dict = Depends(require_ops)):
 
 @router.post("/evaluators")
 async def create_evaluator(body: EvaluatorCreate, admin: dict = Depends(require_ops)):
-    """基于已有评测集创建评估器（评测工作流）"""
+    """基于已有评测集创建评估器（评测工作流，可配置 DeepEval 风格指标集）"""
     name = body.name.strip()
     if not name:
         raise HTTPException(status_code=400, detail="评估器名称不能为空")
@@ -447,9 +665,10 @@ async def create_evaluator(body: EvaluatorCreate, admin: dict = Depends(require_
         raise HTTPException(status_code=404, detail="绑定的评测集不存在")
     ev_id = _new_id()
     db.execute(
-        "INSERT INTO eval_evaluators (id, name, dataset_id, description, created_by, created_at)"
-        " VALUES (?,?,?,?,?,?)",
-        (ev_id, name, body.dataset_id, body.description.strip(), admin.get("username", ""), _now()),
+        "INSERT INTO eval_evaluators (id, name, dataset_id, description, created_by, created_at, metrics, hit_k)"
+        " VALUES (?,?,?,?,?,?,?,?)",
+        (ev_id, name, body.dataset_id, body.description.strip(), admin.get("username", ""), _now(),
+         _metric_config_json(body.metrics, body.geval_criteria), max(1, min(50, int(body.hit_k or 5)))),
     )
     row = db.query_one("SELECT * FROM eval_evaluators WHERE id = ?", (ev_id,))
     return {"success": True, "evaluator": row}
@@ -458,11 +677,14 @@ async def create_evaluator(body: EvaluatorCreate, admin: dict = Depends(require_
 class EvaluatorUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
+    metrics: Optional[List[str]] = None
+    geval_criteria: Optional[str] = None
+    hit_k: Optional[int] = None
 
 
 @router.put("/evaluators/{evaluator_id}")
 async def update_evaluator(evaluator_id: str, body: EvaluatorUpdate, _admin: dict = Depends(require_ops)):
-    """编辑评估器名称/描述（绑定评测集不可变更）"""
+    """编辑评估器名称/描述/指标配置（绑定评测集不可变更）"""
     row = db.query_one("SELECT * FROM eval_evaluators WHERE id = ?", (evaluator_id,))
     if not row:
         raise HTTPException(status_code=404, detail="评估器不存在")
@@ -470,9 +692,18 @@ async def update_evaluator(evaluator_id: str, body: EvaluatorUpdate, _admin: dic
     if not name:
         raise HTTPException(status_code=400, detail="评估器名称不能为空")
     description = (body.description if body.description is not None else row["description"]).strip()
+    if body.metrics is not None or body.geval_criteria is not None:
+        cur = _parse_metric_config(row.get("metrics") or "")
+        metrics = body.metrics if body.metrics is not None else cur["metrics"]
+        criteria = body.geval_criteria if body.geval_criteria is not None else cur["geval_criteria"]
+        config_json = _metric_config_json(metrics, criteria)
+    else:
+        config_json = row.get("metrics") or ""
+    hit_k = (max(1, min(50, int(body.hit_k))) if body.hit_k is not None
+             else int(row.get("hit_k") or 5))
     db.execute(
-        "UPDATE eval_evaluators SET name = ?, description = ? WHERE id = ?",
-        (name, description, evaluator_id),
+        "UPDATE eval_evaluators SET name = ?, description = ?, metrics = ?, hit_k = ? WHERE id = ?",
+        (name, description, config_json, hit_k, evaluator_id),
     )
     updated = db.query_one("SELECT * FROM eval_evaluators WHERE id = ?", (evaluator_id,))
     return {"success": True, "evaluator": updated}
@@ -486,6 +717,82 @@ async def delete_evaluator(evaluator_id: str, _admin: dict = Depends(require_ops
         raise HTTPException(status_code=404, detail="评估器不存在")
     db.execute("DELETE FROM eval_evaluators WHERE id = ?", (evaluator_id,))
     return {"success": True}
+
+
+# ---------------------------------------------------------------------------
+# Agent 轨迹评测（离线真实运行 + 在线 trace 采样 + 手动单 trace）
+# ---------------------------------------------------------------------------
+class AgentRunCreate(BaseModel):
+    dataset_id: str
+    match_mode: str = "superset"    # strict | unordered | subset | superset
+    args_match: bool = False
+
+
+class AgentTraceEvaluate(BaseModel):
+    expected_tools: Optional[List] = None   # 工具名序列或 {name, args} 对象序列
+    match_mode: str = "superset"
+    args_match: bool = False
+
+
+@router.post("/agent/runs")
+async def start_agent_run(body: AgentRunCreate, admin: dict = Depends(require_ops)):
+    """发起 Agent 离线评测（kind=agent 评测集逐用例真实运行，立即返回 run_id）。"""
+    from app.services import agent_eval
+    try:
+        run_id = agent_eval.start_agent_run(
+            body.dataset_id, admin, body.match_mode, body.args_match)
+    except evaluation.ConcurrentRunError as e:
+        return JSONResponse(status_code=409,
+                            content={"code": "agent_eval_in_progress", "message": str(e)})
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"success": True, "run_id": run_id, "status": "running"}
+
+
+@router.get("/agent/runs")
+async def list_agent_runs(dataset_id: str = Query(""), _admin: dict = Depends(require_ops)):
+    """Agent 评测运行历史（含 summary 与进度计数）。"""
+    from app.services import agent_eval
+    runs = agent_eval.list_runs(dataset_id)
+    return {"success": True, "runs": runs, "total": len(runs)}
+
+
+@router.get("/agent/runs/{run_id}")
+async def get_agent_run(run_id: str, _admin: dict = Depends(require_ops)):
+    """Agent 评测详情（run + summary + 逐用例轨迹与六指标）。"""
+    from app.services import agent_eval
+    data = agent_eval.get_run(run_id)
+    if not data:
+        raise HTTPException(status_code=404, detail="Agent 评测运行不存在")
+    return {"success": True, "run": data}
+
+
+@router.get("/agent/online")
+async def list_agent_online(
+    days: int = Query(7, ge=1, le=90),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    _admin: dict = Depends(require_ops),
+):
+    """在线 Agent 评测：近窗口聚合 + 明细（返回前脱敏）。"""
+    from app.services import agent_eval
+    agg = agent_eval.aggregate(days)
+    listing = agent_eval.list_online(limit, offset)
+    return {"success": True, "aggregate": agg, **listing}
+
+
+@router.post("/agent/traces/{trace_id}/evaluate")
+async def evaluate_agent_trace(trace_id: str, body: Optional[AgentTraceEvaluate] = None,
+                               _admin: dict = Depends(require_ops)):
+    """手动单 trace 评测（可附期望工具序列与匹配模式）。"""
+    from app.services import agent_eval
+    body = body or AgentTraceEvaluate()
+    try:
+        result = await agent_eval.evaluate_trace(
+            trace_id, body.expected_tools, body.match_mode, body.args_match)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"success": True, **result}
 
 
 # ---------------------------------------------------------------------------

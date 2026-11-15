@@ -303,13 +303,78 @@ body {
 .trace-log-actions { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin: 12px 0 4px; flex-wrap: wrap; }
 .log-entry { margin-bottom: 8px; }
 .inline-error { color: #c62828; font-size: 12px; margin: 8px 0; }
+/* ---------- 侧边栏分组 / 管理控制台导航 ---------- */
+.nav-group-title { font-size: 10.5px; letter-spacing: 1px; color: #b3a798; padding: 12px 8px 5px; text-transform: uppercase; }
+.nav-btn .nav-tag { margin-left: auto; font-size: 9.5px; background: #f0e9df; color: #8d6a3f; border-radius: 999px; padding: 1px 6px; }
+.nav-btn.active .nav-tag { background: #f3d9b8; color: #a45420; }
+.admin-sub { margin: 2px 0 4px 14px; padding-left: 10px; border-left: 1.5px solid var(--color-border); }
+.admin-sub .nav-btn { font-size: 12.5px; padding: 7px 9px; }
+.user-menu { position: absolute; left: 12px; bottom: 64px; width: 204px; background: #fff; border: 1px solid var(--color-border); border-radius: 12px; box-shadow: 0 8px 28px rgba(120,100,70,.18); padding: 6px; z-index: 40; }
+.user-menu button { display: flex; align-items: center; gap: 9px; width: 100%; border: none; background: transparent; padding: 8px 10px; border-radius: 8px; font-size: 12.5px; color: #5a534a; cursor: pointer; text-align: left; }
+.user-menu button:hover { background: var(--color-primary-light); color: #a45420; }
+.user-menu .um-badge { margin-left: auto; font-size: 10px; background: #4f7a4f; color: #fff; border-radius: 999px; padding: 0 6px; }
+/* ---------- 通用子页签 ---------- */
+.subtabs { display: flex; gap: 6px; flex-wrap: wrap; margin: 4px 0 14px; border-bottom: 1px solid var(--color-border); padding-bottom: 0; }
+.subtab { border: none; background: transparent; padding: 8px 13px; font-size: 13px; color: #8a7e72; cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.subtab:hover { color: var(--color-primary); }
+.subtab.active { color: var(--color-primary); font-weight: 600; border-bottom-color: var(--color-primary); }
+.subpanel { animation: fadein .2s; }
+@keyframes fadein { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
+.domain-switch { display: inline-flex; border: 1.5px solid var(--color-border); border-radius: 10px; overflow: hidden; margin-bottom: 14px; }
+.domain-switch button { border: none; background: #fff; padding: 8px 20px; font-size: 13.5px; font-weight: 600; color: #8a7e72; cursor: pointer; }
+.domain-switch button.active { background: var(--color-primary); color: #fff; }
+/* ---------- 技能 ---------- */
+.skill-group { margin-bottom: 16px; }
+.skill-group-head { display: flex; align-items: center; gap: 8px; font-size: 13.5px; font-weight: 700; color: #6b6156; cursor: pointer; padding: 6px 0; }
+.skill-group-head .sg-count { font-size: 11px; color: #b3a798; font-weight: 400; }
+.skill-card { background: #fff; border: 1px solid var(--color-border); border-radius: 12px; padding: 12px 14px; margin-bottom: 10px; }
+.skill-card .sc-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.skill-card .sc-name { font-weight: 600; font-size: 13.5px; }
+.skill-card .sc-desc { font-size: 12.5px; color: #6b6156; margin: 6px 0; line-height: 1.6; }
+.skill-card .sc-foot { display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: #b3a798; }
+/* ---------- 流水线阶段 ---------- */
+.stage-flow { display: flex; align-items: stretch; gap: 4px; flex-wrap: wrap; margin: 14px 0; }
+.stage-node { flex: 1; min-width: 96px; border: 1px solid var(--color-border); border-radius: 11px; padding: 11px 8px; text-align: center; background: #fff; cursor: pointer; }
+.stage-node .st-dot { width: 26px; height: 26px; border-radius: 50%; margin: 0 auto 6px; display: flex; align-items: center; justify-content: center; font-size: 13px; background: #f0e9df; color: #8a7e72; }
+.stage-node.passed .st-dot { background: #e8f0e8; color: #4f7a4f; }
+.stage-node.failed .st-dot { background: #fdecea; color: #c62828; }
+.stage-node.running .st-dot { background: #e7eef7; color: #4c6b8f; }
+.stage-node.skipped .st-dot { background: #f6f1e8; color: #b3a798; }
+.stage-node .st-name { font-size: 12px; font-weight: 600; color: #4a4137; }
+.stage-node .st-status { font-size: 10.5px; color: #b3a798; margin-top: 2px; }
+.stage-arrow { align-self: center; color: #c9bda9; font-size: 15px; }
+.edd-banner { display: flex; align-items: center; gap: 10px; border-radius: 11px; padding: 11px 14px; margin: 12px 0; font-size: 13px; }
+.edd-banner.ok { background: #eaf3ea; border: 1px solid #cfe3cf; color: #3c6e3c; }
+.edd-banner.bad { background: #fdecea; border: 1px solid #f3c9c5; color: #c62828; }
+/* ---------- 预览 / 入库详情 ---------- */
+.preview-page { background: #fff; border: 1px solid var(--color-border); border-radius: 10px; padding: 22px 26px; max-width: 720px; margin: 0 auto; box-shadow: 0 3px 14px rgba(120,100,70,.08); line-height: 1.9; font-size: 13.5px; }
+.preview-page h4 { margin: 14px 0 6px; font-size: 15px; }
+.preview-toolbar { display: flex; align-items: center; gap: 10px; justify-content: center; margin-bottom: 14px; font-size: 12.5px; color: #8a7e72; flex-wrap: wrap; }
+.page-chip { border: 1px solid var(--color-border); background: #fff; border-radius: 999px; padding: 3px 11px; cursor: pointer; font-size: 12px; color: #6b6156; }
+.page-chip.active { background: var(--color-primary); border-color: var(--color-primary); color: #fff; }
+.img-preview { max-width: 460px; margin: 0 auto; background: repeating-linear-gradient(#fffdf8 0 26px, #e8f0f5 26px 27px); border: 1px solid #e3d9c9; border-radius: 8px; padding: 22px 26px; font-family: 'Kaiti SC','STKaiti','KaiTi',cursive; color: #4a5b6b; font-size: 16px; line-height: 27px; transform: rotate(-.5deg); box-shadow: 2px 3px 12px rgba(120,100,70,.14); }
+/* ---------- 使用指导 ---------- */
+.guide-toc { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; margin-bottom: 16px; }
+.guide-toc a { display: flex; gap: 8px; align-items: center; border: 1px solid var(--color-border); border-radius: 9px; padding: 8px 11px; font-size: 12.5px; color: #5a534a; text-decoration: none; cursor: pointer; background: #fff; }
+.guide-toc a:hover { border-color: var(--color-primary); color: var(--color-primary); }
+.guide-toc .gt-num { width: 20px; height: 20px; border-radius: 6px; background: var(--color-primary-light); color: #a45420; font-size: 11px; font-weight: 700; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.guide-block { background: #fff; border: 1px solid var(--color-border); border-radius: 12px; padding: 14px 16px; margin-bottom: 12px; }
+.guide-block h3 { font-size: 14px; margin-bottom: 8px; display: flex; align-items: center; gap: 8px; }
+.guide-block .gb-num { width: 22px; height: 22px; border-radius: 7px; background: var(--color-primary); color: #fff; font-size: 12px; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; }
+.guide-block ul { padding-left: 20px; font-size: 12.5px; line-height: 1.8; color: #5a534a; }
+/* ---------- 用户管理 / 注册 ---------- */
+.role-pill { font-size: 10.5px; padding: 1.5px 8px; border-radius: 999px; }
+.role-pill.admin { background: #fdeeee; color: #b05555; }
+.role-pill.ops { background: #e7eef7; color: #4c6b8f; }
+.role-pill.user { background: #e8f0e8; color: #4f7a4f; }
+.auth-wrap { flex: 1; display: flex; align-items: center; justify-content: center; background: linear-gradient(135deg, #f5f0ea, #ede6dc); overflow-y: auto; padding: 20px; }
 @media (max-width: 720px) { .setting-grid { grid-template-columns: 1fr; } .page-wrap { padding: 16px; } .upload-grid { grid-template-columns: 1fr; } }
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-thumb { background: #d4c9bd; border-radius: 4px; }
 </style>
 </head>
 <body>
-<div class="demo-banner">📌 本页面是「见字如面」的<b>静态视觉样例</b>（不连接真实服务，所有数据均为模拟；可切换侧栏、角色视图、可观测性四模块页签，日志/链路支持模拟筛选与全链路弹窗，其余操作控件仅作布局展示）。真实系统：<b>Vue 3 + FastAPI + FAISS 混合检索 + llm-wiki 知识编译</b> —— 点击左侧导航浏览各功能界面 ↓</div>
+<div class="demo-banner">📌 本页面是「见字如面」的<b>静态视觉样例</b>（不连接真实服务，所有数据均为模拟）。已覆盖<b>全部主界面 + 子页签 + 跳转界面</b>：对话 / 知识库总览与详情七页签 / 上传三段 / Skill 配置 / 个人中心五菜单 / 管理控制台（系统设置·用户管理·CI/CD·网关八页签·评测两域·可观测性四模块）/ 登录·注册·忘记密码 / 文档·附件预览 / 入库详情 / 使用指导。侧栏、子页签、弹窗均可交互切换 ↓</div>
 <div class="app">
   <!-- ================= 侧边栏 ================= -->
   <aside class="sidebar">
@@ -323,29 +388,46 @@ body {
       </div>
     </div>
     <button class="nav-new" onclick="openChat(null)">＋ 新对话</button>
+    <div class="nav-group-title">功能</div>
     <button class="nav-btn" data-view="knowledge" onclick="switchView('knowledge', this)">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>知识库</button>
-    <button class="nav-btn" data-view="settings" onclick="switchView('settings', this)">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-2.83 1.17V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68h.08a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>系统管理</button>
-    <button class="nav-btn" data-view="eval" onclick="switchView('eval', this)">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>回归评测</button>
-    <button class="nav-btn" data-view="gateway" onclick="switchView('gateway', this)">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="7" rx="2"/><rect x="3" y="14" width="18" height="7" rx="2"/><path d="M7 6h2M7 17h2M12 10v4"/></svg>模型网关</button>
-    <button class="nav-btn" data-view="observability" onclick="switchView('observability', this)">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18"/><polyline points="5 14 9 10 13 13 21 5"/></svg>Agent 可观测性</button>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>知识库<span class="nav-tag">总览+详情</span></button>
+    <button class="nav-btn" data-view="skills" onclick="switchView('skills', this)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L4.5 12.5H11L10 22l8.5-10.5H12L13 2z"/></svg>Skill 配置</button>
+    <button class="nav-btn" data-view="myobs" onclick="switchView('myobs', this)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18"/><path d="M7 14l4-4 4 3 6-8"/></svg>可观测性 · 我的</button>
+    <div class="nav-group-title">管理控制台（管理员/运维）</div>
+    <button class="nav-btn" data-view="settings" onclick="toggleAdmin(this)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-2.83 1.17V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68h.08a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>系统管理<span class="nav-tag" id="adminArrow">▾</span></button>
+    <div class="admin-sub" id="adminSub">
+      <button class="nav-btn" data-view="settings" onclick="switchView('settings', this)">系统设置<span class="nav-tag">admin</span></button>
+      <button class="nav-btn" data-view="users" onclick="switchView('users', this)">用户管理<span class="nav-tag">admin</span></button>
+      <button class="nav-btn" data-view="pipeline" onclick="switchView('pipeline', this)">CI/CD 流水线<span class="nav-tag">ops</span></button>
+      <button class="nav-btn" data-view="gateway" onclick="switchView('gateway', this)">模型网关</button>
+      <button class="nav-btn" data-view="eval" onclick="switchView('eval', this)">回归评测</button>
+      <button class="nav-btn" data-view="observability" onclick="switchView('observability', this)">Agent 可观测性</button>
+    </div>
+    <button class="nav-btn" data-view="guide" onclick="switchView('guide', this)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>系统使用指导</button>
     <button class="nav-btn" data-view="login" onclick="switchView('login', this)">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>登录页</button>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>登录 / 注册页</button>
     <div class="side-title"><span>对话历史</span><span>4</span></div>
-    <div class="history-item active" onclick="openChat(this)">丰隆穴有什么功效？怎么按摩？</div>
+    <div class="history-item active" onclick="openChat(this)" style="display:flex;align-items:center;gap:6px"><span style="flex:1;overflow:hidden;text-overflow:ellipsis">丰隆穴有什么功效？怎么按摩？</span><span title="会话笔记（五层记忆 L3）" onclick="event.stopPropagation();openModal('noteModal')" style="cursor:pointer;flex-shrink:0">📝</span></div>
     <div class="history-item" onclick="openChat(this)">增值税的纳税人包括哪些？</div>
     <div class="history-item" onclick="openChat(this)">结合我的笔记谈谈幸福观</div>
     <div class="history-item" onclick="openChat(this)">淘米水能治皮肤瘙痒吗</div>
-    <div class="user-card">
+    <div class="user-card" onclick="toggleUserMenu(event)" style="position:relative">
       <div class="avatar">A</div>
       <div>
         <div style="font-size:13px;font-weight:600">admin</div>
-        <div style="font-size:10.5px;color:#b3a798">管理员 · 点击查看详情</div>
+        <div style="font-size:10.5px;color:#b3a798">管理员 · 点击打开个人中心</div>
       </div>
+    </div>
+    <div class="user-menu" id="userMenu" hidden>
+      <button onclick="openModal('profileModal')">👤 修改个人信息</button>
+      <button onclick="openModal('usageModal')">📊 查看使用情况</button>
+      <button onclick="openModal('memoryModal')">🧠 我的记忆</button>
+      <button onclick="openModal('instructionModal')">📝 我的指令</button>
+      <button onclick="openModal('cacheModal')">⚡ 语义缓存<span class="um-badge">12</span></button>
     </div>
   </aside>
 
@@ -477,47 +559,65 @@ body {
       <div class="page-wrap">
         <div class="page-head"><div><h2>知识库上传</h2><div class="page-desc">文件上传（落盘 + 后台多线程解析） → 检查解析效果 → 确认入库（知识库 + llm-wiki）</div></div></div>
         <div class="module-tabs">
-          <div class="module-tab active">📤 文件上传</div>
-          <div class="module-tab">📥 知识入库<span class="tab-badge">3</span></div>
-          <div class="module-tab">🕘 入库历史</div>
+          <div class="module-tab active" data-upload-tab="files" onclick="switchSub('upload','files',this)">📤 文件上传</div>
+          <div class="module-tab" data-upload-tab="ingest" onclick="switchSub('upload','ingest',this)">📥 知识入库<span class="tab-badge">3</span></div>
+          <div class="module-tab" data-upload-tab="history" onclick="switchSub('upload','history',this)">🕘 入库历史</div>
         </div>
-        <div class="upload-grid">
-          <div class="panel">
-            <h3>🖼 图片上传（单张进编辑器 / 批量待选列表）</h3>
-            <div class="zone-row">
-              <div class="mini-zone"><b>单张上传</b>选择后进入编辑器：旋转 / 复位 / 框选裁剪 / 长按拖动</div>
-              <div class="mini-zone"><b>批量上传</b>多选多张，待选列表逐张编辑或一键全部上传</div>
+        <!-- 文件上传 -->
+        <div class="subpanel" id="upload-sub-files">
+          <div class="upload-grid">
+            <div class="panel">
+              <h3>🖼 图片上传（单张进编辑器 / 批量待选列表）</h3>
+              <div class="zone-row">
+                <div class="mini-zone"><b>单张上传</b>选择后进入编辑器：旋转 / 复位 / 框选裁剪 / 长按拖动</div>
+                <div class="mini-zone"><b>批量上传</b>多选多张，待选列表逐张编辑或一键全部上传</div>
+              </div>
+              <div class="file-row"><span class="tag">图片</span><span class="fname">文字记录2.jpg（待选 · 缩略图可点击编辑）</span><button class="btn btn-outline btn-sm">编辑</button><button class="btn btn-primary btn-sm">上传</button></div>
+              <p class="note">前端即时模糊检测（拉普拉斯方差），模糊件弹窗提醒重拍；多引擎 OCR：PaddleOCR / 阿里云百炼 / 自定义 API 可切换。</p>
+              <h3 style="margin-top:16px">📄 Word / PDF 文档</h3>
+              <div class="mini-zone"><b>Word / PDF 上传</b>拖拽或点击选择 .docx / .doc / .pdf，后台按页解析文字与表格（表格转 Markdown）</div>
+              <h3 style="margin-top:16px">🔗 链接导入</h3>
+              <div class="form-row"><input placeholder="粘贴公开文章链接（公众号 / CSDN 等）…"></div>
+              <p class="note">安全直抓 + 站点 Skill 提取，按 playbook 选移动端 UA / 渲染优先；渲染服务未启用自动降级宽松提取（带噪声警告）；审查面板「内容润色」去角标噪声，逐条确认后入库。</p>
             </div>
-            <div class="file-row"><span class="tag">图片</span><span class="fname">文字记录2.jpg（待选 · 缩略图可点击编辑）</span><button class="btn btn-outline btn-sm">编辑</button><button class="btn btn-primary btn-sm">上传</button></div>
-            <h3 style="margin-top:16px">📄 Word / PDF 文档</h3>
-            <div class="mini-zone"><b>Word / PDF 上传</b>拖拽或点击选择 .docx / .doc / .pdf，后台按页解析文字与表格</div>
+            <div class="panel">
+              <h3>文件解析列表（实时进展 · 解析完成可预览原文）</h3>
+              <div class="file-row"><span class="tag green">已解析</span><span class="fname">丰隆穴按摩笔记.jpg · OCR 4559 字</span><button class="btn btn-outline btn-sm" onclick="switchView('attachment-preview',null)">查看</button></div>
+              <div class="file-row"><span class="tag blue">解析中</span><span class="fname">中医方剂汇编.docx · 已解析 3 / 12 页</span>
+                <div style="width:90px"><div class="progress-track"><div class="progress-fill" style="width:25%"></div></div></div></div>
+              <div class="file-row"><span class="tag green">已解析</span><span class="fname">药膳食谱整理.pdf · 8 页</span><button class="btn btn-outline btn-sm" onclick="switchView('doc-preview',null)">查看</button></div>
+              <div class="file-row"><span class="tag pink">重复预警</span><span class="fname">丰隆穴按摩笔记.jpg · 内容指纹已入库（409 跳过）</span></div>
+              <div class="flowbar">
+                <span class="flow-step">落盘登记</span><span class="flow-step cur">后台并发解析（OCR / 分页提取）</span><span class="flow-step">人工检查效果</span><span class="flow-step">切「知识入库」确认入库</span>
+              </div>
+            </div>
           </div>
+        </div>
+        <!-- 知识入库 -->
+        <div class="subpanel" id="upload-sub-ingest" hidden>
           <div class="panel">
-            <h3>文件解析列表（实时进展 · 解析完成可预览原文）</h3>
-            <div class="file-row"><span class="tag green">已解析</span><span class="fname">丰隆穴按摩笔记.jpg · OCR 4559 字</span><button class="btn btn-outline btn-sm">查看</button></div>
-            <div class="file-row"><span class="tag blue">解析中</span><span class="fname">中医方剂汇编.docx · 已解析 3 / 12 页</span>
-              <div style="width:90px"><div class="progress-track"><div class="progress-fill" style="width:25%"></div></div></div></div>
-            <div class="file-row"><span class="tag green">已解析</span><span class="fname">药膳食谱整理.pdf · 8 页</span><button class="btn btn-outline btn-sm">查看</button></div>
-            <div class="flowbar">
-              <span class="flow-step">落盘登记</span><span class="flow-step cur">后台并发解析（OCR / 分页提取）</span><span class="flow-step">人工检查效果</span><span class="flow-step">切「知识入库」确认入库</span>
-            </div>
-            <h3 style="margin-top:16px">📥 知识入库（切到入库 Tab 后）</h3>
-            <div class="form-row"><label>目标知识库（公共 / 个人）</label>
+            <h3>📥 知识入库（检查解析效果 → 编辑 / 一键润色 → 确认入库）</h3>
+            <div class="form-row"><label>目标知识库（两级筛选：公共 / 个人 → 具体库，可新建个人库）</label>
               <select><option>个人知识库 · 我的笔记</option><option>公共知识库 · 中医养生</option></select></div>
-            <div class="file-row"><span class="tag">待入库</span><span class="fname">丰隆穴按摩笔记.jpg</span><button class="btn btn-outline btn-sm">查看/编辑</button><button class="btn btn-primary btn-sm">入库</button></div>
-            <div style="font-size:12px;color:#8a7e72;margin-top:8px">入库进度 2 / 3 ·《丰隆穴按摩笔记》（进度条实时显示直到全部成功）</div>
+            <div class="file-row"><span class="tag">待入库</span><span class="fname">丰隆穴按摩笔记.jpg</span><button class="btn btn-outline btn-sm">查看/编辑</button><button class="btn btn-outline btn-sm">✨ 一键润色</button><button class="btn btn-outline btn-sm">版本</button><button class="btn btn-primary btn-sm">入库</button></div>
+            <div class="file-row"><span class="tag">待入库</span><span class="fname">药膳食谱整理.pdf</span><button class="btn btn-outline btn-sm">查看/编辑</button><button class="btn btn-primary btn-sm">入库</button></div>
+            <div style="font-size:12px;color:#8a7e72;margin-top:8px">入库进度 2 / 3 ·《丰隆穴按摩笔记》（进度条实时显示直到全部成功，失败项可重试）</div>
             <div class="progress-track"><div class="progress-fill"></div></div>
             <div class="flowbar">
               <span class="flow-step">切分向量化</span><span class="flow-step">写入目标知识库</span><span class="flow-step cur">后台编译 llm-wiki 百科卡片</span>
             </div>
+            <p class="note">入库的是最终确认文本；润色自动留档改动前后版本，「版本」按钮可预览并回溯恢复。</p>
           </div>
         </div>
-        <div class="panel" style="margin-top:16px">
-          <h3>🕘 入库历史（第三个 Tab · 按入库时间倒序 · 仅本人记录）</h3>
-          <div class="file-row"><span class="tag green">入库 227 段</span><span class="fname">02 第二章 增值税.docx · 2026-09-01 16:53</span><button class="btn btn-outline btn-sm">知识来源</button><button class="btn btn-outline btn-sm">查看解析文档</button></div>
-          <div class="file-row"><span class="tag green">入库 12 段</span><span class="fname">丰隆穴按摩笔记.jpg · 2026-08-30 10:12</span><button class="btn btn-outline btn-sm">知识来源</button><button class="btn btn-outline btn-sm">查看解析文档</button></div>
-          <div class="file-row"><span class="tag pink">源文件已删除</span><span class="fname">旧笔记扫描.jpg · 2026-08-12 09:00</span><button class="btn btn-outline btn-sm">查看解析文档</button></div>
-          <div class="note">「知识来源」预览原始文件（图片 / Word 原始排版 PDF / PDF 原件）；「查看解析文档」跳转详情页按页回溯解析文本片段。</div>
+        <!-- 入库历史 -->
+        <div class="subpanel" id="upload-sub-history" hidden>
+          <div class="panel">
+            <h3>🕘 入库历史（按入库时间倒序 · 仅本人记录）</h3>
+            <div class="file-row"><span class="tag green">入库 227 段</span><span class="fname">02 第二章 增值税.docx · 2026-09-01 16:53</span><button class="btn btn-outline btn-sm" onclick="switchView('doc-preview',null)">知识来源</button><button class="btn btn-outline btn-sm" onclick="switchView('ingest-detail',null)">查看解析文档</button></div>
+            <div class="file-row"><span class="tag green">入库 12 段</span><span class="fname">丰隆穴按摩笔记.jpg · 2026-08-30 10:12</span><button class="btn btn-outline btn-sm" onclick="switchView('attachment-preview',null)">知识来源</button><button class="btn btn-outline btn-sm" onclick="switchView('ingest-detail',null)">查看解析文档</button></div>
+            <div class="file-row"><span class="tag pink">源文件已删除</span><span class="fname">旧笔记扫描.jpg · 2026-08-12 09:00</span><button class="btn btn-outline btn-sm" onclick="switchView('ingest-detail',null)">查看解析文档</button></div>
+            <div class="note">「知识来源」预览原始文件（图片 / Word 原始排版 PDF / PDF 原件，经 Redis 文件缓存加速）；「查看解析文档」跳转入库详情页按页回溯解析文本片段。</div>
+          </div>
         </div>
       </div>
     </section>
@@ -540,25 +640,86 @@ body {
           </div>
         </div>
         <div class="panel demo-section" id="kb-detail-mock">
-          <h3>知识库详情 · 我的笔记 <span class="tag blue" style="margin-left:6px">私人</span> <button class="btn btn-outline btn-sm" style="float:right" onclick="switchView('upload', document.querySelector('[data-view=knowledge]'))">上传文档</button></h3>
-          <p class="note" style="margin-top:0">真实系统点击「上传文档」打开弹窗并锁定当前库；本样例跳转上传说明页。以下为七选项卡的布局示意，仅「知识收藏」「知识百科」可切换预览，其他选项不执行操作。</p>
-          <div class="demo-role-tabs" aria-label="详情选项卡">
-            <button class="btn btn-outline" aria-pressed="true">文档</button>
-            <button class="btn btn-outline" aria-pressed="false">检索测试</button>
-            <button class="btn btn-outline" aria-pressed="false">思维导图</button>
-            <button class="btn btn-outline" aria-pressed="false">知识图谱</button>
-            <button class="btn btn-outline" aria-pressed="false" onclick="switchView('bookmarks', document.querySelector('[data-view=knowledge]'))">知识收藏</button>
-            <button class="btn btn-outline" aria-pressed="false" onclick="switchView('wiki', document.querySelector('[data-view=knowledge]'))">知识百科</button>
-            <button class="btn btn-outline" aria-pressed="false">RAG评估</button>
+          <h3>知识库详情 · 我的笔记 <span class="tag blue" style="margin-left:6px">私人</span> <button class="btn btn-outline btn-sm" style="float:right" onclick="openModal('uploadModal')">上传文档</button></h3>
+          <p class="note" style="margin-top:0">真实系统点击库名进入独立详情页（/kb/:kbId），「上传文档」弹窗复用上传界面并锁定当前库。下方七个选项卡均可点击切换预览；游客仅可见「文档 / 检索测试」。</p>
+          <div class="subtabs" aria-label="详情选项卡">
+            <button class="subtab active" data-kb-tab="documents" onclick="switchSub('kb','documents',this)">文档</button>
+            <button class="subtab" data-kb-tab="retrieval" onclick="switchSub('kb','retrieval',this)">检索测试</button>
+            <button class="subtab" data-kb-tab="mindmap" onclick="switchSub('kb','mindmap',this)">思维导图</button>
+            <button class="subtab" data-kb-tab="graph" onclick="switchSub('kb','graph',this)">知识图谱</button>
+            <button class="subtab" data-kb-tab="bookmarks" onclick="switchSub('kb','bookmarks',this)">知识收藏</button>
+            <button class="subtab" data-kb-tab="wiki" onclick="switchSub('kb','wiki',this)">知识百科</button>
+            <button class="subtab" data-kb-tab="eval" onclick="switchSub('kb','eval',this)">RAG评估</button>
           </div>
-          <div class="filter-row">
-            <input style="flex:1" placeholder="搜索标题（或直接回车进行语义检索）… 已输入：丰隆">
-            <button class="btn btn-outline btn-sm">返回全部</button>
+          <!-- 文档 -->
+          <div class="subpanel" id="kb-sub-documents">
+            <div class="filter-row"><input style="flex:1" placeholder="搜索标题（或直接回车进行语义检索）… 已输入：丰隆"><button class="btn btn-outline btn-sm">返回全部</button></div>
+            <div class="item-card"><div class="item-head"><div class="thumb"></div><span class="tag">图片笔记</span><span class="item-title">丰隆穴按摩笔记</span><span class="tag blue">我的笔记 · 私人</span></div>
+              <div class="item-excerpt">丰隆：在小腿外侧，外踝尖上八寸……古人奉为祛痰至宝，痰多宜向丰隆寻……</div>
+              <div class="item-foot"><span>2026-07-26 21:14 · 1 页</span><span><a style="color:var(--color-primary);cursor:pointer" onclick="switchView('attachment-preview',null)">查看原图</a> · <a style="color:var(--color-primary);cursor:pointer" onclick="switchView('ingest-detail',null)">解析详情</a> · <a style="color:#b05555;cursor:pointer">删除</a></span></div></div>
+            <div class="item-card"><div class="item-head"><div class="thumb"></div><span class="tag green">Word</span><span class="item-title">第二章 增值税</span><span class="tag blue">我的笔记 · 私人</span></div>
+              <div class="item-excerpt">增值税是对商品生产、流通、劳务服务中多个环节的新增价值或商品的附加值征收的一种流转税……</div>
+              <div class="item-foot"><span>2026-09-01 16:53 · 12 页 · 227 分片</span><span><a style="color:var(--color-primary);cursor:pointer" onclick="switchView('doc-preview',null)">原始排版预览</a> · <a style="color:#b05555;cursor:pointer">删除</a></span></div></div>
           </div>
-          <div class="item-card"><div class="item-head"><div class="thumb"></div><span class="tag">图片笔记</span><span class="item-title">丰隆穴按摩笔记</span><span class="tag blue">我的笔记 · 私人</span></div>
-            <div class="item-excerpt">丰隆：在小腿外侧，外踝尖上八寸……古人奉为祛痰至宝，痰多宜向丰隆寻……</div>
-            <div class="item-foot"><span>2026-07-26 21:14 · 1 页</span><span><a style="color:var(--color-primary);cursor:pointer">查看原图</a> · <a style="color:#b05555;cursor:pointer">删除</a></span></div></div>
-          <p class="note">思维导图由后台生成、可重建并跳转文档；知识图谱由 llm-wiki 百科生成（力导向图 + 语义搜索 + 溯源），与「知识百科」选项卡同源绑定；RAG评估针对本库自动生成用例并计算 Ragas 四指标。游客仅可见「文档 / 检索测试」。</p>
+          <!-- 检索测试 -->
+          <div class="subpanel" id="kb-sub-retrieval" hidden>
+            <div class="filter-row"><input style="flex:1" placeholder="输入问题试跑本库混合检索…"><button class="btn btn-primary btn-sm">检索</button></div>
+            <div class="file-row"><span class="tag green">97%</span><span class="fname">丰隆穴 · 百科卡片（前置命中）</span><span class="tag">wiki</span></div>
+            <div class="file-row"><span class="tag">89%</span><span class="fname">文字记录2.jpg · 第 1 页片段</span><span class="tag blue">FAISS+BM25</span></div>
+            <p class="note">库内混合检索调试：FAISS 稠密 + BM25 稀疏 + RRF 融合 + Rerank 重排；百分比为检索相关度，非答案正确率。</p>
+          </div>
+          <!-- 思维导图 -->
+          <div class="subpanel" id="kb-sub-mindmap" hidden>
+            <div style="display:flex;gap:8px;margin-bottom:10px"><button class="btn btn-outline btn-sm">🔄 重建导图</button><span class="note" style="margin:0">后台 LLM 自动生成层级结构，点击节点跳转对应文档</span></div>
+            <div class="panel" style="background:#fffdf9;font-size:12.5px;line-height:2">
+              <b>我的笔记</b><br>
+              ├─ 中医养生 <span class="tag" style="cursor:pointer" onclick="switchSub('kb','documents',document.querySelector('[data-kb-tab=documents]'))">丰隆穴按摩笔记</span><br>
+              │&nbsp;&nbsp;&nbsp;├─ 祛痰要穴 · 定位 / 功效 / 按摩手法<br>
+              │&nbsp;&nbsp;&nbsp;└─ 配伍穴位（足三里 / 委中）<br>
+              └─ 财税学习 <span class="tag" style="cursor:pointer">第二章 增值税</span><br>
+              &nbsp;&nbsp;&nbsp;&nbsp;├─ 纳税人 / 销售额 / 留抵退税<br>
+              &nbsp;&nbsp;&nbsp;&nbsp;└─ 税率与征收率
+            </div>
+          </div>
+          <!-- 知识图谱 -->
+          <div class="subpanel" id="kb-sub-graph" hidden>
+            <div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap"><button class="btn btn-outline btn-sm">🔄 重建索引</button><input style="flex:1;min-width:160px;padding:6px 10px;border:1px solid var(--color-border);border-radius:8px;font-size:12.5px" placeholder="语义搜索节点…"><span class="note" style="margin:0">由 llm-wiki 百科聚合生成</span></div>
+            <div class="panel" style="background:#fffdf9;text-align:center;padding:26px">
+              <svg viewBox="0 0 320 150" width="100%" style="max-width:420px">
+                <line x1="160" y1="75" x2="70" y2="40" stroke="#d9c9b4"/><line x1="160" y1="75" x2="250" y2="40" stroke="#d9c9b4"/><line x1="160" y1="75" x2="90" y2="120" stroke="#d9c9b4"/><line x1="160" y1="75" x2="240" y2="120" stroke="#d9c9b4"/>
+                <circle cx="160" cy="75" r="22" fill="#c98a4b"/><text x="160" y="79" font-size="10" fill="#fff" text-anchor="middle">丰隆穴</text>
+                <circle cx="70" cy="40" r="16" fill="#e9bc7d"/><text x="70" y="44" font-size="9" fill="#fff" text-anchor="middle">胃经</text>
+                <circle cx="250" cy="40" r="16" fill="#e9bc7d"/><text x="250" y="44" font-size="9" fill="#fff" text-anchor="middle">化痰</text>
+                <circle cx="90" cy="120" r="16" fill="#e9bc7d"/><text x="90" y="124" font-size="9" fill="#fff" text-anchor="middle">足三里</text>
+                <circle cx="240" cy="120" r="16" fill="#e9bc7d"/><text x="240" y="124" font-size="9" fill="#fff" text-anchor="middle">脾经</text>
+              </svg>
+              <p class="note">力导向画布：拖拽 / 缩放浏览，点节点溯源到百科词条或原文文档；可手工增删节点 / 边。与「知识百科」同源绑定，词条删除联动清理图谱。</p>
+            </div>
+          </div>
+          <!-- 知识收藏 -->
+          <div class="subpanel" id="kb-sub-bookmarks" hidden>
+            <div class="filter-row"><input style="flex:1" placeholder="搜索收藏标题或内容…"><button class="chip-btn" style="background:var(--color-primary);color:#fff;border:none">全部</button><button class="chip-btn">中医</button><button class="chip-btn">税务</button></div>
+            <div class="item-card"><div class="item-head"><span class="tag">回答收藏</span><span class="item-title">丰隆穴的功效与按摩方法</span><span class="tag pink">标签：中医</span></div>
+              <div class="item-excerpt">祛痰解湿：丰隆穴被古人奉为祛痰至宝……拇指指腹按揉，酸胀为度，每次 3~5 分钟……</div>
+              <div class="item-foot"><span>2026-08-27 · 来自会话「丰隆穴有什么功效」</span><a style="color:var(--color-primary);cursor:pointer" onclick="switchView('bookmarks',null)">→ 收藏全页</a></div></div>
+            <p class="note">按当前库过滤的收藏；完整收藏管理见「知识收藏」跳转页。</p>
+          </div>
+          <!-- 知识百科 -->
+          <div class="subpanel" id="kb-sub-wiki" hidden>
+            <div class="item-card"><div class="item-head"><span class="tag">来源卡片</span><span class="item-title" style="cursor:pointer" onclick="openWiki()">丰隆穴</span><span class="tag green">2 chunks 已入向量库</span></div>
+              <div class="item-excerpt">## 概述 丰隆穴属足阳明胃经之络穴，为祛痰要穴… ## 关键要点 - 定位：外踝尖上八寸…</div>
+              <div class="item-foot"><span>由笔记「文字记录2.jpg」编译</span><button class="chip-btn" onclick="openWiki()">查看详情</button></div></div>
+            <p class="note">本库编译出的百科词条（含私人词条）；与知识图谱同源绑定。完整百科见「知识百科」跳转页。</p>
+          </div>
+          <!-- RAG评估 -->
+          <div class="subpanel" id="kb-sub-eval" hidden>
+            <div style="display:flex;gap:8px;margin-bottom:10px"><button class="btn btn-primary btn-sm">⚙ 自动生成用例</button><button class="btn btn-outline btn-sm">▶ 发起运行</button></div>
+            <div class="demo-stats">
+              <div class="demo-stat"><strong>83.3%</strong><span>忠实度</span></div><div class="demo-stat"><strong>91.7%</strong><span>回答相关性</span></div>
+              <div class="demo-stat"><strong>80.0%</strong><span>上下文精确率</span></div><div class="demo-stat"><strong>85.0%</strong><span>上下文召回率</span></div>
+            </div>
+            <p class="note">针对本库自动生成评测用例并计算 Ragas 四指标 + Hit@K/MRR，定位「哪些知识问答质量差」，回到文档选项卡补充资料后重跑。</p>
+          </div>
         </div>
       </div>
     </section>
@@ -605,25 +766,53 @@ body {
     <!-- ================= 系统管理 ================= -->
     <section class="view" id="view-settings">
       <div class="page-wrap">
-        <div class="page-head"><div><h2>系统设置 <span class="badge-admin">仅管理员</span></h2><div class="page-desc">OCR / 检索 / Redis 缓存 / llm-wiki 知识编译 均支持在线热切换（优先级高于 .env）；模型配置已合并至「模型网关」</div></div></div>
+        <div class="page-head"><div><h2>系统设置 <span class="badge-admin">仅管理员</span></h2><div class="page-desc">管理控制台 · 系统设置（/admin/settings）。各区块默认折叠、点击标题展开；在线热切换优先级高于 .env；网络模型连接参数在网关上游管理保存与测试，此处只读展示。未保存离开会弹窗确认。</div></div></div>
         <div class="setting-grid">
-          <div class="panel" style="grid-column:1/-1"><h3>模型配置 → 已合并至「模型网关」</h3>
+          <div class="panel" style="grid-column:1/-1"><h3>模型配置 → 已合并至「模型网关」 <button class="btn btn-primary btn-sm" style="float:right" onclick="switchView('gateway',null)">前往模型网关</button></h3>
             <div class="note" style="margin-top:0">原「LLM 语言模型」「知识助手模型」「OpenRouter 免费模型」三个区块已整体合并到模型网关（/admin/gateway），系统各模块的模型调用统一按网关「业务路由」解析：</div>
             <div class="setting-row"><span>LLM 语言模型</span><span>→ 网关「业务路由」chat_answer 角色 + 「网关默认模型」；上游地址/密钥在「上游管理」配置</span></div>
             <div class="setting-row"><span>知识助手模型</span><span>→ 网关「业务路由」assistant 角色（可单独绑定规则与模型）</span></div>
-            <div class="setting-row"><span>OpenRouter 免费模型</span><span>→ 网关「上游管理」→「导入免费模型」（勾选后并入免费层级上游）</span></div>
-            <div class="setting-row"><span>Embedding</span><span>text-embedding-v4 · 连接参数在模型网关配置，系统设置只读展示</span></div>
-            <div class="setting-row"><span>Rerank</span><span>网络模型在网关配置；本地 CrossEncoder 参数仍在系统设置</span></div>
-            <div class="note">每次调用的「路由规则 → 模型 → 上游」全链路可在网关「日志·审计」查看；后端日志同步显性记录 <code>[业务路由]</code>/<code>[网关选路]</code>/<code>[网关出网]</code> 三段。</div></div>
+            <div class="setting-row"><span>OpenRouter 免费模型</span><span>→ 网关「上游管理」→「导入免费模型」（勾选后并入免费层级上游）</span></div></div>
+          <div class="panel"><h3>OCR 文字识别</h3>
+            <div class="setting-row"><span>当前引擎</span><b>阿里云百炼（手写体精度高）</b></div>
+            <div class="setting-row"><span>可选引擎</span><span>PaddleOCR 本地 / 阿里云百炼 / 自定义 API</span></div>
+            <div class="setting-row"><span>网络 OCR 连接参数</span><span class="tag">只读 · 在网关上游管理（ocr 类别）</span></div>
+            <div class="note">上传界面亦可即时切换引擎；本地引擎字段保留在此。</div></div>
+          <div class="panel"><h3>联网搜索</h3>
+            <div class="setting-row"><span>启用联网搜索</span><span class="toggle on" onclick="this.classList.toggle('on')" style="margin-left:auto"></span></div>
+            <div class="setting-row"><span>搜索源</span><b>DuckDuckGo（免费）</b></div>
+            <div class="setting-row"><span>可选源</span><span>AnySearch / Bing / SerpAPI</span></div></div>
+          <div class="panel"><h3>Embedding 向量模型</h3>
+            <div class="setting-row"><span>当前生效模型</span><b>text-embedding-v4</b></div>
+            <div class="setting-row"><span>连接参数</span><span class="tag">只读 · 网关上游 embedding 类别</span></div>
+            <div class="setting-row"><span>业务客户端最近状态</span><span class="tag green">正常</span></div>
+            <div class="note">保存后在网关点行内「测试」逐模型检查；业务路由为 embed 绑定规则/模型。</div></div>
+          <div class="panel"><h3>Rerank 重排序模型</h3>
+            <div class="setting-row"><span>网络模型</span><span class="tag">只读 · 网关上游 rerank 类别</span></div>
+            <div class="setting-row"><span>本地 CrossEncoder</span><b>启用（兜底）</b></div>
+            <div class="setting-row"><span>重排保留 top-k</span><b>9</b></div></div>
           <div class="panel"><h3>检索参数</h3>
+            <div class="setting-row"><span>检索模式</span><b>hybrid（混合）</b></div>
             <div class="setting-row"><span>稠密召回 top-k</span><b>6</b></div>
             <div class="setting-row"><span>稀疏召回 top-k（BM25）</span><b>6</b></div>
-            <div class="setting-row"><span>重排保留 top-k</span><b>9</b></div>
             <div class="setting-row"><span>最低相关度阈值</span><b>40%</b></div>
-            <div class="note">混合检索：FAISS 稠密 + BM25 稀疏 + RRF 融合；可见库 &gt; 3 时先做 LLM 路由选库。</div></div>
+            <div class="note">FAISS 稠密 + BM25 稀疏 + RRF 融合；可见库 &gt; 3 时先做 LLM 路由选库。</div></div>
+          <div class="panel"><h3>Redis 文件缓存</h3>
+            <div class="setting-row"><span>启用文件缓存</span><span class="toggle on" onclick="this.classList.toggle('on')" style="margin-left:auto"></span></div>
+            <div class="setting-row"><span>Redis 地址</span><code>redis://127.0.0.1:6379/0</code></div>
+            <div class="setting-row"><span>maxmemory</span><b>512MB · allkeys-lru</b></div>
+            <div class="note">原始文件/预览 PDF 经 Redis 加速；公共库全局共享、个人库按属主隔离；不可用自动降级直读磁盘，响应头 X-File-Cache 标注命中。</div></div>
+          <div class="panel"><h3>用户注册</h3>
+            <div class="setting-row"><span>开放注册</span><span class="toggle on" onclick="this.classList.toggle('on')" style="margin-left:auto"></span></div>
+            <div class="note">首个注册用户自动成为管理员；关闭后仅管理员可建号。</div></div>
+          <div class="panel"><h3>游客访问</h3>
+            <div class="setting-row"><span>允许游客体验</span><span class="toggle on" onclick="this.classList.toggle('on')" style="margin-left:auto"></span></div>
+            <div class="setting-row"><span>每日免费次数</span><b>20</b></div>
+            <div class="note">游客计数持久化（guest_usage），仅可对话，不可写知识库。</div></div>
           <div class="panel" style="grid-column:1/-1"><h3>llm-wiki 知识编译 <span class="tag" style="margin-left:6px">增量共存 · 编译层</span></h3>
             <div class="setting-row"><span>入库后自动编译百科卡片</span><span class="toggle on" onclick="this.classList.toggle('on')" style="margin-left:auto"></span></div>
             <div class="setting-row"><span>检索时百科卡片优先前置</span><span class="toggle on" onclick="this.classList.toggle('on')" style="margin-left:auto"></span></div>
+            <div class="setting-row"><span>对话历史知识沉淀（高频主题 → 私人 digest）</span><span class="toggle on" onclick="this.classList.toggle('on')" style="margin-left:auto"></span></div>
             <div class="setting-row" style="gap:10px">
               <span>已编译词条：26（来源卡片 25 · 综合词条 1）</span>
               <span style="margin-left:auto;display:flex;gap:8px">
@@ -638,77 +827,253 @@ body {
       </div>
     </section>
 
-    <!-- ================= 回归评测 ================= -->
+    <!-- ================= 回归评测（RAG / Agent 两域） ================= -->
     <section class="view" id="view-eval">
       <div class="page-wrap">
-        <div class="page-head"><div><h2>回归评测 <span class="badge-admin">管理员 / 运维</span></h2><div class="page-desc">三页签评测平台：评测集（测什么）· 评估器（怎么测）· 实验（测得怎样）；防止优化引入回退</div></div></div>
-        <div class="demo-role-tabs" aria-label="评测页签">
-          <button class="btn btn-outline" aria-pressed="true">评测集</button>
-          <button class="btn btn-outline" aria-pressed="false">评估器</button>
-          <button class="btn btn-outline" aria-pressed="false">实验</button>
+        <div class="page-head"><div><h2>回归评测 <span class="badge-admin">管理员 / 运维</span></h2><div class="page-desc">管理控制台 · 回归评测（/admin/eval）。分 RAG 评测 / Agent 评测两域（?domain= 深链，存量 ?tab= 自动映射 RAG）；评测离线独立，不写线上会话、不计 usage。</div></div></div>
+        <div class="domain-switch">
+          <button class="active" data-eval-domain="rag" onclick="switchEvalDomain('rag')">RAG 评测</button>
+          <button data-eval-domain="agent" onclick="switchEvalDomain('agent')">Agent 评测</button>
         </div>
-        <div class="upload-grid">
-          <div class="panel">
-            <h3>评测集 · 核心问答集（12 用例）</h3>
-            <div class="file-row"><span class="tag blue">用例</span><span class="fname">丰隆穴有什么功效？（期望来源：丰隆穴按摩笔记.jpg）</span><button class="btn btn-outline btn-sm">编辑</button></div>
-            <div class="file-row"><span class="tag blue">用例</span><span class="fname">增值税的纳税人包括哪些？（期望关键词：纳税人）</span><button class="btn btn-outline btn-sm">编辑</button></div>
-            <div class="zone-row">
-              <div class="mini-zone"><b>新增用例</b>问题 / 参考答案 / 期望关键词 / 期望来源</div>
-              <div class="mini-zone"><b>批量导入</b>JSON 批量导入，或从聊天「点踩」反馈一键去重导入</div>
-            </div>
-            <div class="flowbar">
-              <span class="flow-step cur">一键回归</span><span class="flow-step">重放检索 → 生成</span><span class="flow-step">Ragas 四指标 + 命中率</span>
-            </div>
-            <div class="note">同一评测集同时只允许一个 run 运行；运行明细支持与上一次 run 环比。</div>
+        <!-- ===== RAG 域 ===== -->
+        <div id="eval-domain-rag">
+          <div class="subtabs">
+            <button class="subtab active" data-evalrag-tab="datasets" onclick="switchSub('evalrag','datasets',this)">评测集</button>
+            <button class="subtab" data-evalrag-tab="evaluators" onclick="switchSub('evalrag','evaluators',this)">评估器</button>
+            <button class="subtab" data-evalrag-tab="experiments" onclick="switchSub('evalrag','experiments',this)">实验</button>
+            <button class="subtab" data-evalrag-tab="online" onclick="switchSub('evalrag','online',this)">在线评测</button>
+            <button class="subtab" data-evalrag-tab="badcases" onclick="switchSub('evalrag','badcases',this)">BadCase 分析</button>
           </div>
-          <div class="panel">
-            <h3>评估器 · 可复用评估工作流</h3>
-            <div class="file-row"><span class="tag green">评估器</span><span class="fname">核心问答回归 · 绑定「核心问答集」</span><button class="btn btn-outline btn-sm">编辑</button><button class="btn btn-outline btn-sm">运行</button></div>
-            <div class="file-row"><span class="tag">进行中</span><span class="fname">页内实时监控 · 8 / 12 用例 · 2.5s 轮询</span></div>
-            <div class="note" style="margin-bottom:10px">Prompt / Skill 专项评测工作台整合于此页签：静态断言 + Rubric 多维打分 + A/B 对比，优化文本可一键上线。</div>
-            <h3 style="margin-top:16px">实验 · 跨评测集运行总表</h3>
-            <div class="file-row"><span class="tag green">已完成</span><span class="fname">run-0902 · 核心问答集 · 命中 91.7% · 忠实 83.3% · 均耗 4.1s</span><button class="btn btn-outline btn-sm">明细</button></div>
-            <div class="file-row"><span class="tag green">已完成</span><span class="fname">run-0825 · 核心问答集 · 命中 75.0% · 忠实 75.0% · 均耗 5.8s</span><button class="btn btn-outline btn-sm">明细</button></div>
-            <div class="note">点击任一行进入该运行明细；调整 prompt / 检索 / 重排后重跑，对比指标变化判断是否回退。</div>
+          <div class="subpanel" id="evalrag-sub-datasets">
+            <div class="upload-grid">
+              <div class="panel"><h3>评测集 · 核心问答集（12 用例）</h3>
+                <div class="file-row"><span class="tag blue">用例</span><span class="fname">丰隆穴有什么功效？（期望来源：丰隆穴按摩笔记.jpg）</span><button class="btn btn-outline btn-sm">编辑</button></div>
+                <div class="file-row"><span class="tag blue">用例</span><span class="fname">增值税的纳税人包括哪些？（期望关键词：纳税人）</span><button class="btn btn-outline btn-sm">编辑</button></div>
+                <div class="zone-row"><div class="mini-zone"><b>新增 / 批量导入</b>手工新增、JSON 批量、聊天「点踩」一键去重导入</div>
+                  <div class="mini-zone"><b>测试集构建流水线</b>LLM 基于知识库生成 / 日志挖掘周期任务产候选</div></div>
+                <div class="file-row"><span class="tag">候选审核</span><span class="fname">3 条待审候选 · 抽屉编辑后通过/拒绝/批量入集（origin 可追溯）</span><button class="btn btn-primary btn-sm">审核</button></div>
+                <div class="note">点击卡片进明细页发起运行；同一评测集同时只允许一个 run。</div></div>
+              <div class="panel"><h3>运行明细 · Ragas 四指标 + 检索排名</h3>
+                <div class="demo-stats"><div class="demo-stat"><strong>83.3%</strong><span>忠实度</span></div><div class="demo-stat"><strong>91.7%</strong><span>回答相关性</span></div><div class="demo-stat"><strong>80.0%</strong><span>上下文精确率</span></div><div class="demo-stat"><strong>85.0%</strong><span>上下文召回率</span></div></div>
+                <div class="demo-stats"><div class="demo-stat"><strong>0.92</strong><span>Hit@5</span></div><div class="demo-stat"><strong>0.87</strong><span>MRR</span></div><div class="demo-stat"><strong>91.7%</strong><span>检索命中率</span></div><div class="demo-stat"><strong>4.1s</strong><span>平均耗时</span></div></div>
+                <div class="note">Hit@K/MRR 确定性零 LLM 成本（K 可配）；跨 run 环比防优化回退；展开用例看单条得分与判定依据。</div></div>
+            </div>
+          </div>
+          <div class="subpanel" id="evalrag-sub-evaluators" hidden>
+            <div class="panel"><h3>评估器 · 可复用评估工作流（DeepEval 风格指标配置）</h3>
+              <div class="file-row"><span class="tag green">评估器</span><span class="fname">核心问答回归 · 绑定「核心问答集」· 指标：四指标 + 幻觉率 + GEval</span><button class="btn btn-outline btn-sm">编辑</button><button class="btn btn-primary btn-sm">运行</button></div>
+              <div class="file-row"><span class="tag">进行中</span><span class="fname">页内实时监控 · 8 / 12 用例 · 2.5s 轮询</span></div>
+              <div class="setting-row"><span>幻觉率（越低越好）</span><span class="toggle on" onclick="this.classList.toggle('on')" style="margin-left:auto"></span></div>
+              <div class="setting-row"><span>GEval 自定义准则（多选）</span><b>清晰度 · 可执行性 · 安全合规</b></div>
+              <div class="setting-row"><span>Hit@K 的 K</span><b>5</b></div>
+              <div class="note">不选指标 = 默认 Ragas 四指标兼容存量；单点指标超时降级不中断 run。</div></div>
+          </div>
+          <div class="subpanel" id="evalrag-sub-experiments" hidden>
+            <div class="panel"><h3>实验 · 跨评测集运行总表</h3>
+              <div class="demo-table-wrap"><table class="demo-table"><thead><tr><th>Run</th><th>评测集</th><th>命中率</th><th>忠实度</th><th>Hit@5</th><th>均耗</th><th></th></tr></thead>
+                <tbody><tr><td>run-0902</td><td>核心问答集</td><td>91.7%</td><td>83.3%</td><td>0.92</td><td>4.1s</td><td><button class="btn btn-outline btn-sm">明细</button></td></tr>
+                <tr><td>run-0825</td><td>核心问答集</td><td>75.0%</td><td>75.0%</td><td>0.80</td><td>5.8s</td><td><button class="btn btn-outline btn-sm">明细</button></td></tr></tbody></table></div>
+              <div class="note">点击任一行进入逐用例结果与环比；调整 prompt / 检索 / 重排后重跑对比，判断是否回退。</div></div>
+          </div>
+          <div class="subpanel" id="evalrag-sub-online" hidden>
+            <div class="panel"><h3>在线评测 · 后台采样线上真实回答（文本已脱敏）</h3>
+              <div class="demo-stats"><div class="demo-stat"><strong>0.86</strong><span>忠实度均分</span></div><div class="demo-stat"><strong>0.81</strong><span>GEval 均分</span></div><div class="demo-stat"><strong style="color:#b05555">4.2%</strong><span>点踩率</span></div><div class="demo-stat"><strong>11%</strong><span>追问率</span></div><div class="demo-stat"><strong style="color:#b05555">2.1%</strong><span>空回答率</span></div></div>
+              <div class="note">按采样率自动评测（忠实度 + GEval）+ 业务三率（点踩率/追问率/空回答率），聚合均分与三率回流可观测性并参与质量告警，无需手动发起。</div></div>
+          </div>
+          <div class="subpanel" id="evalrag-sub-badcases" hidden>
+            <div class="panel"><h3>BadCase 分析 · 多源收集 + 七分类 + 闭环</h3>
+              <div class="demo-table-wrap"><table class="demo-table"><thead><tr><th>分类</th><th>数量</th><th>来源</th><th>归因</th><th></th></tr></thead>
+                <tbody><tr><td><span class="tag pink">检索未命中</span></td><td>5</td><td>离线/点踩</td><td>知识库缺资料</td><td><button class="btn btn-outline btn-sm">转用例</button></td></tr>
+                <tr><td><span class="tag pink">幻觉</span></td><td>2</td><td>在线评测</td><td>证据不足生成</td><td><button class="btn btn-outline btn-sm">转用例</button></td></tr>
+                <tr><td><span class="tag">空回答</span></td><td>1</td><td>空回答</td><td>上游异常</td><td><button class="btn btn-outline btn-sm">转用例</button></td></tr>
+                <tr><td><span class="tag">工具失败</span></td><td>1</td><td>Agent 低分</td><td>web_search 超时</td><td><button class="btn btn-outline btn-sm">转用例</button></td></tr></tbody></table></div>
+              <div class="note">七分类：检索未命中 / 上下文为空 / 幻觉 / 答非所问 / 空回答 / 工具失败 / 质量低分；确定性分类 + 规则归因 + 可选 LLM 增强。<b>转评测用例跑回归 → run 结束自动判定复现</b>形成闭环。</div></div>
+          </div>
+        </div>
+        <!-- ===== Agent 域 ===== -->
+        <div id="eval-domain-agent" hidden>
+          <div class="subtabs">
+            <button class="subtab active" data-evalagent-tab="trajectory" onclick="switchSub('evalagent','trajectory',this)">轨迹评测</button>
+            <button class="subtab" data-evalagent-tab="online" onclick="switchSub('evalagent','online',this)">在线轨迹</button>
+            <button class="subtab" data-evalagent-tab="prompt-skill" onclick="switchSub('evalagent','prompt-skill',this)">Prompt · Skill</button>
+          </div>
+          <div class="subpanel" id="evalagent-sub-trajectory">
+            <div class="upload-grid">
+              <div class="panel"><h3>轨迹评测 · kind=agent 评测集（真实运行 Agent）</h3>
+                <div class="file-row"><span class="tag blue">用例</span><span class="fname">先检索穴位知识再制定失眠调理方案</span><button class="btn btn-outline btn-sm">编辑</button></div>
+                <div class="setting-row"><span>期望工具序列（有序）</span><b>search_knowledge → search_knowledge</b></div>
+                <div class="setting-row"><span>匹配模式</span><b>严格 / 无序 / 子集 / 超集</b></div>
+                <div class="note">用例编辑器配 question + 有序期望工具序列（增删移）+ 匹配模式 + 期望结果；react 模式、知识+搜索全开逐用例真实跑。</div></div>
+              <div class="panel"><h3>结果 · AgentEvals 匹配 + DeepEval 六指标</h3>
+                <div class="file-row"><span class="tag green">严格匹配 ✓</span><span class="fname">实际序列 vs 期望一致</span></div>
+                <div class="demo-stats"><div class="demo-stat"><strong>0.90</strong><span>任务完成</span></div><div class="demo-stat"><strong>0.85</strong><span>步骤效率</span></div><div class="demo-stat"><strong>0.95</strong><span>工具正确</span></div><div class="demo-stat"><strong>0.88</strong><span>参数正确</span></div><div class="demo-stat"><strong>0.82</strong><span>规划质量</span></div><div class="demo-stat"><strong>0.86</strong><span>规划遵循</span></div></div>
+                <div class="note">整体轨迹评分 + 逐指标 reason；四模式匹配徽标。</div></div>
+            </div>
+          </div>
+          <div class="subpanel" id="evalagent-sub-online" hidden>
+            <div class="panel"><h3>在线轨迹 · 后台采样线上 chat Agent 轨迹（无参考六指标）</h3>
+              <div class="demo-stats"><div class="demo-stat"><strong>0.84</strong><span>质量均分</span></div><div class="demo-stat"><strong>10%</strong><span>采样率</span></div><div class="demo-stat"><strong>5</strong><span>每轮上限</span></div></div>
+              <div class="form-row"><label>手动评测指定 trace</label><input placeholder="输入 trace ID，如 t-1026…"></div>
+              <div class="note">聚合回流可观测性并参与告警；文本已脱敏。</div></div>
+          </div>
+          <div class="subpanel" id="evalagent-sub-prompt-skill" hidden>
+            <div class="panel"><h3>Prompt · Skill 专项评测工作台</h3>
+              <div class="file-row"><span class="tag green">静态断言</span><span class="fname">长度 / 约束 / 敏感信息等确定性门禁</span><span class="tag green">通过</span></div>
+              <div class="file-row"><span class="tag blue">Rubric 多维</span><span class="fname">LLM 按清晰度 / 可执行性 / 安全合规加权评分</span><b>0.83</b></div>
+              <div class="file-row"><span class="tag">A/B 对比</span><span class="fname">真实问答链路对比当前版本 vs 优化候选</span><button class="btn btn-outline btn-sm">查看</button></div>
+              <div class="note">据弱维度产出优化文本，二次编辑后一键上线：提示词发新版本即刻生效，技能更新内容并自动重跑安全预审。</div></div>
           </div>
         </div>
       </div>
     </section>
 
-    <!-- ================= 模型网关（模拟数据） ================= -->
+    <!-- ================= 模型网关（八页签 · 模拟数据） ================= -->
     <section class="view" id="view-gateway">
       <div class="page-wrap">
-        <div class="page-head"><div><h2>模型网关 <span class="badge-admin">管理员 / 运维</span></h2><p class="page-desc">系统各模块统一经「业务路由」出网（角色 → 规则 → 模型 → 上游）；统一接入模型、分发独立密钥、查看用量与安全审计 · 以下均为模拟数据</p></div><span class="tag">近 7 天</span></div>
-        <div class="demo-stats">
-          <div class="demo-stat"><strong>2</strong><span>可用上游渠道</span></div><div class="demo-stat"><strong>3</strong><span>已启用密钥</span></div>
-          <div class="demo-stat"><strong>320</strong><span>调用次数</span></div><div class="demo-stat"><strong>98.8%</strong><span>调用成功率</span></div>
+        <div class="page-head"><div><h2>模型网关 <span class="badge-admin">管理员 / 运维</span></h2><div class="page-desc">管理控制台 · 模型网关（/admin/gateway）。对下游统一暴露 OpenAI 兼容协议（<code>/v1/chat/completions</code>），凭本地密钥鉴权、屏蔽真实上游 Key；系统各模块统一经「业务路由」出网（角色 → 规则 → 模型 → 上游）。以下均为模拟数据。</div></div><span class="tag">近 7 天</span></div>
+        <div class="subtabs">
+          <button class="subtab active" data-gw-tab="dashboard" onclick="switchSub('gw','dashboard',this)">仪表盘</button>
+          <button class="subtab" data-gw-tab="upstreams" onclick="switchSub('gw','upstreams',this)">上游管理</button>
+          <button class="subtab" data-gw-tab="rules" onclick="switchSub('gw','rules',this)">路由规则</button>
+          <button class="subtab" data-gw-tab="routes" onclick="switchSub('gw','routes',this)">业务路由</button>
+          <button class="subtab" data-gw-tab="keys" onclick="switchSub('gw','keys',this)">密钥 · 配额</button>
+          <button class="subtab" data-gw-tab="tokens" onclick="switchSub('gw','tokens',this)">Token 分析</button>
+          <button class="subtab" data-gw-tab="logs" onclick="switchSub('gw','logs',this)">日志 · 审计</button>
+          <button class="subtab" data-gw-tab="security" onclick="switchSub('gw','security',this)">安全审计中心</button>
         </div>
-        <div class="panel"><h3>渠道管理</h3><div class="demo-table-wrap"><table class="demo-table">
-          <thead><tr><th>渠道</th><th>协议</th><th>对外模型 → 上游模型</th><th>优先级</th><th>健康状态</th></tr></thead>
-          <tbody><tr><td>百炼主渠道（示例）</td><td>OpenAI 兼容</td><td>study-chat → qwen-plus</td><td>10</td><td><span class="tag green">健康</span></td></tr>
-          <tr><td>本地备用渠道（示例）</td><td>Ollama</td><td>study-chat → qwen2.5:7b</td><td>0</td><td><span class="tag green">健康</span></td></tr></tbody>
-        </table></div><p class="note">先选择高优先级渠道；同级按权重分流，渠道故障时尝试备用渠道。</p></div>
-        <div class="panel"><h3>业务路由 <span class="tag" style="margin-left:6px">系统唯一模型入口</span></h3>
-          <div class="setting-row" style="margin-bottom:8px"><span>网关默认模型</span><span style="color:var(--color-primary)">openrouter/free</span><span class="note" style="margin:0">角色未填模型时使用，自动校验能被命中规则的上游承接</span></div>
-          <div class="demo-table-wrap"><table class="demo-table">
-          <thead><tr><th>业务角色</th><th>路由规则</th><th>模型</th><th>说明</th></tr></thead>
-          <tbody><tr><td>chat_answer（问答）</td><td>open&amp;model-mix</td><td>（默认模型）</td><td>主问答流式生成</td></tr>
-          <tr><td>assistant（知识助手）</td><td>open&amp;model-mix</td><td>（默认模型）</td><td>右侧栏伴随 Agent</td></tr>
-          <tr><td>intent_rewrite / evidence_check / wiki_compile</td><td>open&amp;model-mix</td><td>（默认模型）</td><td>意图改写 / 证据校验 / 百科编译</td></tr></tbody>
-        </table></div><p class="note">原系统设置的 LLM / 知识助手 / OpenRouter 免费模型已合并至此；每次调用的「路由规则 → 模型 → 上游」在后端日志以 <code>[业务路由]</code>/<code>[网关选路]</code>/<code>[网关出网]</code> 显性记录。</p></div>
-        <div class="setting-grid demo-section">
-          <div class="panel"><h3>密钥与配额</h3><div class="setting-row"><span>学习客户端（示例）</span><span class="tag green">已启用</span></div>
-            <div class="setting-row"><span>本地密钥</span><code>sk-jzrm-••••••（不可用）</code></div>
-            <div class="setting-row"><span>已用请求 / 配额</span><b>120 / 1,000</b></div><div class="setting-row"><span>允许模型</span><b>study-chat</b></div>
-            <p class="note">真实系统中由管理员生成密钥并交给用户，明文只展示一次；此处不包含任何有效凭据。</p></div>
-          <div class="panel"><h3>安全审计</h3><div class="setting-row"><span>模式</span><span class="tag">仅审计</span></div>
-            <div class="setting-row"><span>隐写 / 工具命令 / 外发检测</span><span class="tag green">已开启</span></div>
-            <div class="setting-row"><span>日志保留</span><span>30 天</span></div><p class="note">可按业务需要配置警告、脱敏或阻断策略，审计不等于绝对安全保证。</p></div>
+        <!-- 仪表盘 -->
+        <div class="subpanel" id="gw-sub-dashboard">
+          <div class="demo-stats">
+            <div class="demo-stat"><strong>4</strong><span>上游 · 启用 3</span></div>
+            <div class="demo-stat"><strong>3</strong><span>路由规则 · 启用 3</span></div>
+            <div class="demo-stat"><strong>3</strong><span>本地密钥 · 启用 3</span></div>
+            <div class="demo-stat"><strong>320</strong><span>近 7 天调用 · 成功 316 / 失败 3 / 阻断 1</span></div>
+            <div class="demo-stat"><strong>98.8%</strong><span>成功率 · 均延迟 860ms</span></div>
+            <div class="demo-stat"><strong>86k</strong><span>Token 消耗 · 命中风险 2</span></div>
+          </div>
+          <div class="upload-grid">
+            <div class="panel"><h3>每日调用趋势 <span class="tag" style="float:right">绿成功 / 红失败 / 灰阻断</span></h3>
+              <div class="demo-trend">
+                <div><span class="trend-val">42</span><i style="height:60%"></i>11-09</div>
+                <div><span class="trend-val">55</span><i style="height:78%"></i>11-10</div>
+                <div><span class="trend-val">38</span><i style="height:54%"></i>11-11</div>
+                <div><span class="trend-val">70</span><i style="height:100%"></i>11-12</div>
+                <div><span class="trend-val">48</span><i style="height:68%"></i>11-13</div>
+                <div><span class="trend-val">33</span><i style="height:47%"></i>11-14</div>
+                <div><span class="trend-val">34</span><i style="height:48%"></i>11-15</div>
+              </div>
+              <p class="note">上游健康：<span class="status-dot ok"></span>健康 3 · <span class="status-dot timeout"></span>降级 1 · <span class="status-dot error"></span>熔断 0；可切换近 7 / 14 / 30 天。</p></div>
+            <div class="panel"><h3>风险等级分布</h3>
+              <div class="setting-row"><span><span class="tag green">低危</span></span><span class="share-bar"><span style="width:70%"></span></span><b>14</b></div>
+              <div class="setting-row"><span><span class="tag" style="background:#fff4e0;color:#a06a00">中危</span></span><span class="share-bar"><span style="width:25%;background:#e0a44a"></span></span><b>5</b></div>
+              <div class="setting-row"><span><span class="tag pink">高危</span></span><span class="share-bar"><span style="width:10%;background:#c62828"></span></span><b>2</b></div>
+              <p class="note">凭证泄露 / 敏感路径 / 工具命令外联 / Unicode 隐写 / 追踪像素 / 公网 IP 探测等风险按等级聚合。</p></div>
+          </div>
+          <div class="upload-grid demo-section">
+            <div class="panel"><h3>规则调用分布</h3><div class="demo-table-wrap"><table class="demo-table">
+              <thead><tr><th>规则</th><th>调用</th><th>成功率</th><th>Token</th><th>均延迟</th></tr></thead>
+              <tbody><tr><td>open&amp;model-mix</td><td>240</td><td>99%</td><td>62k</td><td>820ms</td></tr>
+              <tr><td>bailian-main</td><td>66</td><td>98%</td><td>20k</td><td>910ms</td></tr>
+              <tr><td>local-fallback</td><td>14</td><td>93%</td><td>4k</td><td>1.4s</td></tr></tbody></table></div></div>
+            <div class="panel"><h3>Top 调用密钥</h3><div class="demo-table-wrap"><table class="demo-table">
+              <thead><tr><th>密钥</th><th>调用</th><th>Token</th><th>风险</th></tr></thead>
+              <tbody><tr><td>学习客户端</td><td>180</td><td>48k</td><td>0</td></tr>
+              <tr><td>知识助手</td><td>96</td><td>28k</td><td><span class="tag pink">1</span></td></tr>
+              <tr><td>本地测试</td><td>44</td><td>10k</td><td>0</td></tr></tbody></table></div></div>
+          </div>
+          <div class="panel demo-section"><h3>最近风险调用 <button class="btn btn-outline btn-sm" style="float:right" onclick="switchSub('gw','logs',document.querySelector('[data-gw-tab=logs]'))">查看全部日志 →</button></h3>
+            <div class="file-row"><span class="tag pink">高危</span><span class="fname">知识助手 · study-chat · 命中工具命令外联</span><span class="tag">已脱敏</span><span style="color:#b3a798;font-size:11.5px">11-12 10:24</span></div>
+            <div class="file-row"><span class="tag" style="background:#fff4e0;color:#a06a00">中危</span><span class="fname">匿名 · study-chat · Unicode 隐写字符</span><span class="tag">仅审计</span><span style="color:#b3a798;font-size:11.5px">11-11 16:02</span></div></div>
         </div>
-        <details class="panel demo-section"><summary>查看一次调用的示例日志与接入说明</summary>
-          <p>学习客户端 → study-chat → 百炼主渠道 → qwen-plus → 成功（200）<br>输入 420 Token · 输出 180 Token · 耗时 2.1 秒</p>
-          <p class="note">下游选择 OpenAI 兼容服务，填写部署站点的 /v1 地址、管理员分发的网关密钥、允许的对外模型名即可调用。本站登录密码不能作为网关密钥。</p>
-        </details>
+        <!-- 上游管理 -->
+        <div class="subpanel" id="gw-sub-upstreams" hidden>
+          <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap"><button class="btn btn-primary btn-sm">＋ 添加上游</button><button class="btn btn-outline btn-sm" onclick="openModal('importFreeModal')">从 OpenRouter 导入免费模型</button><span class="note" style="margin:0;align-self:center">按类别分组折叠；名称 / 层级 / 状态 / 权重 / 健康度 / 延迟，行内「测试」逐模型连通性检查。</span></div>
+          <div class="panel"><h3>LLM <span class="sg-count" style="color:#b3a798;font-weight:400">2</span></h3><div class="demo-table-wrap"><table class="demo-table">
+            <thead><tr><th>名称</th><th>层级</th><th>对外模型 → 上游模型</th><th>权重</th><th>健康</th><th></th></tr></thead>
+            <tbody><tr><td>百炼主渠道</td><td>付费</td><td>study-chat → qwen-plus</td><td>10</td><td><span class="tag green">健康</span></td><td><button class="btn btn-outline btn-sm">测试</button> <button class="btn btn-outline btn-sm">编辑</button></td></tr>
+            <tr><td>本地备用（Ollama）</td><td>本地</td><td>study-chat → qwen2.5:7b</td><td>0</td><td><span class="tag green">健康</span></td><td><button class="btn btn-outline btn-sm">测试</button> <button class="btn btn-outline btn-sm">编辑</button></td></tr></tbody></table></div></div>
+          <div class="panel demo-section"><h3>OCR <span class="sg-count" style="color:#b3a798;font-weight:400">1</span></h3>
+            <div class="file-row"><span class="tag green">健康</span><span class="fname">阿里云百炼 OCR · qwen-vl-ocr（手写体精度高）</span><button class="btn btn-outline btn-sm">测试</button></div></div>
+          <div class="panel demo-section"><h3>Embedding <span class="sg-count" style="color:#b3a798;font-weight:400">1</span></h3>
+            <div class="file-row"><span class="tag green">健康</span><span class="fname">DashScope · text-embedding-v4（1024 维）</span><button class="btn btn-outline btn-sm">测试</button></div></div>
+          <div class="panel demo-section"><h3>ReRank <span class="sg-count" style="color:#b3a798;font-weight:400">1</span></h3>
+            <div class="file-row"><span class="tag" style="background:#fff4e0;color:#a06a00">降级</span><span class="fname">DashScope · gte-rerank（本地 CrossEncoder 兜底）</span><button class="btn btn-outline btn-sm">重置健康</button> <button class="btn btn-outline btn-sm">测试</button></div>
+            <p class="note">先选高优先级 / 高权重上游；同级按权重分流，故障自动切换备用并熔断，恢复后可「重置健康」。免费模型导入后并入免费层级上游。</p></div>
+        </div>
+        <!-- 路由规则 -->
+        <div class="subpanel" id="gw-sub-rules" hidden>
+          <div style="display:flex;gap:8px;margin-bottom:12px"><button class="btn btn-primary btn-sm">＋ 新建规则</button><span class="note" style="margin:0;align-self:center">规则 = 一组上游 + 优先级 + 权重；命中后按优先级选上游，同级按权重负载均衡，故障切换。</span></div>
+          <div class="panel"><div class="demo-table-wrap"><table class="demo-table">
+            <thead><tr><th>规则名</th><th>匹配模型</th><th>上游（优先级 / 权重）</th><th>状态</th><th></th></tr></thead>
+            <tbody><tr><td>open&amp;model-mix</td><td>openrouter/free · study-chat</td><td>免费层级(10) + 百炼(5) + 本地(0)</td><td><span class="tag green">启用</span></td><td><button class="btn btn-outline btn-sm">编辑</button></td></tr>
+            <tr><td>bailian-main</td><td>study-chat</td><td>百炼主渠道(10)</td><td><span class="tag green">启用</span></td><td><button class="btn btn-outline btn-sm">编辑</button></td></tr>
+            <tr><td>local-fallback</td><td>study-chat</td><td>本地 Ollama(0)</td><td><span class="tag green">启用</span></td><td><button class="btn btn-outline btn-sm">编辑</button></td></tr></tbody></table></div>
+            <p class="note">业务路由把角色绑定到规则；规则再解析到具体上游模型。删除规则前需确认无角色引用。</p></div>
+        </div>
+        <!-- 业务路由 -->
+        <div class="subpanel" id="gw-sub-routes" hidden>
+          <div class="panel"><h3>业务路由 <span class="tag" style="margin-left:6px">系统唯一模型入口</span></h3>
+            <div class="setting-row" style="margin-bottom:8px"><span>网关默认模型</span><span style="color:var(--color-primary)">openrouter/free</span><span class="note" style="margin:0">角色未填模型时使用，自动校验能被命中规则的上游承接</span></div>
+            <div class="demo-table-wrap"><table class="demo-table">
+              <thead><tr><th>业务角色</th><th>路由规则</th><th>模型</th><th>说明</th></tr></thead>
+              <tbody><tr><td>chat_answer（问答）</td><td>open&amp;model-mix</td><td>（默认模型）</td><td>主问答流式生成</td></tr>
+              <tr><td>assistant（知识助手）</td><td>open&amp;model-mix</td><td>（默认模型）</td><td>右侧栏伴随 Agent</td></tr>
+              <tr><td>intent_rewrite / evidence_check</td><td>open&amp;model-mix</td><td>（默认模型）</td><td>意图改写 / 证据充分性校验</td></tr>
+              <tr><td>wiki_compile / digest</td><td>bailian-main</td><td>qwen-plus</td><td>百科编译 / 综合词条</td></tr>
+              <tr><td>embed / ocr / rerank</td><td>（按类别上游）</td><td>text-embedding-v4 等</td><td>向量化 / 文字识别 / 重排</td></tr></tbody></table></div>
+            <p class="note">原系统设置的 LLM / 知识助手 / OpenRouter 免费模型已合并至此；每次调用的「路由规则 → 模型 → 上游」在后端日志以 <code>[业务路由]</code>/<code>[网关选路]</code>/<code>[网关出网]</code> 显性记录。配置改动未保存离开会弹窗拦截。</p></div>
+        </div>
+        <!-- 密钥 · 配额 -->
+        <div class="subpanel" id="gw-sub-keys" hidden>
+          <div style="display:flex;gap:8px;margin-bottom:12px"><button class="btn btn-primary btn-sm">＋ 生成密钥</button><span class="note" style="margin:0;align-self:center">明文只在生成时展示一次；下游用网关密钥调用，本站登录密码不能作为网关密钥。</span></div>
+          <div class="panel"><div class="demo-table-wrap"><table class="demo-table">
+            <thead><tr><th>密钥名称</th><th>密钥（脱敏）</th><th>已用 / 配额</th><th>允许模型</th><th>状态</th><th></th></tr></thead>
+            <tbody><tr><td>学习客户端</td><td><code>sk-jzrm-••••••</code></td><td>180 / 1,000</td><td>study-chat</td><td><span class="tag green">启用</span></td><td><button class="btn btn-outline btn-sm">编辑</button></td></tr>
+            <tr><td>知识助手</td><td><code>sk-jzrm-••••••</code></td><td>96 / 500</td><td>study-chat</td><td><span class="tag green">启用</span></td><td><button class="btn btn-outline btn-sm">编辑</button></td></tr>
+            <tr><td>本地测试</td><td><code>sk-jzrm-••••••</code></td><td>44 / 200</td><td>study-chat</td><td><span class="tag">停用</span></td><td><button class="btn btn-outline btn-sm">编辑</button></td></tr></tbody></table></div>
+            <p class="note">配额按请求数计；超限拒绝。此处不含任何有效凭据，仅演示结构。</p></div>
+        </div>
+        <!-- Token 分析 -->
+        <div class="subpanel" id="gw-sub-tokens" hidden>
+          <div class="panel"><h3>Token 分析 <span class="tag" style="margin-left:6px">网关 + 可观测性两源合并</span></h3>
+            <div class="demo-stats"><div class="demo-stat"><strong>86k</strong><span>近 7 天总 Token</span></div><div class="demo-stat"><strong>62k</strong><span>输入 Token</span></div><div class="demo-stat"><strong>24k</strong><span>输出 Token</span></div><div class="demo-stat"><strong>1,240</strong><span>平均每次 Token</span></div></div>
+            <div class="token-compare">
+              <div><span class="compare-num">820ms</span><span class="compare-label">网关均延迟</span></div>
+              <div class="compare-arrow down">↓ 12%</div>
+              <div><span class="compare-num">910ms</span><span class="compare-label">上周均延迟<span class="compare-hint">环比下降</span></span></div>
+            </div>
+            <p class="note">按角色 / 规则 / 密钥 / 上游多维拆分 Token 与延迟；与可观测性「Token 分析」同源，区分网关出网用量与业务侧用量。</p></div>
+        </div>
+        <!-- 日志 · 审计 -->
+        <div class="subpanel" id="gw-sub-logs" hidden>
+          <div class="filter-row"><select><option>全部风险等级</option><option>高危</option><option>中危</option><option>低危</option></select><select><option>全部密钥</option><option>学习客户端</option><option>知识助手</option></select><input style="flex:1" placeholder="搜索模型 / 密钥 / 请求 ID…"><button class="btn btn-outline btn-sm">筛选</button></div>
+          <div class="panel"><div class="demo-table-wrap"><table class="demo-table">
+            <thead><tr><th>时间</th><th>密钥</th><th>请求模型</th><th>上游</th><th>状态</th><th>Token</th><th>风险</th></tr></thead>
+            <tbody><tr><td>11-12 10:26</td><td>学习客户端</td><td>study-chat</td><td>百炼主渠道</td><td><span class="tag green">200</span></td><td>420+180</td><td>—</td></tr>
+            <tr><td>11-12 10:24</td><td>知识助手</td><td>study-chat</td><td>anysearch</td><td><span class="tag pink">500</span></td><td>—</td><td><span class="tag pink">高危</span></td></tr>
+            <tr><td>11-11 16:02</td><td>匿名</td><td>study-chat</td><td>免费层级</td><td><span class="tag" style="background:#fff4e0;color:#a06a00">脱敏</span></td><td>300+120</td><td><span class="tag" style="background:#fff4e0;color:#a06a00">中危</span></td></tr></tbody></table></div>
+            <p class="note">全量请求日志审计：入参 / 出参 / 耗时 / Token / 风险标记 / 审计动作；点击行看完整调用链。日志保留 30 天。</p></div>
+        </div>
+        <!-- 安全审计中心 -->
+        <div class="subpanel" id="gw-sub-security" hidden>
+          <div class="upload-grid">
+            <div class="panel"><h3>审计模式</h3>
+              <div class="setting-row"><span>当前模式</span><b>仅审计</b></div>
+              <div class="setting-row"><span>可选模式</span><span>审计 / 警告 / 脱敏 / 阻断</span></div>
+              <div class="setting-row"><span>日志保留</span><b>30 天</b></div>
+              <p class="note">达到告警等级自动弹窗；可对单条风险事件「模型建议」生成处置策略，处理后记录留痕（记录 → 告警 → 建议 → 留痕闭环）。</p></div>
+            <div class="panel"><h3>检测开关与网关行为</h3>
+              <div class="setting-row"><span>Unicode 隐写检测</span><span class="toggle on" onclick="this.classList.toggle('on')" style="margin-left:auto"></span></div>
+              <div class="setting-row"><span>工具命令检测</span><span class="toggle on" onclick="this.classList.toggle('on')" style="margin-left:auto"></span></div>
+              <div class="setting-row"><span>外联追踪检测</span><span class="toggle on" onclick="this.classList.toggle('on')" style="margin-left:auto"></span></div>
+              <div class="setting-row"><span>凭证泄露 / 敏感路径</span><span class="toggle on" onclick="this.classList.toggle('on')" style="margin-left:auto"></span></div>
+              <p class="note">零宽字符 / 双向控制符 / Tag 隐写；curl·wget 外联 / 管道执行 / rm -rf / 反弹 shell；IP 探测 / 数据外泄 / 追踪像素。内置规则可启停，支持自定义黑白名单。</p></div>
+          </div>
+          <div class="panel demo-section"><h3>风险事件闭环 <button class="btn btn-outline btn-sm" style="float:right" onclick="openModal('securityModal')">查看事件详情</button></h3>
+            <div class="file-row"><span class="tag pink">高危</span><span class="fname">工具命令外联 · curl 下载脚本</span><span class="tag">模型建议：阻断</span><span class="tag green">已处理留痕</span></div>
+            <div class="file-row"><span class="tag" style="background:#fff4e0;color:#a06a00">中危</span><span class="fname">Unicode 隐写 · 零宽字符注入</span><span class="tag">模型建议：脱敏</span><span class="tag">待处理</span></div>
+            <p class="note">审计不等于绝对安全保证；可按业务需要配置警告 / 脱敏 / 阻断策略。检测引擎对代理链路每次命中风险即留档。</p></div>
+        </div>
       </div>
     </section>
 
@@ -731,13 +1096,24 @@ body {
             <tbody><tr><td>智能问答</td><td>16</td><td>15</td><td>2.6 秒</td></tr><tr><td>知识助手</td><td>8</td><td>7</td><td>3.2 秒</td></tr></tbody></table></div>
             <p class="note">仅展示自己的业务指标，无其他用户记录或技术调用详情。完成率不计进行中和主动取消的操作，不代表答案准确率。</p></div>
           <div class="panel demo-section"><h3>我的上下文 & 记忆概览（点数值钻取）</h3>
-            <div class="demo-stats"><div class="demo-stat"><strong>6 / 200</strong><span>记忆条数 / 上限</span></div><div class="demo-stat"><strong>3</strong><span>画像卡候选</span></div><div class="demo-stat"><strong>4</strong><span>被检索命中</span></div><div class="demo-stat"><strong>2</strong><span>从未使用</span></div><div class="demo-stat"><strong>0.692</strong><span>平均重要度</span></div></div>
+            <div class="demo-stats"><div class="demo-stat"><strong>6 / 200</strong><span>记忆条数 / 上限</span></div><div class="demo-stat"><strong>3</strong><span>画像卡候选</span></div><div class="demo-stat"><strong>4</strong><span>被检索命中</span></div><div class="demo-stat"><strong>2</strong><span>从未使用</span></div><div class="demo-stat"><strong>0.692</strong><span>平均重要度</span></div><div class="demo-stat"><strong>1.8</strong><span>平均置信度</span></div></div>
             <div class="demo-table-wrap"><table class="demo-table"><thead><tr><th>类型</th><th>条数</th><th>钻取</th></tr></thead>
               <tbody><tr><td>偏好</td><td>1</td><td><a href="#">查看明细</a></td></tr><tr><td>事实</td><td>5</td><td><a href="#">查看明细</a></td></tr><tr><td>目标</td><td>0</td><td><a href="#">查看明细</a></td></tr><tr><td>纠正</td><td>0</td><td><a href="#">查看明细</a></td></tr></tbody></table></div>
             <details class="demo-section"><summary>记忆钻取弹窗示例（从未使用 · 2 条）</summary>
-              <div class="demo-table-wrap"><table class="demo-table"><thead><tr><th>类型</th><th>内容</th><th>重要度</th><th>最近使用</th></tr></thead>
-                <tbody><tr><td>事实</td><td>用户关注睡眠质量改善</td><td>0.6</td><td>—</td></tr><tr><td>事实</td><td>用户习惯晚间散步</td><td>0.5</td><td>—</td></tr></tbody></table></div>
-              <p class="note"><b>口径说明：</b>从未使用 = last_used_at 为空的记忆条数；与概览卡「从未使用」同源。真实系统点击数值卡或类型条即打开钻取弹窗，底部附口径说明。</p>
+              <div class="demo-table-wrap"><table class="demo-table"><thead><tr><th>类型</th><th>内容</th><th>重要度</th><th>置信度</th><th>最近使用</th></tr></thead>
+                <tbody><tr><td>事实</td><td>用户关注睡眠质量改善</td><td>0.6</td><td>1</td><td>—</td></tr><tr><td>事实</td><td>用户习惯晚间散步</td><td>0.5</td><td>2</td><td>—</td></tr></tbody></table></div>
+              <p class="note"><b>口径说明：</b>从未使用 = last_used_at 为空的记忆条数；与概览卡「从未使用」同源。置信度 = 反复确认递增（上限 5），召回评分含 0.1×置信度 因子。真实系统点击数值卡或类型条即打开钻取弹窗，底部附口径说明。</p>
+            </details>
+            <details class="demo-section"><summary>五层记忆架构示意（指令层 / 自动记忆 / 会话笔记 / 助手记忆 / 相关记忆）</summary>
+              <div class="demo-table-wrap"><table class="demo-table"><thead><tr><th>层</th><th>载体</th><th>示例</th></tr></thead>
+                <tbody>
+                  <tr><td>① 指令层</td><td>我的指令（≤500 字）</td><td>「回答先给结论再给依据；涉及剂量务必标注来源」——优先级高于系统默认约定</td></tr>
+                  <tr><td>② 自动记忆</td><td>用户记忆四类</td><td>偏好/事实/目标/纠正，带置信度与新鲜度提醒（陈旧记忆标注「时点观察」）</td></tr>
+                  <tr><td>③ 会话笔记</td><td>五节结构化摘要</td><td>意图/结论/约束/未决/下一步；用户编辑后自动压缩不再覆盖</td></tr>
+                  <tr><td>④ 助手记忆</td><td>按助手分域隔离</td><td>知识助手：常分析「睡眠/穴位」主题、偏好「先结论后依据」风格</td></tr>
+                  <tr><td>⑤ 相关记忆</td><td>按问题召回</td><td>同一会话内去重，压缩后自然重置</td></tr>
+                </tbody></table></div>
+              <p class="note"><b>口径说明：</b>此为静态示意。真实系统「我的指令」在用户菜单预写，「我的记忆」弹窗含用户/助手两页签，会话笔记在对话历史每条会话的笔记图标查看/编辑。</p>
             </details>
           </div>
         </div>
@@ -1020,7 +1396,7 @@ body {
               <p class="inline-error" id="tmError" hidden></p>
               <div class="trace-log-actions"><button class="btn btn-outline btn-sm" id="tmLogBtn" onclick="toggleTraceLogs()">查看详细日志</button><span class="note" style="margin:0" id="tmId"></span></div>
               <div id="tmLogs" hidden>
-                <p class="note">按请求 ID 展示已落盘日志（含异常堆栈），常见凭据已脱敏。旧日志仅能关联带 trace ID 的记录。</p>
+                <p class="note">按请求 ID 展示已落盘日志（含异常堆栈），凭据与个人信息（手机号/证件号/银行卡/邮箱）已脱敏，原始文件不改写。旧日志仅能关联带 trace ID 的记录。</p>
                 <div id="tmLogEntries"></div>
               </div>
               <div class="span-list" id="tmSpans"></div>
@@ -1054,16 +1430,293 @@ body {
           <div class="form-row"><label>密码</label><input type="password" placeholder="请输入密码"></div>
           <button class="btn btn-primary">登 录</button>
           <div class="login-links">
-            <a>没有账号？立即注册（首个账号自动成为管理员）</a>
+            <a onclick="switchView('register',null)">没有账号？立即注册</a>
+            <a onclick="switchView('forgot',null)">忘记密码？</a>
           </div>
           <div class="login-links" style="justify-content:center">
             <a onclick="openChat(null)">以游客身份体验 →</a>
           </div>
           <div class="demo-help-links">
-            <button onclick="alert('演示说明：使用左侧导航体验各功能；真实系统的使用指导位于登录页。')">ⓘ 系统使用指导</button>
+            <button onclick="switchView('guide',null)">ⓘ 系统使用指导</button>
             <button onclick="openChat(null)">◎ 系统样例</button>
           </div>
+          <p class="note" style="text-align:center;margin-top:10px">首个注册用户自动成为管理员 · 本样例不连接真实服务</p>
         </div>
+      </div>
+    </section>
+
+    <!-- ================= Skill 配置 ================= -->
+    <section class="view" id="view-skills">
+      <div class="page-wrap">
+        <div class="page-head"><div><h2>Skill 配置</h2><div class="page-desc">侧边栏「Skill 配置」（/skills，游客不可见）。管理你自己的技能并决定是否应用：两类——<b>对话提示</b>（prompt，注入回答风格 / 领域约束）与<b>策略</b>（playbook，链接抓取规则 / 正文清洗策略）。新建 / 编辑 / 导入先经安全预审。</div></div>
+          <span style="display:flex;gap:8px"><button class="btn btn-outline btn-sm">⬆ 导入技能文件</button><button class="btn btn-primary btn-sm" onclick="openModal('skillModal')">＋ 新建技能</button></span></div>
+        <details open class="skill-group"><summary class="skill-group-head" style="list-style:none">▾ 内置技能 <span class="sg-count">3</span> <span class="sg-count">系统沉淀，可开关但不可删除 / 编辑</span></summary>
+          <div class="skill-card"><div class="sc-head"><span class="tag blue">策略</span><span class="sc-name">网页链接抓取回退策略</span><span class="tag">内置</span><span class="toggle on" onclick="this.classList.toggle('on')" style="margin-left:auto"></span></div>
+            <div class="sc-desc">链接导入时按站点选择移动端 UA / 渲染优先；渲染服务未启用自动降级宽松提取（带噪声警告），不整单失败。</div>
+            <div class="sc-foot"><span>playbook · url_import</span><span style="margin-left:auto">内置不可编辑</span></div></div>
+          <div class="skill-card"><div class="sc-head"><span class="tag blue">策略</span><span class="sc-name">链接正文清洗策略</span><span class="tag">内置</span><span class="toggle on" onclick="this.classList.toggle('on')" style="margin-left:auto"></span></div>
+            <div class="sc-desc">审查面板「内容润色」按 Skill 清洗策略去角标 / 噪声行 / 多余空格，保序保段不新增内容。</div>
+            <div class="sc-foot"><span>playbook · polish</span><span style="margin-left:auto">内置不可编辑</span></div></div>
+          <div class="skill-card"><div class="sc-head"><span class="tag">对话提示</span><span class="sc-name">通俗化健康结论</span><span class="tag">内置</span><span class="toggle" onclick="this.classList.toggle('on')" style="margin-left:auto"></span></div>
+            <div class="sc-desc">把专业健康结论转成通俗表达（默认关闭，按需开启）。</div>
+            <div class="sc-foot"><span>prompt · chat</span><span style="margin-left:auto">内置不可编辑</span></div></div>
+        </details>
+        <details open class="skill-group"><summary class="skill-group-head" style="list-style:none">▾ 我的技能 <span class="sg-count">2</span></summary>
+          <div class="skill-card"><div class="sc-head"><span class="tag">对话提示</span><span class="sc-name">中医术语通俗解释</span><span class="tag blue">个人</span><span class="toggle on" onclick="this.classList.toggle('on')" style="margin-left:auto"></span></div>
+            <div class="sc-desc">回答中医问题时，先用一句话通俗解释术语，再给专业依据与来源。</div>
+            <div class="sc-foot"><span>prompt · chat · 仅本人可见可用</span><span style="margin-left:auto;display:flex;gap:8px"><button class="btn btn-outline btn-sm" onclick="openModal('skillModal')">编辑</button><button class="btn btn-outline btn-sm" style="color:#b05555;border-color:#e8c9c9">删除</button></span></div></div>
+          <div class="skill-card"><div class="sc-head"><span class="tag blue">策略</span><span class="sc-name">CSDN 博客抓取策略</span><span class="tag green">公共</span><span class="toggle on" onclick="this.classList.toggle('on')" style="margin-left:auto"></span></div>
+            <div class="sc-desc">针对 CSDN 的移动端 UA + 正文选择器 playbook，全员可见可用。</div>
+            <div class="sc-foot"><span>playbook · url_import · 公共共享</span><span style="margin-left:auto;display:flex;gap:8px"><button class="btn btn-outline btn-sm" onclick="openModal('skillModal')">编辑</button><button class="btn btn-outline btn-sm" style="color:#b05555;border-color:#e8c9c9">删除</button></span></div></div>
+        </details>
+        <details class="skill-group"><summary class="skill-group-head" style="list-style:none">▸ 公共技能（他人共享，只读引用） <span class="sg-count">1</span></summary>
+          <div class="skill-card"><div class="sc-head"><span class="tag">对话提示</span><span class="sc-name">财报分析助手</span><span class="tag green">公共</span><span class="tag">来自 admin</span></div>
+            <div class="sc-desc">分析财报时优先输出关键指标表格 + 同比环比，再给结论。</div>
+            <div class="sc-foot"><span>prompt · chat · 共享只读</span><button class="btn btn-outline btn-sm" style="margin-left:auto">引用到我的技能</button></div></div>
+        </details>
+        <p class="note">安全预审：5 类高安全风险 + 6 类本项目无法实现的能力，命中拒绝落库并告知原因；预审全程留痕于 <code>skill_review_logs</code>，在可观测性「Skill 安全预审」面板重点暴露。自定义技能上限 50，支持导入 .json / .md / .txt。</p>
+      </div>
+    </section>
+
+    <!-- ================= 可观测性 · 我的（个人业务视图） ================= -->
+    <section class="view" id="view-myobs">
+      <div class="page-wrap">
+        <div class="page-head"><div><h2>可观测性 · 我的使用概览</h2><div class="page-desc">侧边栏「可观测性」（/observability）个人业务视图：仅展示自己的业务指标，无其他用户记录或技术调用详情。管理员 / 运维（canOps）访问时自动重定向到技术视图「Agent 可观测性」。</div></div><button class="btn btn-outline btn-sm" onclick="switchView('observability',null)">技术视图示例 →</button></div>
+        <div class="demo-stats"><div class="demo-stat"><strong>24</strong><span>使用次数</span></div><div class="demo-stat"><strong>22</strong><span>成功完成</span></div><div class="demo-stat"><strong>95.7%</strong><span>服务完成率</span></div><div class="demo-stat"><strong>2.8 秒</strong><span>平均等待时间</span></div></div>
+        <div class="upload-grid">
+          <div class="panel"><h3>我的每日使用趋势 · 近 7 天</h3>
+            <div class="demo-trend"><div><i style="height:40%"></i>周一·2</div><div><i style="height:60%"></i>周二·3</div><div><i style="height:80%"></i>周三·4</div><div><i style="height:100%"></i>周四·5</div><div><i style="height:40%"></i>周五·2</div><div><i style="height:60%"></i>周六·3</div><div><i style="height:100%"></i>周日·5</div></div>
+            <p class="note">进行中 0 · 已取消 1 · 未完成 1。完成率不计进行中与主动取消，不代表答案准确率。</p></div>
+          <div class="panel"><h3>业务功能使用情况</h3><div class="demo-table-wrap"><table class="demo-table"><thead><tr><th>功能</th><th>次数</th><th>成功</th><th>均等待</th></tr></thead>
+            <tbody><tr><td>智能问答</td><td>16</td><td>15</td><td>2.6 秒</td></tr><tr><td>知识助手</td><td>8</td><td>7</td><td>3.2 秒</td></tr></tbody></table></div></div>
+        </div>
+        <div class="panel demo-section"><h3>语义缓存监控 <span class="tag" style="margin-left:6px">个人 · 脱敏</span></h3>
+          <div class="demo-stats"><div class="demo-stat"><strong>38%</strong><span>命中率</span></div><div class="demo-stat"><strong>0.2s</strong><span>命中时延</span></div><div class="demo-stat"><strong>2.8s</strong><span>未命中时延</span></div><div class="demo-stat"><strong>12</strong><span>缓存条目</span></div><div class="demo-stat"><strong>18k</strong><span>节省 Token</span></div></div>
+          <div class="file-row"><span class="tag green">命中</span><span class="fname">「丰隆穴怎么按摩」≈ 缓存问题（相似度 0.94）· 直回不走业务路由</span><span style="color:#b3a798;font-size:11.5px">节省 2.6s</span></div>
+          <p class="note">命中与未命中事件埋点（miss 按上游真实 usage 补记）；阈值默认 0.90，可在个人中心「语义缓存」弹窗开关 / 调阈值 / 清空。</p></div>
+        <div class="panel demo-section"><h3>技能沉淀建议 <span class="tag" style="margin-left:6px">高频能力缺口 → 进化为 Skill</span></h3>
+          <div class="file-row"><span class="tag">建议</span><span class="fname">近 30 天多次要求「先结论后依据 + 标注剂量来源」，可沉淀为对话提示技能</span><button class="btn btn-primary btn-sm" onclick="openModal('skillModal')">同意沉淀</button></div>
+          <p class="note">点击「同意沉淀」弹出编辑弹窗（选公共 / 个人 + 名称 / 描述 / 指令内容），内置「市场相似 Skill 搜寻」聚合 Skills.sh / ClawHub（不可达源自动降级），命中可一键应用填充表单。</p></div>
+      </div>
+    </section>
+
+    <!-- ================= 用户管理 ================= -->
+    <section class="view" id="view-users">
+      <div class="page-wrap">
+        <div class="page-head"><div><h2>用户管理 <span class="badge-admin">仅管理员</span></h2><div class="page-desc">管理控制台 · 用户管理（/admin/users）。调整角色 / 启停账号 / 查看用量与差评，点击行展开近 30 天查询趋势与差评问题清单；自己的角色不可改。</div></div><button class="btn btn-primary btn-sm">＋ 新建用户</button></div>
+        <div class="filter-row"><input style="flex:1" placeholder="搜索用户名 / 联系方式…"><select><option>全部角色</option><option>管理员</option><option>运维</option><option>普通用户</option></select><select><option>全部状态</option><option>启用</option><option>禁用</option></select></div>
+        <div class="panel"><div class="demo-table-wrap"><table class="demo-table">
+          <thead><tr><th>用户名</th><th>联系方式</th><th>角色</th><th>状态</th><th>最近登录</th><th>近30天查询</th><th>Token</th><th>好评/差评</th><th>注册时间</th><th>操作</th></tr></thead>
+          <tbody>
+            <tr><td>admin</td><td>admin@demo</td><td><span class="role-pill admin">管理员</span></td><td><span class="tag green">启用</span></td><td>11-15 09:12</td><td>128</td><td>42k</td><td>36 / 2</td><td>2026-07-01</td><td><span class="note" style="margin:0">本人</span></td></tr>
+            <tr style="cursor:pointer" onclick="this.nextElementSibling.hidden=!this.nextElementSibling.hidden"><td>ops_li</td><td>li@demo</td><td><span class="role-pill ops">运维</span></td><td><span class="tag green">启用</span></td><td>11-14 18:40</td><td>54</td><td>18k</td><td>12 / 1</td><td>2026-08-03</td><td><button class="btn btn-outline btn-sm">展开 ▾</button></td></tr>
+            <tr hidden><td colspan="10" style="background:#fffdf9;white-space:normal">
+              <div class="upload-grid" style="gap:12px">
+                <div><b style="font-size:12.5px">近 30 天查询趋势</b><div class="demo-trend" style="height:90px"><div><i style="height:40%"></i>W1</div><div><i style="height:70%"></i>W2</div><div><i style="height:55%"></i>W3</div><div><i style="height:100%"></i>W4</div></div></div>
+                <div><b style="font-size:12.5px">差评问题清单（可一键导入评测集）</b>
+                  <div class="file-row"><span class="tag pink">差评</span><span class="fname">「增值税留抵退税条件」回答不完整</span><button class="btn btn-outline btn-sm">转用例</button></div>
+                  <div style="display:flex;gap:8px;margin-top:8px;align-items:center"><span class="note" style="margin:0">角色</span><select style="padding:5px 8px;border:1px solid var(--color-border);border-radius:8px;font-size:12px"><option>运维</option><option>管理员</option><option>普通用户</option></select><button class="btn btn-primary btn-sm">保存角色</button><button class="btn btn-outline btn-sm" style="color:#b05555;border-color:#e8c9c9;margin-left:auto" onclick="openModal('deleteUserModal')">删除用户</button></div></div>
+              </div></td></tr>
+            <tr><td>student_wang</td><td>wang@demo</td><td><span class="role-pill user">普通用户</span></td><td><span class="tag">禁用</span></td><td>11-10 20:05</td><td>23</td><td>7k</td><td>5 / 0</td><td>2026-09-12</td><td><button class="btn btn-outline btn-sm">启用</button> <button class="btn btn-outline btn-sm" style="color:#b05555;border-color:#e8c9c9" onclick="openModal('deleteUserModal')">删除</button></td></tr>
+          </tbody></table></div>
+          <p class="note">首个注册用户自动成为管理员；关闭开放注册后仅管理员可建号。删除为软确认弹窗，避免误删。</p></div>
+      </div>
+    </section>
+
+    <!-- ================= CI/CD 流水线（评估驱动部署 EDD） ================= -->
+    <section class="view" id="view-pipeline">
+      <div class="page-wrap">
+        <div class="page-head"><div><h2>CI/CD 流水线 <span class="badge-admin" style="background:#e7eef7;color:#4c6b8f">仅运维</span></h2><div class="page-desc">管理控制台 · 发布流水线（/admin/pipeline）。评估驱动部署（EDD）：代码提交 → 单元测试 → 评估回归 → 构建镜像 → 灰度发布 → 全量上线；评估回归以 Ragas 四指标均值为质量分，低于阈值自动阻断后续发布。</div></div></div>
+        <div class="panel"><div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap">
+          <div class="form-row" style="flex:1;min-width:220px;margin:0"><label>Git 引用（分支 / Tag / Commit，可留空）</label><input placeholder="main" value="main"></div>
+          <button class="btn btn-primary">▶ 发起流水线</button><button class="btn btn-outline">■ 中止运行</button><button class="btn btn-outline" onclick="var d=document.getElementById('eddSettings');d.open=!d.open">⚙ EDD 配置</button></div>
+          <details id="eddSettings" class="demo-section"><summary>EDD 配置面板</summary>
+            <div class="setting-grid" style="margin-top:10px">
+              <div class="setting-row"><span>EDD 质量阈值（0~1）</span><b>0.80</b></div>
+              <div class="setting-row"><span>评估回归使用的评测集</span><b>核心问答集</b></div>
+              <div class="setting-row"><span>启用单元测试阶段（pytest）</span><span class="toggle on" onclick="this.classList.toggle('on')" style="margin-left:auto"></span></div>
+              <div class="setting-row"><span>启用构建镜像阶段</span><span class="toggle on" onclick="this.classList.toggle('on')" style="margin-left:auto"></span></div>
+              <div class="setting-row"><span>构建命令 build_cmd</span><code>docker compose build</code></div>
+              <div class="setting-row"><span>灰度命令 canary_cmd</span><code>deploy --canary 10%</code></div>
+              <div class="setting-row"><span>全量命令 full_cmd</span><code>deploy --full</code></div>
+            </div>
+            <p class="note">确定性操作（离线隔离回归 / 前端测试构建 / 部署快照一致性 / 镜像构建导出）已沉淀为 GitHub Actions（ci.yml / docker-images.yml），本页负责评估回归与发布编排。</p></details>
+        </div>
+        <div class="panel demo-section"><h3>当前运行 · run-1115 <span class="tag blue" style="margin-left:6px">灰度发布中</span></h3>
+          <div class="stage-flow">
+            <div class="stage-node passed"><div class="st-dot">✓</div><div class="st-name">代码提交</div><div class="st-status">main · a1b2c3</div></div><span class="stage-arrow">→</span>
+            <div class="stage-node passed"><div class="st-dot">✓</div><div class="st-name">单元测试</div><div class="st-status">864 passed</div></div><span class="stage-arrow">→</span>
+            <div class="stage-node passed"><div class="st-dot">✓</div><div class="st-name">评估回归</div><div class="st-status">质量分 0.86</div></div><span class="stage-arrow">→</span>
+            <div class="stage-node passed"><div class="st-dot">✓</div><div class="st-name">构建镜像</div><div class="st-status">3 镜像导出</div></div><span class="stage-arrow">→</span>
+            <div class="stage-node running"><div class="st-dot">◐</div><div class="st-name">灰度发布</div><div class="st-status">10% 流量</div></div><span class="stage-arrow">→</span>
+            <div class="stage-node skipped"><div class="st-dot">○</div><div class="st-name">全量上线</div><div class="st-status">待灰度通过</div></div>
+          </div>
+          <div class="edd-banner ok">✓ EDD 质量门禁通过：Ragas 四指标均值 0.86 ≥ 阈值 0.80，允许继续发布。</div>
+          <div class="panel" style="background:#fffdf9"><h3 style="font-size:13px">阶段日志 · 评估回归</h3>
+            <pre class="span-text" style="max-height:140px">[EDD] 加载评测集「核心问答集」12 用例（离线隔离，不写线上会话 / 不计 usage）
+[EDD] 忠实度 0.833 · 回答相关性 0.917 · 上下文精确率 0.800 · 上下文召回率 0.850
+[EDD] 质量分 = 均值 0.850 → 四舍五入 0.86 ≥ 0.80 ✓ 门禁通过
+[EDD] Hit@5 0.92 · MRR 0.87 · 环比 run-1108 +0.04（无回退）</pre></div>
+          <p class="note">若质量分低于阈值，EDD banner 转红并自动阻断构建 / 发布；点击阶段节点查看该阶段完整日志。</p></div>
+        <div class="panel demo-section"><h3>运行历史</h3><div class="demo-table-wrap"><table class="demo-table">
+          <thead><tr><th>Run</th><th>Git 引用</th><th>质量分</th><th>门禁</th><th>结果</th><th>时间</th></tr></thead>
+          <tbody><tr><td>run-1115</td><td>main</td><td>0.86</td><td><span class="tag green">通过</span></td><td><span class="tag blue">灰度中</span></td><td>11-15 09:30</td></tr>
+          <tr><td>run-1108</td><td>main</td><td>0.82</td><td><span class="tag green">通过</span></td><td><span class="tag green">已全量</span></td><td>11-08 14:02</td></tr>
+          <tr><td>run-1101</td><td>feat/agent</td><td>0.74</td><td><span class="tag pink">阻断</span></td><td><span class="tag pink">已中止</span></td><td>11-01 11:20</td></tr></tbody></table></div></div>
+      </div>
+    </section>
+
+    <!-- ================= 注册 ================= -->
+    <section class="view" id="view-register">
+      <div class="auth-wrap">
+        <div class="login-card">
+          <h2>注册账号</h2>
+          <div class="login-sub">注册后即可使用知识库问答系统 · 首个注册用户自动成为管理员</div>
+          <div class="form-row"><label>用户名</label><input placeholder="至少 2 个字符"></div>
+          <div class="form-row"><label>密码</label><input type="password" placeholder="至少 6 个字符"></div>
+          <div class="form-row"><label>确认密码</label><input type="password" placeholder="再次输入密码"></div>
+          <div class="form-row"><label>联系方式</label><input placeholder="手机号或邮箱"><div class="note" style="margin-top:4px">用于找回密码和账号通知</div></div>
+          <button class="btn btn-primary">注 册</button>
+          <div class="login-links" style="justify-content:center"><a onclick="switchView('login',null)">已有账号？返回登录</a></div>
+          <p class="note" style="text-align:center">开放注册由管理员在「系统设置 · 用户注册」开关；关闭后仅管理员可建号。</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= 忘记密码 ================= -->
+    <section class="view" id="view-forgot">
+      <div class="auth-wrap">
+        <div class="login-card">
+          <h2>重置密码</h2>
+          <div class="login-sub">验证用户名与注册时填写的联系方式后重设密码</div>
+          <div class="form-row"><label>用户名</label><input placeholder="请输入注册时的用户名"></div>
+          <div class="form-row"><label>联系方式</label><input placeholder="注册时填写的手机号或邮箱"><div class="note" style="margin-top:4px">需与注册时填写的联系方式完全一致</div></div>
+          <div class="form-row"><label>新密码</label><input type="password" placeholder="至少 6 个字符"></div>
+          <div class="form-row"><label>确认新密码</label><input type="password" placeholder="再次输入新密码"></div>
+          <button class="btn btn-primary">重置密码</button>
+          <div class="login-links" style="justify-content:center"><a onclick="switchView('login',null)">想起密码了？返回登录</a></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= 文档原始排版预览（Word / PDF） ================= -->
+    <section class="view" id="view-doc-preview">
+      <div class="page-wrap">
+        <div class="page-head"><div><h2>知识来源 · 原始排版预览</h2><div class="page-desc">/doc-preview：Word / PDF 按原始排版分页预览，支持页码跳转与缩放；经 Redis 文件缓存加速（响应头 X-File-Cache 标注命中）。表格在解析时转 Markdown。</div></div><button class="btn btn-outline btn-sm" onclick="switchView('knowledge',null)">← 返回知识库</button></div>
+        <div class="preview-toolbar">
+          <button class="btn btn-outline btn-sm">－ 缩小</button><span>100%</span><button class="btn btn-outline btn-sm">＋ 放大</button>
+          <span style="margin-left:12px">页码</span>
+          <span class="page-chip">1</span><span class="page-chip active">2</span><span class="page-chip">3</span><span class="page-chip">…</span><span class="page-chip">12</span>
+          <span class="tag green" style="margin-left:12px">X-File-Cache: HIT</span>
+        </div>
+        <div class="preview-page">
+          <h4>第二章 增值税 · 第 2 页</h4>
+          <p>增值税是对商品生产、流通、劳务服务中多个环节的新增价值或商品的附加值征收的一种流转税。实行价外税，由消费者负担。</p>
+          <p><b>纳税人分类：</b></p>
+          <table class="demo-table" style="margin:8px 0"><thead><tr><th>类型</th><th>年应税销售额</th><th>计税方式</th></tr></thead>
+            <tbody><tr><td>一般纳税人</td><td>&gt; 500 万元</td><td>销项 − 进项</td></tr><tr><td>小规模纳税人</td><td>≤ 500 万元</td><td>销售额 × 征收率</td></tr></tbody></table>
+          <p class="note">（原始排版保留标题层级、段落与表格；解析入库时表格转为 Markdown 表格参与切分向量化。）</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= 附件 / 图片预览 ================= -->
+    <section class="view" id="view-attachment-preview">
+      <div class="page-wrap">
+        <div class="page-head"><div><h2>知识来源 · 图片附件预览</h2><div class="page-desc">/attachment-preview：预览原始图片（手写笔记 / 截图），右侧对照 OCR 识别文本；聊天附件与入库图片均可回溯原图。</div></div><button class="btn btn-outline btn-sm" onclick="switchView('knowledge',null)">← 返回知识库</button></div>
+        <div class="upload-grid">
+          <div class="panel"><h3>原图 · 丰隆穴按摩笔记.jpg</h3>
+            <div class="img-preview">丰隆：在小腿外侧，外踝尖上八寸，条口穴外一寸。古人奉为祛痰至宝，「痰多宜向丰隆寻」。按摩：拇指指腹按揉至酸胀，每次三至五分钟，两侧交替……</div>
+            <div class="preview-toolbar" style="margin-top:12px"><button class="btn btn-outline btn-sm">⟲ 旋转</button><button class="btn btn-outline btn-sm">复位</button><button class="btn btn-outline btn-sm">⤢ 框选裁剪</button><span class="tag green">清晰度合格</span></div></div>
+          <div class="panel"><h3>OCR 识别文本（阿里云百炼 · 4559 字）</h3>
+            <pre class="span-text" style="max-height:260px">丰隆穴按摩笔记
+丰隆：在小腿外侧，外踝尖上八寸，条口穴外一寸。
+【功效】健脾和胃、化痰利湿。古人奉为祛痰至宝，
+「痰多宜向丰隆寻」。
+【按摩】拇指指腹按揉至酸胀，每次 3~5 分钟，两侧交替。
+【配伍】配足三里、委中，增强化痰祛湿之效。
+……（手写体识别，已人工校对）</pre>
+            <p class="note">前端即时模糊检测（拉普拉斯方差），模糊件弹窗提醒重拍；识别文本可编辑后入库，入库的是最终确认文本。</p></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= 入库详情（按页回溯解析片段） ================= -->
+    <section class="view" id="view-ingest-detail">
+      <div class="page-wrap">
+        <div class="page-head"><div><h2>入库详情 · 解析文档回溯</h2><div class="page-desc">/ingest-detail/:recordId：按入库记录回溯每页 / 每段解析文本片段，核对入库效果；源文件存在时可跳「知识来源」预览原件。</div></div><button class="btn btn-outline btn-sm" onclick="switchView('upload',null)">← 返回上传</button></div>
+        <div class="panel"><div class="item-head"><span class="tag green">Word</span><span class="item-title">02 第二章 增值税.docx</span><span class="tag blue">我的笔记 · 私人</span></div>
+          <div class="item-foot" style="margin-top:8px"><span>入库时间：2026-09-01 16:53 · 入库片段：227 段 · 来源类型：Word · 源文件：02 第二章 增值税.docx</span>
+            <span style="display:flex;gap:8px"><button class="btn btn-outline btn-sm" onclick="switchView('doc-preview',null)">查看知识来源</button><button class="btn btn-outline btn-sm">版本</button></span></div></div>
+        <div class="panel demo-section"><h3>解析片段（按页 / 段倒序）</h3>
+          <div class="filter-row"><select><option>全部页</option><option>第 1 页</option><option>第 2 页</option></select><input style="flex:1" placeholder="搜索片段内容…"></div>
+          <div class="src-card"><div class="src-top"><span class="src-badge">第 2 页 · 段 12</span><span class="src-title">纳税人分类</span><span class="src-expander" onclick="toggleDetail(this)">展开</span></div>
+            <div class="src-detail">增值税纳税人分为一般纳税人与小规模纳税人。一般纳税人年应税销售额超过 500 万元，按销项减进项计税；小规模纳税人按销售额 × 征收率计税……</div></div>
+          <div class="src-card"><div class="src-top"><span class="src-badge">第 2 页 · 段 11</span><span class="src-title">增值税定义（表格转 Markdown）</span><span class="src-expander" onclick="toggleDetail(this)">展开</span></div>
+            <div class="src-detail">| 类型 | 年应税销售额 | 计税方式 |\n| 一般纳税人 | &gt; 500 万元 | 销项 − 进项 |\n| 小规模纳税人 | ≤ 500 万元 | 销售额 × 征收率 |</div></div>
+          <div class="src-card"><div class="src-top"><span class="src-badge">第 1 页 · 段 3</span><span class="src-title">章节导语</span><span class="src-expander" onclick="toggleDetail(this)">展开</span></div>
+            <div class="src-detail">增值税是对商品生产、流通、劳务服务中多个环节的新增价值或商品的附加值征收的一种流转税……</div></div>
+          <p class="note">「版本」可预览润色改动前后版本并回溯恢复；源文件已删除时仅保留解析文本，「查看知识来源」按钮隐藏。</p></div>
+      </div>
+    </section>
+
+    <!-- ================= 系统使用指导（镜像 GuideView 17 节） ================= -->
+    <section class="view" id="view-guide">
+      <div class="page-wrap">
+        <div class="page-head"><div><h2>系统使用指导</h2><div class="page-desc">/guide：登录页「系统使用指导」入口，无需登录即可浏览。下方目录与正文镜像真实 GuideView 的 17 个章节，点击目录跳转对应小节。</div></div><span class="tag">共 17 节</span></div>
+        <div class="guide-toc">
+          <a onclick="document.getElementById('gsec-0').scrollIntoView({behavior:'smooth'})"><span class="gt-num">0</span>快速上手 4 步</a>
+          <a onclick="document.getElementById('gsec-1').scrollIntoView({behavior:'smooth'})"><span class="gt-num">1</span>注册登录与游客</a>
+          <a onclick="document.getElementById('gsec-2').scrollIntoView({behavior:'smooth'})"><span class="gt-num">2</span>知识库上传两段式</a>
+          <a onclick="document.getElementById('gsec-3').scrollIntoView({behavior:'smooth'})"><span class="gt-num">3</span>智能问答</a>
+          <a onclick="document.getElementById('gsec-4').scrollIntoView({behavior:'smooth'})"><span class="gt-num">4</span>聊天框附件</a>
+          <a onclick="document.getElementById('gsec-5').scrollIntoView({behavior:'smooth'})"><span class="gt-num">5</span>用户记忆</a>
+          <a onclick="document.getElementById('gsec-6').scrollIntoView({behavior:'smooth'})"><span class="gt-num">6</span>知识库工作台</a>
+          <a onclick="document.getElementById('gsec-7').scrollIntoView({behavior:'smooth'})"><span class="gt-num">7</span>知识编译 llm-wiki</a>
+          <a onclick="document.getElementById('gsec-8').scrollIntoView({behavior:'smooth'})"><span class="gt-num">8</span>知识收藏</a>
+          <a onclick="document.getElementById('gsec-9').scrollIntoView({behavior:'smooth'})"><span class="gt-num">9</span>个人中心</a>
+          <a onclick="document.getElementById('gsec-10').scrollIntoView({behavior:'smooth'})"><span class="gt-num">10</span>回归评测两域</a>
+          <a onclick="document.getElementById('gsec-11').scrollIntoView({behavior:'smooth'})"><span class="gt-num">11</span>模型网关</a>
+          <a onclick="document.getElementById('gsec-12').scrollIntoView({behavior:'smooth'})"><span class="gt-num">12</span>系统架构五层</a>
+          <a onclick="document.getElementById('gsec-13').scrollIntoView({behavior:'smooth'})"><span class="gt-num">13</span>系统设置·Embedding</a>
+          <a onclick="document.getElementById('gsec-14').scrollIntoView({behavior:'smooth'})"><span class="gt-num">14</span>Agent 可观测性</a>
+          <a onclick="document.getElementById('gsec-15').scrollIntoView({behavior:'smooth'})"><span class="gt-num">15</span>ECS 部署与 CI/CD</a>
+          <a onclick="document.getElementById('gsec-16').scrollIntoView({behavior:'smooth'})"><span class="gt-num">16</span>常见问题</a>
+        </div>
+        <div class="guide-block" id="gsec-0"><h3><span class="gb-num">0</span>快速上手：4 步用起来</h3>
+          <ul><li>① 注册并登录（首个账号自动成为管理员）；② 上传第一个文件（图片 / Word / PDF / 链接）；③ 检查解析效果并确认入库；④ 回到对话向笔记提问。</li></ul></div>
+        <div class="guide-block" id="gsec-1"><h3><span class="gb-num">1</span>注册、登录与游客体验</h3>
+          <ul><li>注册需用户名（≥2 字符）/ 密码（≥6 字符）/ 联系方式（找回密码用）；开放注册由管理员开关。</li><li>忘记密码：验证用户名 + 注册联系方式后重设。游客可直接体验对话，受每日免费次数限制，不可写知识库。</li></ul></div>
+        <div class="guide-block" id="gsec-2"><h3><span class="gb-num">2</span>知识库上传：两段式</h3>
+          <ul><li>「文件上传」先落盘 + 后台多线程解析（图片 OCR / Word・PDF 按页提取，表格转 Markdown）；「知识入库」确认效果后写入向量库。</li><li>入库前可查看 / 编辑 / 一键润色（自动留档版本），入库的是最终确认文本；入口处按内容指纹校验重复（409 跳过）。</li></ul></div>
+        <div class="guide-block" id="gsec-3"><h3><span class="gb-num">3</span>智能问答：向你的笔记提问</h3>
+          <ul><li>混合检索（FAISS + BM25 + RRF + Rerank）→ 证据充分性判断 → 流式生成 → 引用核对；复杂度分流：简单走固定流水线、中等走 ReAct、复杂走 Plan&amp;Execute。</li><li>HITL 确认：知识库无结果时询问是否联网；意图模糊时生成澄清追问。来源按文档合并编号，可点赞点踩（点踩一键导入评测集）。</li></ul></div>
+        <div class="guide-block" id="gsec-4"><h3><span class="gb-num">4</span>聊天框附件：随手拖入</h3>
+          <ul><li>拖入 / 粘贴图片、Word、PDF：默认只识别或总结；明确保存意图生成确认卡，点击确认才写入可写知识库（默认私人库，24h 有效）。</li><li>截图粘贴即问：OCR 图中文字并入检索查询；识别内容按 300 字裁剪避免稀释信号。</li></ul></div>
+        <div class="guide-block" id="gsec-5"><h3><span class="gb-num">5</span>用户记忆：越用越懂你</h3>
+          <ul><li>类型化跨会话记忆（偏好 / 事实 / 目标 / 纠正），支持纠正覆盖与自动合并；两层加载（常驻画像卡 + 相关检索）注入回答。</li><li>敏感信息（密码 / token / 证件号）正则拦截不落库；个人中心「我的记忆」可浏览 / 编辑 / 删除 / 主动写入。</li></ul></div>
+        <div class="guide-block" id="gsec-6"><h3><span class="gb-num">6</span>知识库工作台：总览 + 详情</h3>
+          <ul><li>总览（/kb）分公共 / 个人两区；详情（/kb/:kbId）7 页签：文档 / 检索测试 / 思维导图 / 知识图谱 / 知识收藏 / 知识百科 / RAG评估。</li><li>个人库物理隔离仅属主可见；游客仅见文档 / 检索测试；「上传文档」弹窗复用上传界面并锁定当前库。</li></ul></div>
+        <div class="guide-block" id="gsec-7"><h3><span class="gb-num">7</span>知识编译 llm-wiki</h3>
+          <ul><li>入库后后台自动编译结构化百科词条（概述 / 关键要点 / 相关概念 / 原文精选），双写 wiki_pages + 向量库 + data/wiki 镜像。</li><li>检索可百科优先前置；支持跨素材综合词条（digest）、对话历史高频主题沉淀私人词条、存量一键补编译；失败静默降级。</li></ul></div>
+        <div class="guide-block" id="gsec-8"><h3><span class="gb-num">8</span>知识收藏</h3>
+          <ul><li>沉淀对话中有价值的回答与片段，支持标签筛选、详情查看与来源跳转；已整合为知识库详情「知识收藏」页签（按当前库过滤）。</li></ul></div>
+        <div class="guide-block" id="gsec-9"><h3><span class="gb-num">9</span>个人中心：左下角用户名菜单（5 项）</h3>
+          <ul><li>👤 <b>修改个人信息</b>：用户名 / 联系方式，选填原密码 + 新密码改密。</li><li>📊 <b>查看使用情况</b>：提问 / 检索 / 联网搜索 / 上传 / Token / 活跃天数，近 7/30/90 天 + 每日趋势。</li><li>🧠 <b>我的记忆</b>：用户记忆 / 助手记忆两页签，召回率 / 技能应用率统计，主动写入 / 编辑 / 删除。</li><li>📝 <b>我的指令</b>：预写个人规则（≤500 字，五层记忆 L1），优先级高于系统默认约定。</li><li>⚡ <b>语义缓存</b>：网关层公共 / 个人 + 实时 / 非实时标签，阶梯 TTL，开关 / 阈值 / 条目 / 命中 / 清空。</li></ul></div>
+        <div class="guide-block" id="gsec-10"><h3><span class="gb-num">10</span>回归评测：RAG / Agent 两域（管理员/运维）</h3>
+          <ul><li>RAG 域 5 页签：评测集（构建流水线 + 候选审核）/ 评估器（DeepEval 指标）/ 实验 / 在线评测（业务三率）/ BadCase 分析（七分类闭环）。</li><li>Agent 域 3 页签：轨迹评测（AgentEvals 四模式 + DeepEval 六指标）/ 在线轨迹 / Prompt·Skill 工作台。评测离线独立，不写线上会话、不计 usage。</li></ul></div>
+        <div class="guide-block" id="gsec-11"><h3><span class="gb-num">11</span>模型网关：统一接入与安全审计（管理员/运维）</h3>
+          <ul><li>8 页签：仪表盘 / 上游管理（LLM·OCR·Embedding·ReRank 四类）/ 路由规则 / 业务路由 / 密钥·配额 / Token 分析 / 日志·审计 / 安全审计中心。</li><li>对下游暴露 OpenAI 兼容协议，凭本地密钥鉴权屏蔽真实上游 Key；角色 → 规则 → 模型 → 上游统一出网；风险检测支持审计 / 警告 / 脱敏 / 阻断四模式。</li></ul></div>
+        <div class="guide-block" id="gsec-12"><h3><span class="gb-num">12</span>系统架构：五层微服务拓扑（管理员/运维）</h3>
+          <ul><li>接入层（Nginx）→ 应用层（FastAPI + Vue）→ 能力层（RAG / Agent / llm-wiki / 网关）→ 数据层（FAISS / SQLite / Redis）→ 模型层（上游 LLM / OCR / Embedding / Rerank）。</li></ul></div>
+        <div class="guide-block" id="gsec-13"><h3><span class="gb-num">13</span>系统设置与远程 Embedding（管理员）</h3>
+          <ul><li>各区块默认折叠、在线热切换优先级高于 .env；网络模型连接参数在网关上游管理保存与测试，此处只读展示。</li><li>OCR / 联网搜索 / Embedding / Rerank / 检索参数 / Redis 文件缓存 / 用户注册 / 游客访问 / llm-wiki 编译；未保存离开弹窗确认。</li></ul></div>
+        <div class="guide-block" id="gsec-14"><h3><span class="gb-num">14</span>Agent 可观测性：四大模块（管理员/运维）</h3>
+          <ul><li>DashBoard / 日志记录 / 指标监控 / 链路追踪；普通用户见个人业务视图（/observability），管理员 / 运维见技术视图。</li><li>含语义缓存监控、Skill 安全预审、技能沉淀建议、五层记忆架构、Token 分析等面板；日志 / 链路可筛选并打开全链路弹窗。</li></ul></div>
+        <div class="guide-block" id="gsec-15"><h3><span class="gb-num">15</span>阿里云 ECS 部署与 CI/CD 工作流（运维）</h3>
+          <ul><li>Docker Compose 双镜像 + Nginx 离线部署；CI/CD 流水线（/admin/pipeline）评估驱动部署（EDD）：代码提交 → 单元测试 → 评估回归 → 构建镜像 → 灰度发布 → 全量上线。</li><li>评估回归以 Ragas 四指标均值为质量分，低于阈值自动阻断发布。</li></ul></div>
+        <div class="guide-block" id="gsec-16"><h3><span class="gb-num">16</span>常见问题</h3>
+          <ul><li>上传模糊件被提醒重拍？前端拉普拉斯方差检测，可换更清晰图片。回答引用百分比是检索相关度，不是答案正确率。</li><li>游客为何不能入库？游客仅可对话；个人库为何他人搜不到？向量检索阶段物理隔离。更多见手册附录 C。</li></ul></div>
       </div>
     </section>
   </main>
@@ -1085,6 +1738,154 @@ body {
   </div>
 </div>
 
+<!-- ================= 个人中心 / 功能弹窗 ================= -->
+<!-- 上传文档（复用上传界面，锁定当前库） -->
+<div class="modal-mask" id="uploadModal" onclick="if(event.target===this)closeModal('uploadModal')">
+  <div class="modal">
+    <h3>上传文档 · 目标库：我的笔记 <span class="close-x" onclick="closeModal('uploadModal')">×</span></h3>
+    <p class="note" style="margin-top:0">知识库详情「上传文档」弹窗复用上传界面，目标库锁定为当前知识库（不可改）。</p>
+    <div class="mini-zone" style="min-height:110px"><b>拖拽或点击选择文件</b>图片（单张进编辑器 / 批量待选）· Word / PDF · 链接导入</div>
+    <div class="file-row"><span class="tag">待上传</span><span class="fname">新笔记.jpg</span><button class="btn btn-outline btn-sm">编辑</button></div>
+    <div class="flowbar"><span class="flow-step cur">落盘 + 后台解析</span><span class="flow-step">检查效果</span><span class="flow-step">确认入库</span></div>
+    <div style="margin-top:14px;display:flex;gap:8px;justify-content:flex-end"><button class="btn btn-outline" onclick="closeModal('uploadModal')">取消</button><button class="btn btn-primary" onclick="closeModal('uploadModal');switchView('upload',null)">上传并解析</button></div>
+  </div>
+</div>
+<!-- 新建 / 编辑技能 -->
+<div class="modal-mask" id="skillModal" onclick="if(event.target===this)closeModal('skillModal')">
+  <div class="modal">
+    <h3>新建技能 <span class="close-x" onclick="closeModal('skillModal')">×</span></h3>
+    <div class="form-row"><label>归属可见性</label><select><option>个人（仅本人可见可用）</option><option>公共（全员可见可用，共享只读）</option></select></div>
+    <div class="form-row"><label>技能类型</label><select><option>对话提示 prompt（注入对话系统提示）</option><option>策略 playbook（url_import 抓取 / polish 清洗）</option></select></div>
+    <div class="form-row"><label>名称</label><input placeholder="如：中医术语通俗解释"></div>
+    <div class="form-row"><label>描述</label><input placeholder="一句话说明技能用途（用于模型自动选择）"></div>
+    <div class="form-row"><label>指令内容 / playbook JSON</label><textarea rows="4" placeholder="回答中医问题时先通俗解释术语，再给专业依据与来源…"></textarea></div>
+    <div class="panel" style="background:#fffdf9;padding:10px 12px"><b style="font-size:12.5px">🔍 市场相似 Skill 搜寻</b>
+      <div class="file-row"><span class="tag green">Skills.sh</span><span class="fname">tcm-explainer · 中医通俗解释 · 热度 1.2k</span><button class="btn btn-outline btn-sm">应用</button></div>
+      <p class="note" style="margin-bottom:0">聚合 Skills.sh / ClawHub 等市场，不可达源自动降级不阻断；命中可一键填充表单。</p></div>
+    <p class="note">保存前经安全预审（5 类高安全风险 + 6 类无法实现能力），命中拒绝落库并告知原因；留痕 skill_review_logs。</p>
+    <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end"><button class="btn btn-outline" onclick="closeModal('skillModal')">取消</button><button class="btn btn-primary" onclick="closeModal('skillModal')">安全预审并保存</button></div>
+  </div>
+</div>
+<!-- 修改个人信息 -->
+<div class="modal-mask" id="profileModal" onclick="if(event.target===this)closeModal('profileModal')">
+  <div class="modal" style="width:min(440px,92vw)">
+    <h3>修改个人信息 <span class="close-x" onclick="closeModal('profileModal')">×</span></h3>
+    <div class="form-row"><label>用户名</label><input value="admin" placeholder="至少 2 个字符"></div>
+    <div class="form-row"><label>联系方式</label><input value="admin@demo" placeholder="手机号 / 邮箱"></div>
+    <div class="note" style="margin:6px 0;border-top:1px dashed var(--color-border);padding-top:8px">修改密码（选填）</div>
+    <div class="form-row"><label>原密码</label><input type="password" placeholder="修改密码时必填"></div>
+    <div class="form-row"><label>新密码</label><input type="password" placeholder="至少 6 位"></div>
+    <div class="form-row"><label>确认新密码</label><input type="password" placeholder="再次输入新密码"></div>
+    <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end"><button class="btn btn-outline" onclick="closeModal('profileModal')">取消</button><button class="btn btn-primary" onclick="closeModal('profileModal')">保存</button></div>
+  </div>
+</div>
+<!-- 使用看板 -->
+<div class="modal-mask" id="usageModal" onclick="if(event.target===this)closeModal('usageModal')">
+  <div class="modal">
+    <h3>使用看板 <span class="close-x" onclick="closeModal('usageModal')">×</span></h3>
+    <div class="range-switch" style="margin:0 0 12px"><button class="range-btn active">近 7 天</button><button class="range-btn">近 30 天</button><button class="range-btn">近 90 天</button></div>
+    <div class="demo-stats"><div class="demo-stat"><strong>24</strong><span>提问次数</span></div><div class="demo-stat"><strong>31</strong><span>知识检索</span></div><div class="demo-stat"><strong>6</strong><span>联网搜索</span></div><div class="demo-stat"><strong>9</strong><span>知识上传</span></div><div class="demo-stat"><strong>86k</strong><span>Token 消耗</span></div><div class="demo-stat"><strong>6</strong><span>活跃天数</span></div></div>
+    <div class="panel"><h3 style="font-size:13px">每日趋势</h3><div class="demo-trend" style="height:110px"><div><i style="height:40%"></i>周一</div><div><i style="height:60%"></i>周二</div><div><i style="height:80%"></i>周三</div><div><i style="height:100%"></i>周四</div><div><i style="height:40%"></i>周五</div><div><i style="height:60%"></i>周六</div><div><i style="height:100%"></i>周日</div></div></div>
+    <div style="margin-top:12px;display:flex;justify-content:flex-end"><button class="btn btn-outline" onclick="closeModal('usageModal')">关闭</button></div>
+  </div>
+</div>
+<!-- 我的指令（五层记忆 L1） -->
+<div class="modal-mask" id="instructionModal" onclick="if(event.target===this)closeModal('instructionModal')">
+  <div class="modal" style="width:min(520px,92vw)">
+    <h3>我的指令 <span class="close-x" onclick="closeModal('instructionModal')">×</span></h3>
+    <p class="note" style="margin-top:0">预写个人规则（回答风格 / 固定偏好），助手每次回答都会遵循，优先级高于系统默认约定（五层记忆 L1，类比 CLAUDE.md User 层）。密码 / 证件号等敏感信息不会被保存。</p>
+    <div class="form-row"><textarea rows="6" maxlength="500" placeholder="例如：回答先给结论再给依据；涉及用药请提醒我咨询医生。">回答先给结论再给依据；涉及剂量务必标注来源；语气简洁专业。</textarea><div class="note" style="text-align:right">32 / 500</div></div>
+    <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end"><button class="btn btn-outline" onclick="closeModal('instructionModal')">取消</button><button class="btn btn-primary" onclick="closeModal('instructionModal')">保存</button></div>
+  </div>
+</div>
+<!-- 会话笔记（五层记忆 L3） -->
+<div class="modal-mask" id="noteModal" onclick="if(event.target===this)closeModal('noteModal')">
+  <div class="modal" style="width:min(520px,92vw)">
+    <h3>会话笔记 <span class="close-x" onclick="closeModal('noteModal')">×</span></h3>
+    <p class="note" style="margin-top:0">系统把较早对话压缩为五节结构化摘要（意图 / 结论 / 约束 / 未决 / 下一步），重新打开会话时据此续接上下文。编辑保存后自动压缩不再覆盖你的笔记。</p>
+    <div class="form-row"><textarea rows="8" placeholder="五节结构化摘要：意图 / 结论 / 约束 / 未决 / 下一步">意图：了解丰隆穴功效与按摩方法
+结论：祛痰要穴，拇指按揉 3~5 分钟，两侧交替
+约束：仅从知识库检索，未开联网
+未决：配伍穴位（足三里 / 委中）细节
+下一步：补充足三里资料后追问</textarea></div>
+    <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end"><button class="btn btn-outline" onclick="closeModal('noteModal')">取消</button><button class="btn btn-primary" onclick="closeModal('noteModal')">保存</button></div>
+  </div>
+</div>
+<!-- 我的记忆（用户 / 助手两页签） -->
+<div class="modal-mask" id="memoryModal" onclick="if(event.target===this)closeModal('memoryModal')">
+  <div class="modal">
+    <h3>我的记忆 <span class="close-x" onclick="closeModal('memoryModal')">×</span></h3>
+    <div class="subtabs"><button class="subtab active" data-mem-tab="user" onclick="switchSub('mem','user',this)">用户记忆</button><button class="subtab" data-mem-tab="agent" onclick="switchSub('mem','agent',this)">助手记忆</button></div>
+    <div class="subpanel" id="mem-sub-user">
+      <p class="note" style="margin-top:0">记忆用于跨会话个性化回答（饮食偏好 / 健康目标）。敏感信息不记录，可随时编辑 / 删除。</p>
+      <div class="file-row" style="background:#fffdf9"><span class="fname">近 30 天对话 86 轮 · 记忆召回率 42% · 技能应用率 28%</span></div>
+      <div class="file-row" style="background:#fffdf9"><span class="fname">记忆：召回时点赞 88% / 未召回 71% · 技能：应用时点赞 90% / 未应用 74%</span></div>
+      <div class="form-row" style="display:flex;gap:8px;margin-top:10px"><input style="flex:1" placeholder="主动记一条，如：记住我对海鲜过敏"><button class="btn btn-primary btn-sm">记住</button></div>
+      <div class="file-row"><span class="tag blue">事实</span><span class="fname">用户关注睡眠质量改善</span><span class="tag">60%</span><span class="tag">置信 1</span><span style="color:#b3a798;font-size:11px">从未使用</span><button class="btn btn-outline btn-sm">编辑</button><button class="btn btn-outline btn-sm" style="color:#b05555">删除</button></div>
+      <div class="file-row"><span class="tag green">偏好</span><span class="fname">回答先给结论再给依据</span><span class="tag">80%</span><span class="tag">置信 3</span><span style="color:#b3a798;font-size:11px">2 天前</span><button class="btn btn-outline btn-sm">编辑</button><button class="btn btn-outline btn-sm" style="color:#b05555">删除</button></div>
+    </div>
+    <div class="subpanel" id="mem-sub-agent" hidden>
+      <p class="note" style="margin-top:0">助手记忆按助手分域隔离（知识助手常分析的主题 / 风格偏好），不与用户个人记忆混用。</p>
+      <div class="form-row"><label>助手域</label><select><option>知识助手</option><option>主问答</option></select></div>
+      <div class="file-row"><span class="tag">事实</span><span class="fname">常分析「睡眠 / 穴位」主题</span><button class="btn btn-outline btn-sm">编辑</button><button class="btn btn-outline btn-sm" style="color:#b05555">删除</button></div>
+      <div class="file-row"><span class="tag green">偏好</span><span class="fname">偏好「先结论后依据」风格</span><button class="btn btn-outline btn-sm">编辑</button><button class="btn btn-outline btn-sm" style="color:#b05555">删除</button></div>
+    </div>
+    <div style="margin-top:12px;display:flex;justify-content:flex-end"><button class="btn btn-outline" onclick="closeModal('memoryModal')">关闭</button></div>
+  </div>
+</div>
+<!-- 语义缓存（网关层） -->
+<div class="modal-mask" id="cacheModal" onclick="if(event.target===this)closeModal('cacheModal')">
+  <div class="modal">
+    <h3>语义缓存（网关层） <span class="close-x" onclick="closeModal('cacheModal')">×</span></h3>
+    <div style="display:flex;gap:10px;align-items:flex-start"><p class="note" style="margin-top:0;flex:1">经意图识别打「公共 / 个人」与「实时 / 非实时」标签：公共缓存全体共享复用，个人缓存仅本人可见；按阶梯 TTL 自动过期（实时 2h、非实时冷 3 天 / 常命中 7 天 / 热点 30 天）。</p><span class="toggle on" onclick="this.classList.toggle('on')" title="开关语义缓存"></span></div>
+    <div class="file-row" style="background:#fffdf9;flex-wrap:wrap"><span class="fname">相似度阈值 <b>0.90</b> · 个人条目 <b>12</b> · 公共条目 <b>5</b> · 本人累计命中 <b>37</b></span><button class="btn btn-outline btn-sm">刷新</button><button class="btn btn-outline btn-sm" style="color:#b05555">清空个人</button></div>
+    <div class="subtabs"><button class="subtab active" data-cache-tab="all" onclick="switchSub('cache','all',this)">全部</button><button class="subtab" data-cache-tab="personal" onclick="switchSub('cache','personal',this)">个人</button><button class="subtab" data-cache-tab="public" onclick="switchSub('cache','public',this)">公共</button></div>
+    <div class="subpanel" id="cache-sub-all">
+      <div class="item-card"><div class="item-head"><span class="tag blue">个人</span><span class="item-title" style="font-size:13px">丰隆穴怎么按摩？</span><span class="tag" style="margin-left:auto">命中 8</span></div><div class="item-excerpt">拇指指腹按揉至酸胀，每次 3~5 分钟，两侧交替……</div><div class="item-foot"><span>常命中 · 至 11-22</span><a style="color:#b05555;cursor:pointer">删除</a></div></div>
+      <div class="item-card"><div class="item-head"><span class="tag green">公共</span><span class="tag pink">实时</span><span class="item-title" style="font-size:13px">今天增值税税率是多少？</span><span class="tag" style="margin-left:auto">命中 3</span></div><div class="item-excerpt">一般纳税人销售货物适用 13% 税率……（实时类短 TTL）</div><div class="item-foot"><span>实时 2h · 至 11-15 12:00</span><span class="note" style="margin:0">公共不可个人删除</span></div></div>
+    </div>
+    <div class="subpanel" id="cache-sub-personal" hidden>
+      <div class="item-card"><div class="item-head"><span class="tag blue">个人</span><span class="item-title" style="font-size:13px">丰隆穴怎么按摩？</span><span class="tag" style="margin-left:auto">命中 8</span></div><div class="item-excerpt">拇指指腹按揉至酸胀，每次 3~5 分钟……</div><div class="item-foot"><span>常命中 · 至 11-22</span><a style="color:#b05555;cursor:pointer">删除</a></div></div>
+    </div>
+    <div class="subpanel" id="cache-sub-public" hidden>
+      <div class="item-card"><div class="item-head"><span class="tag green">公共</span><span class="tag pink">实时</span><span class="item-title" style="font-size:13px">今天增值税税率是多少？</span><span class="tag" style="margin-left:auto">命中 3</span></div><div class="item-excerpt">一般纳税人销售货物适用 13% 税率……</div><div class="item-foot"><span>实时 2h · 至 11-15 12:00</span><span class="note" style="margin:0">公共域全体共享</span></div></div>
+    </div>
+    <div style="margin-top:12px;display:flex;justify-content:flex-end"><button class="btn btn-outline" onclick="closeModal('cacheModal')">关闭</button></div>
+  </div>
+</div>
+<!-- 安全风险事件详情 -->
+<div class="modal-mask" id="securityModal" onclick="if(event.target===this)closeModal('securityModal')">
+  <div class="modal">
+    <h3>风险事件详情 · 工具命令外联 <span class="close-x" onclick="closeModal('securityModal')">×</span></h3>
+    <div class="trace-meta"><span>等级：<span class="tag pink">高危</span></span><span>密钥：知识助手</span><span>模型：study-chat</span><span>时间：11-12 10:24</span><span>审计动作：已脱敏</span></div>
+    <span class="span-io-label">命中规则</span><pre class="span-text">工具命令检测：请求体含 curl http://… | sh 管道执行特征
+外联追踪检测：目标为公网 IP 探测服务</pre>
+    <span class="span-io-label">模型建议处置</span><pre class="span-text">建议：阻断该请求并将该密钥加入观察名单；对上游返回做脱敏。
+理由：命中反弹 shell / 数据外泄高风险特征。</pre>
+    <div class="file-row"><span class="tag green">已处理留痕</span><span class="fname">管理员采纳「阻断」· 11-12 10:30 · 记录处置人与策略</span></div>
+    <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end"><button class="btn btn-outline" onclick="closeModal('securityModal')">关闭</button><button class="btn btn-primary" onclick="closeModal('securityModal')">采纳建议</button></div>
+  </div>
+</div>
+<!-- 从 OpenRouter 导入免费模型 -->
+<div class="modal-mask" id="importFreeModal" onclick="if(event.target===this)closeModal('importFreeModal')">
+  <div class="modal" style="width:min(520px,92vw)">
+    <h3>从 OpenRouter 导入免费模型 <span class="close-x" onclick="closeModal('importFreeModal')">×</span></h3>
+    <p class="note" style="margin-top:0">勾选后并入「免费层级」上游，供 openrouter/free 默认模型承接。</p>
+    <div class="file-row"><input type="checkbox" checked><span class="fname">meta-llama/llama-3.3-70b-instruct:free</span><span class="tag green">免费</span></div>
+    <div class="file-row"><input type="checkbox" checked><span class="fname">google/gemini-2.0-flash-exp:free</span><span class="tag green">免费</span></div>
+    <div class="file-row"><input type="checkbox"><span class="fname">qwen/qwen-2.5-72b-instruct:free</span><span class="tag green">免费</span></div>
+    <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end"><button class="btn btn-outline" onclick="closeModal('importFreeModal')">取消</button><button class="btn btn-primary" onclick="closeModal('importFreeModal')">导入所选（2）</button></div>
+  </div>
+</div>
+<!-- 删除用户确认 -->
+<div class="modal-mask" id="deleteUserModal" onclick="if(event.target===this)closeModal('deleteUserModal')">
+  <div class="modal" style="width:min(420px,92vw)">
+    <h3>删除用户 <span class="close-x" onclick="closeModal('deleteUserModal')">×</span></h3>
+    <p style="font-size:13px;line-height:1.7;color:#4a4137">确认删除用户 <b>student_wang</b>？删除后该用户的会话、记忆与个人知识库将一并清理，操作不可撤销。</p>
+    <div style="margin-top:14px;display:flex;gap:8px;justify-content:flex-end"><button class="btn btn-outline" onclick="closeModal('deleteUserModal')">取消</button><button class="btn btn-primary" style="background:#b05555" onclick="closeModal('deleteUserModal')">确认删除</button></div>
+  </div>
+</div>
+
 <script>
 function switchView(name, btn) {
   document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
@@ -1092,13 +1893,64 @@ function switchView(name, btn) {
   if (target) target.classList.add('active');
   document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
   const navNew = document.querySelector('.nav-new');
-  if (name === 'chat') {
-    if (navNew) navNew.classList.add('active');
-  } else {
-    if (navNew) navNew.classList.remove('active');
-    if (btn) btn.classList.add('active');
+  if (navNew) navNew.classList.toggle('active', name === 'chat');
+  const adminViews = ['settings', 'users', 'pipeline', 'gateway', 'eval', 'observability'];
+  if (adminViews.indexOf(name) >= 0) {
+    // 管理控制台子视图：展开子导航 + 高亮父级与对应子项
+    const sub = document.getElementById('adminSub'); if (sub) sub.hidden = false;
+    const arrow = document.getElementById('adminArrow'); if (arrow) arrow.textContent = '▾';
+    const parent = document.querySelector('.nav-btn[onclick^="toggleAdmin"]'); if (parent) parent.classList.add('active');
+    const subBtn = document.querySelector('.admin-sub .nav-btn[data-view="' + name + '"]'); if (subBtn) subBtn.classList.add('active');
+  } else if (name !== 'chat') {
+    const navBtn = btn || document.querySelector('.nav-btn[data-view="' + name + '"]');
+    if (navBtn) navBtn.classList.add('active');
   }
+  const um = document.getElementById('userMenu'); if (um) um.hidden = true;
+  const main = document.querySelector('.main'); if (main) main.scrollTop = 0;
+  if (target) { const pw = target.querySelector('.page-wrap'); if (pw) pw.scrollTop = 0; }
 }
+/* ---------- 通用子页签切换（kb / upload / evalrag / evalagent / gw / mem / cache） ---------- */
+function switchSub(group, key, btn) {
+  document.querySelectorAll('[id^="' + group + '-sub-"]').forEach(p => { p.hidden = (p.id !== group + '-sub-' + key); });
+  const attr = 'data-' + group + '-tab';
+  document.querySelectorAll('[' + attr + ']').forEach(b => b.classList.toggle('active', b.getAttribute(attr) === key));
+}
+/* ---------- 评测两域切换（RAG / Agent） ---------- */
+function switchEvalDomain(domain) {
+  const rag = document.getElementById('eval-domain-rag'), agent = document.getElementById('eval-domain-agent');
+  if (rag) rag.hidden = domain !== 'rag';
+  if (agent) agent.hidden = domain !== 'agent';
+  document.querySelectorAll('[data-eval-domain]').forEach(b => b.classList.toggle('active', b.getAttribute('data-eval-domain') === domain));
+}
+/* ---------- 管理控制台导航折叠 ---------- */
+function toggleAdmin(btn) {
+  const sub = document.getElementById('adminSub'), arrow = document.getElementById('adminArrow');
+  const willOpen = sub.hidden;
+  sub.hidden = !willOpen;
+  if (arrow) arrow.textContent = willOpen ? '▾' : '▸';
+  if (willOpen) switchView('settings', document.querySelector('.admin-sub .nav-btn[data-view="settings"]'));
+}
+/* ---------- 个人中心悬浮菜单 ---------- */
+function toggleUserMenu(event) {
+  if (event) event.stopPropagation();
+  const um = document.getElementById('userMenu'); if (um) um.hidden = !um.hidden;
+}
+/* ---------- 通用弹窗 ---------- */
+function openModal(id) {
+  const m = document.getElementById(id); if (m) m.classList.add('open');
+  const um = document.getElementById('userMenu'); if (um) um.hidden = true;
+}
+function closeModal(id) { const m = document.getElementById(id); if (m) m.classList.remove('open'); }
+document.addEventListener('click', function (e) {
+  const um = document.getElementById('userMenu');
+  if (um && !um.hidden && !e.target.closest('.user-card')) um.hidden = true;
+});
+document.addEventListener('keydown', function (e) {
+  if (e.key === 'Escape') {
+    document.querySelectorAll('.modal-mask.open').forEach(m => m.classList.remove('open'));
+    const um = document.getElementById('userMenu'); if (um) um.hidden = true;
+  }
+});
 function openChat(el) {
   switchView('chat', null);
   document.querySelectorAll('.history-item').forEach(h => h.classList.remove('active'));

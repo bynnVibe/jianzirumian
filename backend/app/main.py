@@ -39,6 +39,7 @@ from app.api import pipeline as pipeline_api
 from app.api import gateway as gateway_api
 from app.api import gateway_proxy as gateway_proxy_api
 from app.api import me as me_api
+from app.api import instructions as instructions_api
 from app.api import skills as skills_api
 from app.api import capability as capability_api
 from app.services import auth as auth_service
@@ -161,6 +162,31 @@ async def lifespan(app: FastAPI):
         eval_service.seed_builtin_datasets()
     except Exception as e:
         logger.warning("回归评测内置评测集种子化失败: %s", e)
+    # 可观测性 × DeepEval 整合：告警实时分析引擎 + 在线采样评测周期任务
+    try:
+        from app.services import alert_analysis, online_eval
+        alert_analysis.start_periodic()
+        online_eval.start_periodic()
+    except Exception as e:
+        logger.warning("告警分析/在线评测周期任务启动失败: %s", e)
+    # 评测体系升级：测试集日志挖掘周期任务（候选池达量触发，人工审核入集）
+    try:
+        from app.services import testset_builder
+        testset_builder.start_periodic()
+    except Exception as e:
+        logger.warning("测试集日志挖掘周期任务启动失败: %s", e)
+    # 评测体系升级：BadCase 多源周期收集（另在离线 run 结束时增量触发）
+    try:
+        from app.services import badcase
+        badcase.start_periodic()
+    except Exception as e:
+        logger.warning("BadCase 周期收集任务启动失败: %s", e)
+    # 评测体系升级：Agent 在线 trace 采样评测周期任务（无参考指标回流）
+    try:
+        from app.services import agent_eval
+        agent_eval.start_periodic()
+    except Exception as e:
+        logger.warning("Agent 在线评测周期任务启动失败: %s", e)
     print(f"[见字如面] 服务启动完成")
     print(f"  - LLM: {runtime_config.llm_provider or settings.LLM_PROVIDER} (默认: {settings.LLM_PROVIDER})")
     print(f"  - OCR: {runtime_config.ocr_provider or settings.OCR_PROVIDER} (默认: {settings.OCR_PROVIDER})")
@@ -184,6 +210,27 @@ async def lifespan(app: FastAPI):
             await wiki_conversation.stop_periodic()
         except Exception as e:
             logger.warning("对话沉淀周期任务停止失败: %s", e)
+        try:
+            from app.services import alert_analysis, online_eval
+            await alert_analysis.stop_periodic()
+            await online_eval.stop_periodic()
+        except Exception as e:
+            logger.warning("告警分析/在线评测周期任务停止失败: %s", e)
+        try:
+            from app.services import testset_builder
+            await testset_builder.stop_periodic()
+        except Exception as e:
+            logger.warning("测试集日志挖掘周期任务停止失败: %s", e)
+        try:
+            from app.services import badcase
+            await badcase.stop_periodic()
+        except Exception as e:
+            logger.warning("BadCase 周期收集任务停止失败: %s", e)
+        try:
+            from app.services import agent_eval
+            await agent_eval.stop_periodic()
+        except Exception as e:
+            logger.warning("Agent 在线评测周期任务停止失败: %s", e)
         print("[见字如面] 服务关闭")
 
 
@@ -233,6 +280,7 @@ app.include_router(pipeline_api.router)
 app.include_router(gateway_api.router)
 app.include_router(gateway_proxy_api.router)
 app.include_router(me_api.router)
+app.include_router(instructions_api.router)
 app.include_router(skills_api.router)
 app.include_router(capability_api.router)
 

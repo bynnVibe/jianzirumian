@@ -193,7 +193,7 @@
                 <div class="card-head"><h3>用例结果明细</h3></div>
                 <table class="data-table result-table">
                   <thead>
-                    <tr><th style="width:28%">问题</th><th>忠实</th><th>相关</th><th>精确</th><th>召回</th><th>延迟</th><th>状态</th></tr>
+                    <tr><th style="width:24%">问题</th><th>忠实</th><th>相关</th><th>精确</th><th>召回</th><th title="Hit@K：top K 内是否命中期望来源/关键词">Hit@K</th><th title="MRR：首个相关来源排名的倒数">MRR</th><th>延迟</th><th>状态</th></tr>
                   </thead>
                   <tbody>
                     <template v-for="row in detail.results" :key="row.id">
@@ -205,11 +205,13 @@
                         <td><span class="score" :class="scoreCls(row.answer_relevance)">{{ pct(row.answer_relevance) }}</span></td>
                         <td><span class="score" :class="scoreCls(row.context_precision)">{{ pct(row.context_precision) }}</span></td>
                         <td><span class="score" :class="scoreCls(row.context_recall)">{{ pct(row.context_recall) }}</span></td>
+                        <td><span class="score" :class="row.hit_at_k ? 'yes' : 'na'">{{ row.hit_at_k ? '命中' : '未中' }}</span></td>
+                        <td><span class="score" :class="row.mrr ? scoreCls(row.mrr) : 'na'">{{ mrrText(row.mrr) }}</span></td>
                         <td>{{ row.latency_ms }}ms</td>
                         <td><span class="status-pill sm" :class="row.status === 'ok' ? 'finished' : 'failed'">{{ row.status === 'ok' ? '成功' : '错误' }}</span></td>
                       </tr>
                       <tr v-if="expanded.has(row.id)" class="expand-row">
-                        <td colspan="7">
+                        <td colspan="9">
                           <div class="expand-inner">
                             <div v-if="row.error" class="err-line">错误：{{ row.error }}</div>
                             <div class="expand-block">
@@ -602,6 +604,18 @@ const metricCards = computed(() => {
       delta: delta(s.retrieval_hit_rate, p.retrieval_hit_rate, { scale: 100, suffix: 'pp' }),
     },
     {
+      key: 'hit_at_k',
+      label: 'Hit@K',
+      value: pct(s.avg_hit_at_k),
+      delta: delta(s.avg_hit_at_k, p.avg_hit_at_k, { scale: 100, suffix: 'pp' }),
+    },
+    {
+      key: 'mrr',
+      label: 'MRR',
+      value: s.avg_mrr != null ? Number(s.avg_mrr).toFixed(2) : '—',
+      delta: delta(s.avg_mrr, p.avg_mrr, { digits: 2 }),
+    },
+    {
       key: 'judge',
       label: '平均 judge 分',
       value: s.avg_judge_score != null ? Number(s.avg_judge_score).toFixed(2) : '—',
@@ -622,6 +636,11 @@ const metricCards = computed(() => {
 function pct(v) {
   if (v == null) return '—'
   return `${(v * 100).toFixed(1)}%`
+}
+
+// MRR：首命中排名倒数，0/空显示「—」（无命中或无期望信号）
+function mrrText(v) {
+  return v ? Number(v).toFixed(2) : '—'
 }
 
 // Ragas 分数着色：>=0.75 绿 / >=0.5 黄 / 其余红 / 空值灰

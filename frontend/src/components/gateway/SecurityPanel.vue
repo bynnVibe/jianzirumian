@@ -211,45 +211,19 @@
         <div v-else-if="scanResult" class="scan-clean">✓ 未检测到风险</div>
       </section>
     </template>
-
-    <!-- 弹窗告警：轮询未确认且达阈值的风险事件，逐条弹出 -->
-    <div v-if="alertQueue.length" class="modal-mask">
-      <div class="modal alert-modal" :class="`sev-${alertCurrent.risk_level}`">
-        <div class="modal-head">
-          <h3 class="modal-title">⚠️ 安全风险告警</h3>
-          <span class="alert-count">{{ alertIndex + 1 }} / {{ alertQueue.length }}</span>
-        </div>
-        <div class="alert-top">
-          <span class="risk-tag" :class="`risk-${alertCurrent.risk_level}`">{{ riskLabel(alertCurrent.risk_level) }} · {{ alertCurrent.risk_score }} 分</span>
-          <span class="alert-meta">{{ alertCurrent.finding_count }} 项命中 · {{ alertCurrent.role || '—' }} · {{ alertCurrent.model || '—' }}</span>
-          <span class="alert-time">{{ formatTime(alertCurrent.created_at) }}</span>
-        </div>
-        <div class="alert-findings">
-          <div v-for="(f, i) in alertCurrent.findings" :key="i" class="finding" :class="`sev-${f.severity}`">
-            <div class="finding-head">
-              <strong>{{ f.rule_name }}</strong>
-              <span class="finding-cat">{{ f.category_label }}</span>
-              <span class="finding-sev" :class="`txt-${f.severity}`">{{ sevLabel(f.severity) }}</span>
-            </div>
-            <div class="finding-match mono">{{ f.matched }}</div>
-          </div>
-        </div>
-        <div class="modal-actions">
-          <button class="btn btn-ghost" @click="onAlertDismiss">知道了</button>
-          <button class="btn btn-primary" @click="onAlertHandle">前往处理</button>
-        </div>
-      </div>
-    </div>
   </div>
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, computed, watch, onMounted } from 'vue'
+import { useRoute } from 'vue-router'
 import {
   getGatewayRules, getGatewaySettings, saveGatewaySettings, gatewayScanPreview,
-  listGatewaySecurityEvents, ackGatewaySecurityEvents, suggestGatewaySecurityEvent,
+  listGatewaySecurityEvents, getGatewaySecurityEvent, suggestGatewaySecurityEvent,
   resolveGatewaySecurityEvent, reopenGatewaySecurityEvent, deleteGatewaySecurityEvent,
 } from '@/api'
+
+const route = useRoute()
 
 const loading = ref(true)
 const saving = ref(false)
@@ -280,11 +254,6 @@ const resolutionLabels = ref({})
 const resolveForm = reactive({})
 const suggestingId = ref('')
 const resolvingId = ref('')
-// 弹窗告警队列（轮询未确认且达阈值的事件）
-const alertQueue = ref([])
-const alertIndex = ref(0)
-const alertCurrent = computed(() => alertQueue.value[alertIndex.value] || {})
-let alertTimer = null
 
 function formatTime(iso) {
   if (!iso) return '-'
@@ -466,49 +435,35 @@ async function onDeleteEvent(ev) {
   }
 }
 
-// 轮询未确认告警：达到阈值即弹窗（弹窗只弹一次，确认后不再打扰）
-async function pollAlerts() {
-  if (alertQueue.value.length) return // 已有弹窗在处理，跳过本轮
-  try {
-    const res = await listGatewaySecurityEvents({ alert_only: true, limit: 20 })
-    const list = res.data.events || []
-    if (list.length) { alertQueue.value = list; alertIndex.value = 0 }
-  } catch (e) {
-    // 轮询失败静默
+// 全局弹窗「去处理」深链：?event=<id> → 加载后展开该事件（弹窗由全局 SecurityAlertDialog 统一负责，避免双弹）
+async function focusEventFromRoute() {
+  const id = route.query.event
+  if (!id) return
+  await loadEvents()
+  // 目标事件不在首页（数据量大或过滤掉）时：先切回全部，仍不在则单条取回置顶，保证深链必展开
+  if (!events.value.some((ev) => ev.id === id)) {
+    if (eventStatusFilter.value) {
+      eventStatusFilter.value = ''
+      await loadEvents()
+    }
+    if (!events.value.some((ev) => ev.id === id)) {
+      try {
+        const res = await getGatewaySecurityEvent(id)
+        if (res.data.event) events.value = [res.data.event, ...events.value]
+      } catch (e) { /* 事件不存在时保持列表原样 */ }
+    }
   }
+  const s = new Set(expanded.value); s.add(id); expanded.value = s
+  ensureResolveForm(id)
 }
 
-async function onAlertDismiss() {
-  // 确认当前弹窗（不再重复弹），前进到下一条
-  const cur = alertCurrent.value
-  if (cur?.id) { try { await ackGatewaySecurityEvents([cur.id]) } catch (e) { /* 忽略 */ } }
-  if (alertIndex.value < alertQueue.value.length - 1) {
-    alertIndex.value += 1
-  } else {
-    alertQueue.value = []; alertIndex.value = 0
-    loadEvents()
-  }
-}
-
-async function onAlertHandle() {
-  const cur = alertCurrent.value
-  alertQueue.value = []; alertIndex.value = 0
-  if (cur?.id) {
-    try { await ackGatewaySecurityEvents([cur.id]) } catch (e) { /* 忽略 */ }
-    eventStatusFilter.value = 'pending'
-    await loadEvents()
-    const s = new Set(expanded.value); s.add(cur.id); expanded.value = s
-    ensureResolveForm(cur.id)
-  }
-}
+watch(() => route.query.event, (id) => { if (id) focusEventFromRoute() })
 
 onMounted(() => {
   load()
   loadEvents()
-  pollAlerts()
-  alertTimer = setInterval(pollAlerts, 15000)
+  focusEventFromRoute()
 })
-onUnmounted(() => { if (alertTimer) clearInterval(alertTimer) })
 
 </script>
 
@@ -601,7 +556,7 @@ textarea.field-input { resize: vertical; font-size: 12px; width: 100%; box-sizin
 .ev-badge { font-size: 10.5px; font-weight: 700; padding: 2px 8px; border-radius: 8px; background: #fdf0d9; color: #b8802a; margin-left: 6px; }
 .ev-badge.alert { background: #fbe4e3; color: #c0392b; }
 .ev-list { display: flex; flex-direction: column; gap: 8px; max-height: 560px; overflow-y: auto; }
-.ev-card { border: 1px solid var(--color-border); border-left: 3px solid var(--color-border); border-radius: 8px; background: #fffdfb; overflow: hidden; }
+.ev-card { border: 1px solid var(--color-border); border-left: 3px solid var(--color-border); border-radius: 8px; background: #fffdfb; overflow: hidden; flex-shrink: 0; }
 .ev-card.sev-low { border-left-color: #6a9fd8; }
 .ev-card.sev-medium { border-left-color: #e0a92e; }
 .ev-card.sev-high { border-left-color: #d97b3f; }
@@ -627,22 +582,6 @@ textarea.field-input { resize: vertical; font-size: 12px; width: 100%; box-sizin
 .ev-resolved { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 11.5px; color: var(--color-text-secondary); }
 .ev-resolved strong { color: #3d8b52; }
 .ev-note-text { font-style: italic; }
-
-/* 弹窗告警 */
-.modal-mask { position: fixed; inset: 0; background: rgba(45,42,36,0.4); display: flex; align-items: center; justify-content: center; z-index: 200; padding: 20px; }
-.modal { background: #fffdfb; border-radius: 14px; padding: 22px 24px; width: 100%; max-width: 560px; max-height: 86vh; overflow-y: auto; box-shadow: 0 8px 30px rgba(0,0,0,0.22); }
-.alert-modal { border-top: 4px solid #d9534f; }
-.alert-modal.sev-medium { border-top-color: #e0a92e; }
-.alert-modal.sev-high { border-top-color: #d97b3f; }
-.alert-modal.sev-low { border-top-color: #6a9fd8; }
-.modal-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
-.modal-title { font-size: 16px; font-weight: 700; margin: 0; }
-.alert-count { font-size: 11.5px; color: var(--color-text-secondary); }
-.alert-top { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
-.alert-meta { font-size: 12px; color: var(--color-text-secondary); }
-.alert-time { font-size: 11px; color: var(--color-text-secondary); margin-left: auto; }
-.alert-findings { display: flex; flex-direction: column; gap: 8px; }
-.modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
 
 .btn { padding: 8px 16px; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer; border: 1px solid transparent; transition: all 0.15s; white-space: nowrap; }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }

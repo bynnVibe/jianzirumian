@@ -18,7 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from app.api.deps import get_current_user, require_ops
 from app.core import db
 from app.core import observability as obs
-from app.core.log_setup import list_log_dates, read_day_logs
+from app.core.log_setup import list_log_dates, read_day_logs, redact_log_text
 from app.services import skill_review
 
 logger = logging.getLogger(__name__)
@@ -30,6 +30,21 @@ router = APIRouter(prefix="/api/observability", tags=["observability"])
 _OBS_TTL = 30.0
 _obs_cache: dict = {}
 _obs_inflight: dict = {}
+
+
+def _redact_obj(obj):
+    """递归脱敏返回副本中的字符串（凭据 + PII，单一事实源 redact_log_text）。
+
+    用于 trace span 的 input/output（可能是 JSON 字符串或已解析的 dict/list）；
+    数字边界守卫保证 trace id/时间戳/token 计数不被误伤。仅作用于返回副本，原始落库不改写。
+    """
+    if isinstance(obj, str):
+        return redact_log_text(obj)
+    if isinstance(obj, dict):
+        return {k: _redact_obj(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_redact_obj(v) for v in obj]
+    return obj
 
 
 async def _cached_agg(key: str, fn, *args, refresh: bool = False) -> dict:
@@ -249,6 +264,15 @@ async def get_trace(trace_id: str, _admin: dict = Depends(require_ops)):
     trace = await asyncio.to_thread(obs.get_trace, trace_id)
     if not trace:
         return {"success": False, "detail": "trace 不存在"}
+    # 需求3：返回前对 span 的 input/output 递归脱敏（LLM 完整 prompt/response 中的用户 PII），
+    # 仅脱敏返回副本，原始落库不改写。trace 级 input/output 同样脱敏。
+    for span in trace.get("spans") or []:
+        for field in ("input", "output"):
+            if field in span:
+                span[field] = _redact_obj(span[field])
+    for field in ("input", "output"):
+        if field in trace:
+            trace[field] = _redact_obj(trace[field])
     return {"success": True, "trace": trace}
 
 
@@ -306,6 +330,92 @@ async def get_monitor(
     """指标监控四方面：质量 / 安全 / 业务聚合（性能方面复用 /metrics 口径）。"""
     data = await _cached_agg(f"monitor:{days}:{range_mode}", obs.monitor_metrics,
                              days, range_mode, refresh=bool(refresh))
+    return {"success": True, **data}
+
+
+# ---------------------------------------------------------------------------
+# 告警实时分析（质量/性能越限 → 后台归因 + 原因分析/优化建议）
+# ---------------------------------------------------------------------------
+@router.get("/alerts")
+async def get_alerts(
+    status: str = Query("", pattern="^(|open|acked|resolved)$"),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    _admin: dict = Depends(require_ops),
+):
+    """告警列表（含归因证据与原因分析/优化建议）+ 未确认计数（全局铃铛轮询用）。"""
+    from app.services import alert_analysis
+    data = await asyncio.to_thread(alert_analysis.list_alerts, status, limit, offset)
+    return {"success": True, **data}
+
+
+@router.post("/alerts/{alert_id}/ack")
+async def ack_alert(alert_id: str, _admin: dict = Depends(require_ops)):
+    """确认告警（全局铃铛/面板「已知晓」，不再计入未确认）。"""
+    from app.services import alert_analysis
+    alert = await asyncio.to_thread(alert_analysis.ack_alert, alert_id)
+    if not alert:
+        raise HTTPException(status_code=404, detail="告警不存在")
+    return {"success": True, "alert": alert}
+
+
+@router.post("/alerts/{alert_id}/resolve")
+async def resolve_alert(alert_id: str, admin: dict = Depends(require_ops)):
+    """处置告警（运维确认已处理，留痕处置人）。"""
+    from app.services import alert_analysis
+    alert = await asyncio.to_thread(
+        alert_analysis.resolve_alert, alert_id, admin.get("username") or admin.get("id") or "")
+    if not alert:
+        raise HTTPException(status_code=404, detail="告警不存在")
+    return {"success": True, "alert": alert}
+
+
+@router.post("/alerts/{alert_id}/reanalyze")
+async def reanalyze_alert(alert_id: str, _admin: dict = Depends(require_ops)):
+    """强制重跑原因分析（刷新归因证据 + LLM 重新生成建议）。"""
+    from app.services import alert_analysis
+    alert = await alert_analysis.reanalyze(alert_id)
+    if not alert:
+        raise HTTPException(status_code=404, detail="告警不存在")
+    return {"success": True, "alert": alert}
+
+
+@router.post("/alerts/scan")
+async def scan_alerts(_admin: dict = Depends(require_ops)):
+    """手动触发一轮告警扫描（后台周期任务之外的即时入口）。"""
+    from app.services import alert_analysis
+    result = await alert_analysis.scan_once()
+    return {"success": True, **result}
+
+
+# ---------------------------------------------------------------------------
+# 在线采样评测（DeepEval 风格质量指标回流）
+# ---------------------------------------------------------------------------
+@router.get("/online-eval")
+async def get_online_eval(
+    days: int = Query(7, ge=1, le=90),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    _admin: dict = Depends(require_ops),
+):
+    """在线评测：近窗口聚合 + 业务三率 + 明细列表（返回前脱敏，原始落库不改写）。"""
+    from app.services import online_eval
+    agg = await asyncio.to_thread(online_eval.aggregate, days)
+    business = await asyncio.to_thread(online_eval.business_quality, days)
+    listing = await asyncio.to_thread(online_eval.list_results, limit, offset)
+    return {"success": True, "aggregate": agg, "business": business, **listing}
+
+
+@router.get("/cache-monitor")
+async def get_cache_monitor(
+    days: int = Query(7, ge=1, le=90),
+    refresh: int = Query(0, ge=0, le=1),
+    _admin: dict = Depends(require_ops),
+):
+    """语义缓存监控：命中率 / 命中 vs 未命中对比 / 节省 / 空间占用 / 每日趋势 / 语义详情。"""
+    from app.services.gateway import semantic_cache
+    data = await _cached_agg(f"cache-monitor:{days}", semantic_cache.monitor_stats,
+                             days, refresh=bool(refresh))
     return {"success": True, **data}
 
 

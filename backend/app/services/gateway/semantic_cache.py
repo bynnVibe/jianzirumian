@@ -413,6 +413,132 @@ def clear(user_id: str) -> int:
         return 0
 
 
+# ---------------------------------------------------------------------------
+# 监控埋点与聚合（可观测性业务指标：命中率/节省/空间/语义详情）
+# ---------------------------------------------------------------------------
+
+def record_event(*, user_id: str = "", scope: str = "personal", hit: bool,
+                 entry_id: str = "", score: Optional[float] = None,
+                 latency_ms: int = 0, est_tokens: int = 0, saved_tokens: int = 0,
+                 question: str = "") -> Optional[str]:
+    """记录一次缓存命中/未命中事件（失败静默不阻断主链路）。
+
+    返回事件 id：miss 事件供上游成功后按真实 usage 补记 est_tokens。
+    """
+    try:
+        eid = str(uuid.uuid4())
+        db.execute(
+            "INSERT INTO semantic_cache_events (id, created_at, user_id, scope, hit,"
+            " entry_id, score, latency_ms, est_tokens, saved_tokens, question)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (eid, datetime.now().isoformat(), user_id or "", scope or "personal",
+             1 if hit else 0, entry_id or "", float(score) if score is not None else 0.0,
+             int(latency_ms or 0),
+             int(est_tokens or 0), int(saved_tokens or 0), (question or "")[:120]))
+        return eid
+    except Exception as e:
+        logger.warning("[网关语义缓存] 监控事件记录失败: %s", e)
+        return None
+
+
+def update_event_tokens(event_id: str, est_tokens: int) -> None:
+    """上游成功后按本次真实 usage 补记 miss 事件的 est_tokens（失败静默）。"""
+    if not event_id:
+        return
+    try:
+        db.execute("UPDATE semantic_cache_events SET est_tokens = ? WHERE id = ?",
+                   (int(est_tokens or 0), event_id))
+    except Exception as e:
+        logger.warning("[网关语义缓存] 事件 Token 补记失败: %s", e)
+
+
+def monitor_stats(days: int = 7) -> dict:
+    """语义缓存监控聚合（require_ops 面板）。
+
+    口径：
+    - 命中率 = 命中事件 / (命中+未命中)；命中响应时间取事件 latency_ms（查找开销）；
+    - 未命中对照 = 同窗口 gateway_logs 真实出网成功请求（total_tokens>0 排除缓存合成响应）；
+    - 节省时间 = Σ(未命中均值 − 命中时延)；节省 Token = Σ saved_tokens；
+    - 空间占用 = 条目 question+answer+sources+embedding 字节求和（MB）；
+    - 语义详情返回前经 redact_log_text 脱敏（PII 单一事实源）。
+    """
+    from app.core.log_setup import redact_log_text
+    days = max(1, int(days or 7))
+    since = (datetime.now() - timedelta(days=days - 1)).replace(
+        hour=0, minute=0, second=0, microsecond=0).isoformat()
+    ev = db.query_one(
+        "SELECT COUNT(*) AS n, COALESCE(SUM(hit), 0) AS hits,"
+        " AVG(CASE WHEN hit = 1 THEN latency_ms END) AS hit_latency,"
+        " COALESCE(SUM(saved_tokens), 0) AS saved_tokens"
+        " FROM semantic_cache_events WHERE created_at >= ?", (since,)) or {}
+    total_ev = int(ev.get("n") or 0)
+    hits = int(ev.get("hits") or 0)
+    hit_latency = float(ev.get("hit_latency") or 0)
+    miss = db.query_one(
+        "SELECT COUNT(*) AS n, AVG(latency_ms) AS latency, AVG(total_tokens) AS tokens"
+        " FROM gateway_logs WHERE created_at >= ? AND status = 'ok' AND total_tokens > 0",
+        (since,)) or {}
+    miss_latency = float(miss.get("latency") or 0)
+    miss_tokens = float(miss.get("tokens") or 0)
+    space = db.query_one(
+        "SELECT COUNT(*) AS n, COALESCE(SUM(LENGTH(question) + LENGTH(answer)"
+        " + LENGTH(sources) + LENGTH(embedding)), 0) AS bytes FROM semantic_cache") or {}
+    pub = db.query_one(
+        "SELECT COUNT(*) AS n FROM semantic_cache WHERE user_id = ?", (PUBLIC_USER,)) or {}
+    expired = db.query_one(
+        "SELECT COUNT(*) AS n FROM semantic_cache WHERE expires_at != '' AND expires_at <= ?",
+        (datetime.now().isoformat(),)) or {}
+    daily_rows = db.query(
+        "SELECT substr(created_at, 1, 10) AS day, COUNT(*) AS n, COALESCE(SUM(hit), 0) AS hits,"
+        " COALESCE(SUM(saved_tokens), 0) AS saved_tokens FROM semantic_cache_events"
+        " WHERE created_at >= ? GROUP BY day ORDER BY day", (since,))
+    daily = [{"day": r["day"], "hits": int(r["hits"]), "misses": int(r["n"]) - int(r["hits"]),
+              "hit_rate": round(int(r["hits"]) / int(r["n"]), 4) if r["n"] else 0.0,
+              "saved_tokens": int(r["saved_tokens"])} for r in daily_rows]
+    entries = []
+    for r in db.query(
+            "SELECT id, question, answer, hit_count, scope, is_realtime, expires_at, last_used_at"
+            " FROM semantic_cache ORDER BY hit_count DESC, last_used_at DESC LIMIT 50"):
+        entries.append({
+            "id": r["id"],
+            "question": redact_log_text((r.get("question") or "").replace("\n", " ")[:80]),
+            "answer": redact_log_text((r.get("answer") or "").replace("\n", " ")[:160]),
+            "hit_count": int(r.get("hit_count") or 0),
+            "scope": r.get("scope") or "personal",
+            "ttl_label": ttl_label(bool(r.get("is_realtime")), r.get("hit_count") or 0),
+            "expired": _is_expired(r.get("expires_at") or ""),
+            "last_used_at": (r.get("last_used_at") or "")[:16],
+        })
+    n_space = int(space.get("n") or 0)
+    return {
+        "days": days,
+        "enabled": semantic_cache_enabled(),
+        "overview": {
+            "requests": total_ev, "hits": hits, "misses": total_ev - hits,
+            "hit_rate": round(hits / total_ev, 4) if total_ev else 0.0,
+            "saved_time_ms": int(hits * max(0.0, miss_latency - hit_latency)),
+            "saved_tokens": int(ev.get("saved_tokens") or 0),
+        },
+        "comparison": {
+            "hit_avg_latency_ms": round(hit_latency, 1),
+            "miss_avg_latency_ms": round(miss_latency, 1),
+            "hit_tokens": 0,
+            "miss_avg_tokens": round(miss_tokens, 1),
+            "miss_samples": int(miss.get("n") or 0),
+        },
+        "space": {
+            "entries": n_space,
+            "bytes": int(space.get("bytes") or 0),
+            "mb": round(int(space.get("bytes") or 0) / 1048576, 3),
+            "public_entries": int(pub.get("n") or 0),
+            "personal_entries": max(0, n_space - int(pub.get("n") or 0)),
+            "expired_entries": int(expired.get("n") or 0),
+        },
+        "daily": daily,
+        "entries": entries,
+    }
+
+
 def stats(user_id: str) -> dict:
     """语义缓存面板概览：开关/阈值/本人条目数/公共条目数/累计命中。"""
     own = db.query_one(

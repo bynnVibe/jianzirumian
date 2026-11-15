@@ -192,6 +192,9 @@
       <!-- ============ 密钥 ============ -->
       <KeysPanel v-else-if="activeTab === 'keys'" />
 
+      <!-- ============ Token 分析（自可观测性迁移，两源合并） ============ -->
+      <TokenPanel v-else-if="activeTab === 'tokens'" />
+
       <!-- ============ 日志 ============ -->
       <LogsPanel v-else-if="activeTab === 'logs'" />
 
@@ -226,6 +229,7 @@ import UpstreamsPanel from '@/components/gateway/UpstreamsPanel.vue'
 import RulesPanel from '@/components/gateway/RulesPanel.vue'
 import RoleRoutesPanel from '@/components/gateway/RoleRoutesPanel.vue'
 import KeysPanel from '@/components/gateway/KeysPanel.vue'
+import TokenPanel from '@/components/gateway/TokenPanel.vue'
 import LogsPanel from '@/components/gateway/LogsPanel.vue'
 import SecurityPanel from '@/components/gateway/SecurityPanel.vue'
 
@@ -235,6 +239,7 @@ const tabs = [
   { key: 'rules', label: '路由规则' },
   { key: 'routes', label: '业务路由' },
   { key: 'keys', label: '密钥 · 配额' },
+  { key: 'tokens', label: 'Token 分析' },
   { key: 'logs', label: '日志 · 审计' },
   { key: 'security', label: '安全审计中心' },
 ]

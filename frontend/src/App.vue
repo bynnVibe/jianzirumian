@@ -31,6 +31,10 @@
 
     <!-- 知识助手：非对话页面右侧可折叠问答栏（组件内部按路由/登录态自行决定显隐） -->
     <WikiAssistant />
+
+    <!-- 全局告警铃铛 + 安全告警弹窗（仅 admin/ops，组件内部按登录态自行决定显隐） -->
+    <GlobalAlertBell />
+    <SecurityAlertDialog />
   </div>
 </template>
 
@@ -39,6 +43,8 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
 import AppSidebar from '@/components/AppSidebar.vue'
 import WikiAssistant from '@/components/WikiAssistant.vue'
+import GlobalAlertBell from '@/components/GlobalAlertBell.vue'
+import SecurityAlertDialog from '@/components/SecurityAlertDialog.vue'
 import { useAuthStore } from '@/stores/auth'
 
 const route = useRoute()

@@ -12,6 +12,7 @@
 
 设计原则：任何异常都静默降级，绝不因事件落库/建议生成失败阻断代理主流程。
 """
+import asyncio
 import json
 import logging
 import uuid
@@ -92,10 +93,37 @@ def record_event(*, log_id: str = "", client_ip: str = "", user_id: str = "",
              role or "", model or "", key_name or "", risk_level or "none",
              int(risk_score or 0), _dumps(findings or []), audit_action or ""),
         )
+        # 自动化：risk >= medium 即后台预生成处理建议（全局弹窗呈现时建议已就绪）
+        _schedule_auto_suggestion(event_id, risk_level)
         return event_id
     except Exception as e:
         logger.warning("安全事件记录失败（不阻断请求）: %s", e)
         return ""
+
+
+def _schedule_auto_suggestion(event_id: str, risk_level: str) -> None:
+    """fire-and-forget 预生成建议：仅在有运行中事件循环时调度。
+
+    同步/无循环场景（测试、线程池）静默跳过，仍可在安全审计中心手动生成；
+    generate_suggestion 自带规则化兜底，失败不阻断主链路。
+    """
+    if not event_id or not _severity_ge(risk_level, "medium"):
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+
+    async def _run():
+        try:
+            await generate_suggestion(event_id)
+        except Exception as e:
+            logger.warning("安全事件自动建议失败（event=%s）: %s", event_id, e)
+
+    try:
+        loop.create_task(_run())
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------

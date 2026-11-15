@@ -291,9 +291,13 @@ def _relevant_messages(relevant_text: str) -> List[dict]:
 
 
 def _build_decision_messages(profile_text: str, relevant_text: str, history_ctx: List[dict],
-                             query: str, use_knowledge: bool, use_search: bool) -> List[dict]:
+                             query: str, use_knowledge: bool, use_search: bool,
+                             instruction_text: str = "") -> List[dict]:
+    from app.services.user_instructions import format_instruction_messages
+
     messages = [{"role": "system",
                  "content": _DECISION_SYSTEM_TMPL.format(tools=_build_tool_lines(use_knowledge, use_search))}]
+    messages.extend(format_instruction_messages(instruction_text))
     messages.extend(_profile_messages(profile_text))
     for h in (history_ctx or [])[-6:]:
         role = h.get("role") if h.get("role") in ("user", "assistant") else "user"
@@ -306,10 +310,14 @@ def _build_decision_messages(profile_text: str, relevant_text: str, history_ctx:
 
 
 def _build_plan_messages(profile_text: str, relevant_text: str, history_ctx: List[dict],
-                         query: str, use_knowledge: bool, use_search: bool) -> List[dict]:
+                         query: str, use_knowledge: bool, use_search: bool,
+                         instruction_text: str = "") -> List[dict]:
+    from app.services.user_instructions import format_instruction_messages
+
     messages = [{"role": "system",
                  "content": _PLAN_SYSTEM_TMPL.format(tools=_build_tool_lines(use_knowledge, use_search),
                                                      max_steps=MAX_PLAN_STEPS)}]
+    messages.extend(format_instruction_messages(instruction_text))
     messages.extend(_profile_messages(profile_text))
     for h in (history_ctx or [])[-4:]:
         role = h.get("role") if h.get("role") in ("user", "assistant") else "user"
@@ -322,9 +330,13 @@ def _build_plan_messages(profile_text: str, relevant_text: str, history_ctx: Lis
 
 
 def _build_answer_messages(system_prompt: List[dict], profile_text: str, relevant_text: str,
-                           history_ctx: List[dict], augmented_query: str) -> List[dict]:
-    """分区装配：静态头 → U 区画像 → C 区历史 → D 区相关记忆 → 用户提问。"""
+                           history_ctx: List[dict], augmented_query: str,
+                           instruction_text: str = "") -> List[dict]:
+    """分区装配：静态头 → L1 用户指令 → U 区画像 → C 区历史 → D 区相关记忆 → 用户提问。"""
+    from app.services.user_instructions import format_instruction_messages
+
     messages = list(system_prompt or [])
+    messages.extend(format_instruction_messages(instruction_text))
     messages.extend(_profile_messages(profile_text))
     messages.extend(history_ctx or [])
     messages.extend(_relevant_messages(relevant_text))
@@ -357,6 +369,7 @@ async def run_chat_agent(
     memory_relevant: str = "",
     system_prompt: List[dict],
     result: dict,
+    instruction_text: str = "",
 ) -> AsyncGenerator[str, None]:
     """主聊天 Agent：按 mode（react / plan_execute）检索并流式作答。
 
@@ -409,6 +422,7 @@ async def run_chat_agent(
                 agent_llm, state, query, user_id, history_ctx, memory_profile, memory_relevant,
                 use_knowledge, use_search, skip_search_prompt, allowed_tools,
                 _run_tool, _remaining, _emit_timeout, result, session_id=session_id,
+                instruction_text=instruction_text,
             ):
                 yield ev
         else:
@@ -416,6 +430,7 @@ async def run_chat_agent(
                 agent_llm, state, query, user_id, history_ctx, memory_profile, memory_relevant,
                 use_knowledge, use_search, skip_search_prompt, allowed_tools,
                 _run_tool, _remaining, _emit_timeout, result, session_id=session_id,
+                instruction_text=instruction_text,
             ):
                 yield ev
         if result.get("status") == "error":
@@ -427,6 +442,7 @@ async def run_chat_agent(
             agent_llm, state, query, user_id, history_ctx, memory_profile, memory_relevant,
             system_prompt, use_knowledge, use_search, skip_search_prompt,
             _remaining, _emit_timeout, result, session_id=session_id,
+            instruction_text=instruction_text,
         ):
             yield ev
     except (asyncio.CancelledError, GeneratorExit):
@@ -440,10 +456,10 @@ async def run_chat_agent(
 
 async def _react_loop(agent_llm, state, query, user_id, history_ctx, memory_profile, memory_relevant,
                       use_knowledge, use_search, skip_search_prompt, allowed_tools,
-                      _run_tool, _remaining, _emit_timeout, result, session_id=""):
+                      _run_tool, _remaining, _emit_timeout, result, session_id="", instruction_text=""):
     """ReAct 决策 / 工具循环（Thought→Action→Observation 回喂下一轮）。"""
     messages = _build_decision_messages(memory_profile, memory_relevant, history_ctx, query,
-                                        use_knowledge, use_search)
+                                        use_knowledge, use_search, instruction_text=instruction_text)
     for step in range(MAX_TOOL_STEPS):
         if _remaining() <= 0:
             yield _emit_timeout(f"decision#{step + 1} deadline exceeded")
@@ -522,11 +538,11 @@ async def _react_loop(agent_llm, state, query, user_id, history_ctx, memory_prof
 
 async def _plan_and_execute(agent_llm, state, query, user_id, history_ctx, memory_profile, memory_relevant,
                             use_knowledge, use_search, skip_search_prompt, allowed_tools,
-                            _run_tool, _remaining, _emit_timeout, result, session_id=""):
+                            _run_tool, _remaining, _emit_timeout, result, session_id="", instruction_text=""):
     """Plan&Execute：规划步骤清单 → 顺序执行（失败标记后继续，v1 不动态重规划）。"""
     yield sse("status", {"phase": "planning", "message": "正在规划解题步骤..."})
     messages = _build_plan_messages(memory_profile, memory_relevant, history_ctx, query,
-                                    use_knowledge, use_search)
+                                    use_knowledge, use_search, instruction_text=instruction_text)
     t0 = time.monotonic()
     try:
         raw = await asyncio.wait_for(_llm_complete(messages, agent_llm), timeout=_remaining())
@@ -596,7 +612,7 @@ async def _plan_and_execute(agent_llm, state, query, user_id, history_ctx, memor
 
 async def _answer_phase(agent_llm, state, query, user_id, history_ctx, memory_profile, memory_relevant,
                         system_prompt, use_knowledge, use_search, skip_search_prompt,
-                        _remaining, _emit_timeout, result, session_id=""):
+                        _remaining, _emit_timeout, result, session_id="", instruction_text=""):
     """回答阶段：统一格式化累积命中 → 流式生成 → 引用核对 → obs 度量 → 回填 result。"""
     if _remaining() <= 0:
         yield _emit_timeout("answer deadline exceeded")
@@ -671,7 +687,7 @@ async def _answer_phase(agent_llm, state, query, user_id, history_ctx, memory_pr
     # 4. 流式生成
     yield sse("status", {"phase": "generating", "message": "正在生成回答..."})
     answer_messages = _build_answer_messages(system_prompt, memory_profile, memory_relevant,
-                                             history_ctx, augmented_query)
+                                             history_ctx, augmented_query, instruction_text=instruction_text)
     result["prompt_chars"] = sum(len(m.get("content", "")) for m in answer_messages)
     full_response = ""
     t0 = time.monotonic()

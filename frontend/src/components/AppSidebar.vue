@@ -121,6 +121,16 @@
                 </svg>
               </button>
               <button
+                class="btn-delete btn-note"
+                @click.stop="openNoteModal(session.session_id)"
+                title="会话笔记（查看/编辑结构化摘要，编辑后自动压缩不再覆盖）"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+                  <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+                  <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
+                </svg>
+              </button>
+              <button
                 class="btn-delete"
                 @click.stop="handleDeleteSession(session.session_id)"
                 title="删除对话"
@@ -200,6 +210,15 @@
           </svg>
           我的记忆
         </button>
+        <button class="user-menu-item" @click="openInstructionModal">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="15" height="15">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+            <polyline points="14 2 14 8 20 8"/>
+            <line x1="8" y1="13" x2="16" y2="13"/>
+            <line x1="8" y1="17" x2="13" y2="17"/>
+          </svg>
+          我的指令
+        </button>
         <button class="user-menu-item" @click="openCacheModal">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="15" height="15">
             <path d="M13 2L3 14h7l-1 8 10-12h-7l1-8z"/>
@@ -249,34 +268,51 @@
     <div v-if="showMemoryModal" class="modal-overlay" @click.self="showMemoryModal = false">
       <div class="modal-box memory-box">
         <h3 class="modal-title">我的记忆</h3>
-        <p class="memory-desc">
-          记忆用于跨会话个性化回答（如饮食偏好、健康目标）。密码、证件号等敏感信息不会被记录，你可随时编辑或删除。
-        </p>
-        <div v-if="recallStats && recallStats.enabled" class="memory-recall-stats">
-          <div class="mrs-row">
-            <span>近 {{ recallStats.days }} 天对话 {{ recallStats.total_turns }} 轮</span>
-            <span>记忆召回率 {{ pct(recallStats.memory.recall_rate) }}</span>
-            <span>技能应用率 {{ pct(recallStats.skill.apply_rate) }}</span>
-          </div>
-          <div class="mrs-row mrs-effect">
-            <span>记忆：召回时点赞 {{ rate(recallStats.memory.like_rate_with) }} / 未召回 {{ rate(recallStats.memory.like_rate_without) }}</span>
-            <span>技能：应用时点赞 {{ rate(recallStats.skill.like_rate_with) }} / 未应用 {{ rate(recallStats.skill.like_rate_without) }}</span>
-          </div>
+        <div class="memory-tabs">
+          <button class="memory-tab" :class="{ active: memoryTab === 'user' }" @click="switchMemoryTab('user')">用户记忆</button>
+          <button class="memory-tab" :class="{ active: memoryTab === 'agent' }" @click="switchMemoryTab('agent')">助手记忆</button>
         </div>
+        <template v-if="memoryTab === 'user'">
+          <p class="memory-desc">
+            记忆用于跨会话个性化回答（如饮食偏好、健康目标）。密码、证件号等敏感信息不会被记录，你可随时编辑或删除。
+          </p>
+          <div v-if="recallStats && recallStats.enabled" class="memory-recall-stats">
+            <div class="mrs-row">
+              <span>近 {{ recallStats.days }} 天对话 {{ recallStats.total_turns }} 轮</span>
+              <span>记忆召回率 {{ pct(recallStats.memory.recall_rate) }}</span>
+              <span>技能应用率 {{ pct(recallStats.skill.apply_rate) }}</span>
+            </div>
+            <div class="mrs-row mrs-effect">
+              <span>记忆：召回时点赞 {{ rate(recallStats.memory.like_rate_with) }} / 未召回 {{ rate(recallStats.memory.like_rate_without) }}</span>
+              <span>技能：应用时点赞 {{ rate(recallStats.skill.like_rate_with) }} / 未应用 {{ rate(recallStats.skill.like_rate_without) }}</span>
+            </div>
+          </div>
+        </template>
+        <template v-else>
+          <p class="memory-desc">
+            助手记忆按助手分域隔离（如知识助手常分析的文档主题、分析风格偏好），不与用户个人记忆混用。敏感信息同样不会被记录。
+          </p>
+          <div class="memory-agent-select">
+            <label class="form-label">助手域</label>
+            <select class="form-input" v-model="agentKey" @change="loadMemories">
+              <option v-for="a in agentOptions" :key="a.value" :value="a.value">{{ a.label }}</option>
+            </select>
+          </div>
+        </template>
         <div class="memory-add">
           <input
             class="form-input"
             v-model.trim="memoryNewContent"
-            placeholder="主动记一条，如：记住我对海鲜过敏"
+            :placeholder="memoryTab === 'user' ? '主动记一条，如：记住我对海鲜过敏' : '主动记一条助手偏好，如：分析文档时先给结论再给依据'"
             @keyup.enter="submitMemoryAdd"
           />
           <button class="modal-btn modal-btn-confirm" :disabled="memorySaving" @click="submitMemoryAdd">记住</button>
         </div>
         <p v-if="memoryError" class="modal-error">{{ memoryError }}</p>
         <div v-if="memoryLoading" class="usage-loading">加载中...</div>
-        <div v-else-if="!memories.length" class="memory-empty">暂无记忆。对话中出现的偏好与事实会自动记录，也可在上方主动写入。</div>
+        <div v-else-if="!currentMemories.length" class="memory-empty">暂无记忆。对话中出现的偏好与事实会自动记录，也可在上方主动写入。</div>
         <ul v-else class="memory-list">
-          <li v-for="m in memories" :key="m.id" class="memory-item">
+          <li v-for="m in currentMemories" :key="m.id" class="memory-item">
             <template v-if="memoryEditingId === m.id">
               <textarea class="form-input memory-edit-input" v-model.trim="memoryEditContent" rows="2"></textarea>
               <div class="memory-edit-actions">
@@ -291,6 +327,7 @@
               <span class="memory-type" :class="'mt-' + (m.memory_type || 'fact')">{{ memoryTypeLabel(m.memory_type) }}</span>
               <span class="memory-content" :title="m.content">{{ m.content }}</span>
               <span class="memory-meta">{{ Math.round((m.importance ?? 0.5) * 100) }}%</span>
+              <span class="memory-meta" title="置信度（反复确认递增，上限 5）">置信 {{ Math.round(m.confidence ?? 1) }}</span>
               <span class="memory-meta" title="最近使用">{{ memoryUsedText(m) }}</span>
               <span class="memory-item-actions">
                 <button class="btn-delete" title="编辑" @click="startMemoryEdit(m)">编辑</button>
@@ -301,6 +338,63 @@
         </ul>
         <div class="modal-actions">
           <button class="modal-btn modal-btn-cancel" @click="showMemoryModal = false">关闭</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 我的指令弹窗（五层记忆 L1，类比 CLAUDE.md User 层） -->
+    <div v-if="showInstructionModal" class="modal-overlay" @click.self="showInstructionModal = false">
+      <div class="modal-box">
+        <h3 class="modal-title">我的指令</h3>
+        <p class="memory-desc">
+          预写你的个人规则（如回答风格、固定偏好），助手每次回答都会遵循，优先级高于系统默认约定。密码、证件号等敏感信息不会被保存。
+        </p>
+        <div class="form-field">
+          <textarea
+            class="form-input instruction-input"
+            v-model="instructionContent"
+            rows="6"
+            :maxlength="instructionMaxChars"
+            placeholder="例如：回答先给结论再给依据；涉及用药请提醒我咨询医生；语气简洁专业。"
+          ></textarea>
+          <div class="instruction-count">{{ instructionContent.length }} / {{ instructionMaxChars }}</div>
+        </div>
+        <p v-if="instructionError" class="modal-error">{{ instructionError }}</p>
+        <p v-if="instructionSaved" class="modal-success">已保存，将在后续对话中生效。</p>
+        <div class="modal-actions">
+          <button class="modal-btn modal-btn-cancel" @click="showInstructionModal = false">取消</button>
+          <button class="modal-btn modal-btn-confirm" :disabled="instructionSaving" @click="saveInstruction">
+            {{ instructionSaving ? '保存中...' : '保存' }}
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 会话笔记弹窗（五层记忆 L3，Session Memory 显性化：查看/编辑结构化摘要） -->
+    <div v-if="showNoteModal" class="modal-overlay" @click.self="showNoteModal = false">
+      <div class="modal-box">
+        <h3 class="modal-title">会话笔记</h3>
+        <p class="memory-desc">
+          系统把较早对话压缩为五节结构化摘要（意图/结论/约束/未决/下一步），重新打开会话时据此续接上下文。你可编辑保存；编辑后自动压缩不再覆盖你的笔记。
+        </p>
+        <p v-if="noteEditedByUser" class="modal-success">用户已编辑，自动压缩不再覆盖。</p>
+        <div class="form-field">
+          <textarea
+            class="form-input instruction-input"
+            v-model="noteContent"
+            rows="8"
+            :maxlength="noteMaxChars"
+            placeholder="暂无摘要。会话较短时系统尚未压缩；你可在此手动填写笔记，保存后自动压缩将不再覆盖。"
+          ></textarea>
+          <div class="instruction-count">{{ noteContent.length }} / {{ noteMaxChars }}</div>
+        </div>
+        <p v-if="noteError" class="modal-error">{{ noteError }}</p>
+        <p v-if="noteSaved" class="modal-success">已保存。</p>
+        <div class="modal-actions">
+          <button class="modal-btn modal-btn-cancel" @click="showNoteModal = false">取消</button>
+          <button class="modal-btn modal-btn-confirm" :disabled="noteSaving" @click="saveNote">
+            {{ noteSaving ? '保存中...' : '保存' }}
+          </button>
         </div>
       </div>
     </div>
@@ -494,7 +588,7 @@ import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useChatStore } from '@/stores/chat'
 import { useAuthStore } from '@/stores/auth'
-import { healthCheck, updateProfile, getMyUsageStats, compactSession, listMyMemories, createMyMemory, updateMyMemory, deleteMyMemory, getModuleRecall, getSemanticCache, toggleSemanticCache, clearSemanticCache, deleteSemanticCacheEntry } from '@/api'
+import { healthCheck, updateProfile, getMyUsageStats, compactSession, listMyMemories, createMyMemory, updateMyMemory, deleteMyMemory, getModuleRecall, getSemanticCache, toggleSemanticCache, clearSemanticCache, deleteSemanticCacheEntry, getMyInstructions, saveMyInstructions, listMyAgentMemories, createMyAgentMemory, updateMyAgentMemory, deleteMyAgentMemory, getSessionNote, updateSessionNote } from '@/api'
 
 const props = defineProps({
   open: { type: Boolean, default: false },
@@ -697,6 +791,24 @@ const memoryNewContent = ref('')
 const memoryEditingId = ref('')
 const memoryEditContent = ref('')
 const memoryEditType = ref('fact')
+// 记忆页签：user（用户记忆 L2）/ agent（助手分域记忆 L4）
+const memoryTab = ref('user')
+const agentKey = ref('wiki_assistant')
+const agentMemories = ref([])
+const agentOptions = [
+  { value: 'wiki_assistant', label: '知识助手' },
+  { value: 'chat', label: '聊天助手' },
+]
+const currentMemories = computed(() => (memoryTab.value === 'agent' ? agentMemories.value : memories.value))
+
+function switchMemoryTab(tab) {
+  if (memoryTab.value === tab) return
+  memoryTab.value = tab
+  memoryEditingId.value = ''
+  memoryNewContent.value = ''
+  memoryError.value = ''
+  loadMemories()
+}
 const memoryTypeOptions = [
   { value: 'preference', label: '偏好' },
   { value: 'fact', label: '事实' },
@@ -737,8 +849,13 @@ async function loadMemories() {
   memoryLoading.value = true
   memoryError.value = ''
   try {
-    const res = await listMyMemories()
-    memories.value = res?.data?.memories || []
+    if (memoryTab.value === 'agent') {
+      const res = await listMyAgentMemories(agentKey.value)
+      agentMemories.value = res?.data?.memories || []
+    } else {
+      const res = await listMyMemories()
+      memories.value = res?.data?.memories || []
+    }
   } catch (e) {
     memoryError.value = e?.response?.data?.detail || e?.message || '加载记忆失败'
   } finally {
@@ -749,6 +866,7 @@ async function loadMemories() {
 function openMemoryModal() {
   showUserMenu.value = false
   showMemoryModal.value = true
+  memoryTab.value = 'user'
   memoryNewContent.value = ''
   memoryEditingId.value = ''
   loadMemories()
@@ -760,7 +878,11 @@ async function submitMemoryAdd() {
   memorySaving.value = true
   memoryError.value = ''
   try {
-    await createMyMemory(memoryNewContent.value)
+    if (memoryTab.value === 'agent') {
+      await createMyAgentMemory(agentKey.value, memoryNewContent.value)
+    } else {
+      await createMyMemory(memoryNewContent.value)
+    }
     memoryNewContent.value = ''
     await loadMemories()
   } catch (e) {
@@ -782,7 +904,11 @@ async function submitMemoryEdit(m) {
   memorySaving.value = true
   memoryError.value = ''
   try {
-    await updateMyMemory(m.id, { content: memoryEditContent.value, memory_type: memoryEditType.value })
+    if (memoryTab.value === 'agent') {
+      await updateMyAgentMemory(agentKey.value, m.id, { content: memoryEditContent.value, memory_type: memoryEditType.value })
+    } else {
+      await updateMyMemory(m.id, { content: memoryEditContent.value, memory_type: memoryEditType.value })
+    }
     memoryEditingId.value = ''
     await loadMemories()
   } catch (e) {
@@ -797,12 +923,103 @@ async function submitMemoryDelete(m) {
   memorySaving.value = true
   memoryError.value = ''
   try {
-    await deleteMyMemory(m.id)
+    if (memoryTab.value === 'agent') {
+      await deleteMyAgentMemory(agentKey.value, m.id)
+    } else {
+      await deleteMyMemory(m.id)
+    }
     await loadMemories()
   } catch (e) {
     memoryError.value = e?.response?.data?.detail || e?.message || '删除失败'
   } finally {
     memorySaving.value = false
+  }
+}
+
+// ============================================
+// 我的指令（五层记忆 L1，类比 CLAUDE.md User 层：预写静态规则，优先级高于系统默认）
+// ============================================
+const showInstructionModal = ref(false)
+const instructionContent = ref('')
+const instructionMaxChars = ref(500)
+const instructionSaving = ref(false)
+const instructionError = ref('')
+const instructionSaved = ref(false)
+
+async function openInstructionModal() {
+  showUserMenu.value = false
+  showInstructionModal.value = true
+  instructionError.value = ''
+  instructionSaved.value = false
+  try {
+    const res = await getMyInstructions()
+    instructionContent.value = res?.data?.content || ''
+    instructionMaxChars.value = res?.data?.max_chars || 500
+  } catch (e) {
+    instructionError.value = e?.response?.data?.detail || e?.message || '加载指令失败'
+  }
+}
+
+async function saveInstruction() {
+  if (instructionSaving.value) return
+  instructionSaving.value = true
+  instructionError.value = ''
+  instructionSaved.value = false
+  try {
+    const res = await saveMyInstructions(instructionContent.value)
+    instructionContent.value = res?.data?.content ?? instructionContent.value
+    instructionSaved.value = true
+  } catch (e) {
+    instructionError.value = e?.response?.data?.detail || e?.message || '保存指令失败'
+  } finally {
+    instructionSaving.value = false
+  }
+}
+
+// ============================================
+// 会话笔记（五层记忆 L3，Session Memory 显性化：查看/编辑结构化摘要）
+// ============================================
+const showNoteModal = ref(false)
+const noteSessionId = ref('')
+const noteContent = ref('')
+const noteMaxChars = ref(2000)
+const noteEditedByUser = ref(false)
+const noteSaving = ref(false)
+const noteError = ref('')
+const noteSaved = ref(false)
+
+async function openNoteModal(sessionId) {
+  noteSessionId.value = sessionId
+  showNoteModal.value = true
+  noteError.value = ''
+  noteSaved.value = false
+  noteContent.value = ''
+  noteEditedByUser.value = false
+  try {
+    const res = await getSessionNote(sessionId)
+    const d = res?.data || {}
+    noteContent.value = d.note || ''
+    noteEditedByUser.value = !!d.edited_by_user
+  } catch (e) {
+    noteError.value = e?.response?.data?.detail || e?.message || '加载会话笔记失败'
+  }
+}
+
+async function saveNote() {
+  if (noteSaving.value || !noteSessionId.value) return
+  noteSaving.value = true
+  noteError.value = ''
+  noteSaved.value = false
+  try {
+    const res = await updateSessionNote(noteSessionId.value, noteContent.value)
+    const d = res?.data || {}
+    noteContent.value = d.note ?? noteContent.value
+    noteEditedByUser.value = !!d.edited_by_user
+    noteSaved.value = true
+  } catch (e) {
+    noteError.value = e?.response?.data?.detail || e?.message || '保存会话笔记失败'
+  } finally {
+    noteSaving.value = false
   }
 }
 
@@ -1295,6 +1512,42 @@ function chartTooltip(row) {
   color: var(--color-text-secondary);
   line-height: 1.6;
   margin: 4px 0 10px;
+}
+.memory-tabs {
+  display: flex;
+  gap: 6px;
+  margin: 2px 0 10px;
+  border-bottom: 1px solid var(--color-border, rgba(0, 0, 0, 0.08));
+}
+.memory-tab {
+  padding: 6px 12px;
+  font-size: 13px;
+  cursor: pointer;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--color-text-secondary);
+  transition: all 0.15s;
+}
+.memory-tab.active {
+  color: var(--color-primary, #2563eb);
+  border-bottom-color: var(--color-primary, #2563eb);
+  font-weight: 600;
+}
+.memory-agent-select {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 10px;
+}
+.memory-agent-select .form-label {
+  margin: 0;
+  white-space: nowrap;
+}
+.memory-agent-select .form-input {
+  width: auto;
+  flex: 0 0 auto;
+  padding: 4px 8px;
 }
 .memory-recall-stats {
   background: var(--color-bg-soft, rgba(0, 0, 0, 0.03));
@@ -1868,6 +2121,27 @@ function chartTooltip(row) {
   color: #c62828;
   font-size: 12px;
   margin: 0 0 10px;
+}
+
+.modal-success {
+  color: #2e7d32;
+  font-size: 12px;
+  margin: 0 0 10px;
+}
+
+.instruction-input {
+  width: 100%;
+  resize: vertical;
+  min-height: 120px;
+  line-height: 1.6;
+  font-family: inherit;
+}
+
+.instruction-count {
+  text-align: right;
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  margin-top: 4px;
 }
 
 .modal-actions {

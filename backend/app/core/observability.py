@@ -38,9 +38,11 @@ RETENTION_DAYS = 30
 # segment 级 token 度量的中文展示名（供管理员可视化按段定位 Token 大户）
 SEGMENT_LABELS = {
     "system": "系统提示",
+    "user_instructions": "用户指令",
     "memory": "长期记忆",
     "memory_profile": "记忆·画像卡",
     "memory_relevant": "记忆·相关检索",
+    "agent_memory": "记忆·助手分域",
     "skills": "用户 Skill",
     "history": "历史对话",
     "summary": "历史摘要",
@@ -1188,7 +1190,7 @@ def monitor_metrics(days: int = 7, range_mode: str = "days") -> dict:
     eval_runs = [dict(r) for r in db.query(
         "SELECT r.id, r.dataset_id, r.status, r.started_at, d.name AS dataset_name"
         " FROM eval_runs r LEFT JOIN eval_datasets d ON d.id = r.dataset_id"
-        " WHERE r.status = 'done' AND r.started_at >= ?"
+        " WHERE r.status IN ('done','finished') AND r.started_at >= ?"
         " ORDER BY r.started_at DESC LIMIT 5", (since,))]
     for run in eval_runs:
         agg = db.query_one(
@@ -1205,6 +1207,7 @@ def monitor_metrics(days: int = 7, range_mode: str = "days") -> dict:
         " FROM skill_review_logs WHERE created_at >= ?", (since,)) or {}
     events = db.query_one(
         "SELECT COUNT(*) AS total, COALESCE(SUM(status = 'pending'), 0) AS pending,"
+        " COALESCE(SUM(status = 'pending' AND acked = 0), 0) AS unacked,"
         " COALESCE(SUM(risk_level = 'high'), 0) AS high,"
         " COALESCE(SUM(risk_level = 'critical'), 0) AS critical"
         " FROM gateway_security_events WHERE created_at >= ?", (since,)) or {}
@@ -1223,11 +1226,33 @@ def monitor_metrics(days: int = 7, range_mode: str = "days") -> dict:
         " COALESCE(SUM(prompt_chars), 0) AS prompt_chars,"
         " COALESCE(SUM(completion_chars), 0) AS completion_chars"
         " FROM usage_daily WHERE day >= ? GROUP BY day ORDER BY day", (day_since,))]
+    # 在线采样评测回流（DeepEval 风格）：近窗口样本数/均分/低分数，质量告警规则消费
+    try:
+        from app.services import online_eval
+        online_agg = online_eval.aggregate(days)
+    except Exception:
+        online_agg = {"samples": 0, "avg_faithfulness": None, "avg_geval": None, "low_count": 0}
+    # 在线业务三率回流（点踩率/追问率/空回答率，纯 SQL 确定性）：RAG 在线页签 + 告警规则消费
+    try:
+        from app.services import online_eval
+        online_business = online_eval.business_quality(days)
+    except Exception:
+        online_business = {"samples": 0, "dislike_rate": None,
+                           "followup_rate": None, "empty_answer_rate": None}
+    # 在线 Agent 轨迹评测回流（无参考指标均分）：Agent 在线页签 + 告警规则消费
+    try:
+        from app.services import agent_eval
+        online_agent = agent_eval.aggregate(days)
+    except Exception:
+        online_agent = {"samples": 0, "avg_task_completion": None, "low_count": 0}
     return {
         "quality": {
             "likes": fb.get("likes", 0),
             "dislikes": fb.get("dislikes", 0),
             "eval_runs": eval_runs,
+            "online_eval": online_agg,
+            "online_business": online_business,
+            "online_agent": online_agent,
             "skill_reviews": {
                 "total": reviews.get("total", 0),
                 "high": reviews.get("high", 0),
@@ -1237,6 +1262,7 @@ def monitor_metrics(days: int = 7, range_mode: str = "days") -> dict:
         "security": {
             "events_total": events.get("total", 0),
             "pending": events.get("pending", 0),
+            "unacked_alerts": events.get("unacked", 0),
             "high": events.get("high", 0),
             "critical": events.get("critical", 0),
             "tool_blocked": len(routing.get("blocked_events") or []),

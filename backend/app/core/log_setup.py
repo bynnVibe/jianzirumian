@@ -73,8 +73,33 @@ _RECORD_BYTES = 200000
 _PAGE_BYTES = 500000
 
 
+# ---- PII 脱敏正则（需求3）：均带数字边界守卫 (?<!\d)/(?!\d)，避免误伤 trace id/token 计数 ----
+# 身份证 18 位（末位可为 X）；银行卡 16-19 位连续数字；手机号 11 位（1[3-9] 开头）；邮箱。
+_PII_ID_CARD = re.compile(r"(?<!\d)\d{17}[\dXx](?!\d)")
+_PII_BANK_CARD = re.compile(r"(?<!\d)\d{16,19}(?!\d)")
+_PII_PHONE = re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")
+_PII_EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+
+
+def _mask_id_card(m: "re.Match") -> str:
+    """身份证保留前 3 后 4，中间掩码（如 110***********1234）。"""
+    s = m.group(0)
+    return s[:3] + "*" * (len(s) - 7) + s[-4:]
+
+
+def _mask_email(m: "re.Match") -> str:
+    """邮箱保留首字符 + ***@域名（如 z***@example.com）。"""
+    local, _, domain = m.group(0).partition("@")
+    return (local[:1] or "*") + "***@" + domain
+
+
 def redact_log_text(text: str) -> str:
-    """返回给管理界面的日志副本脱敏，不改写原始日志文件。"""
+    """返回给管理界面的日志副本脱敏，不改写原始日志文件。
+
+    两类规则（单一事实源，三条返回路径共用）：
+    1. 凭据：Bearer/Basic、sk- 密钥、URL 内嵌账号、api_key/token/password/cookie 等键值；
+    2. PII（需求3）：身份证/银行卡/手机号/邮箱，均带数字边界守卫，避免误伤 trace id/token 计数。
+    """
     text = re.sub(r"(?i)\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+", r"\1 [REDACTED]", text)
     text = re.sub(r"\bsk-[A-Za-z0-9_-]+", "[REDACTED]", text)
     text = re.sub(r"(?i)(\b[a-z][a-z0-9+.-]*://)[^\s/@]+@", r"\1[REDACTED]@", text)
@@ -86,6 +111,12 @@ def redact_log_text(text: str) -> str:
         r"\1[REDACTED]", text,
     )
     text = re.sub(r"(?im)(\b(?:set-cookie|cookie)\s*:\s*)[^\r\n]+", r"\1[REDACTED]", text)
+    # PII 脱敏（顺序敏感）：身份证(18位)必须先于银行卡(16-19位)与手机号(11位)，
+    # 否则长证件号会被短模式先吃掉部分数字。只作用于返回副本，原始落盘不改写。
+    text = _PII_ID_CARD.sub(_mask_id_card, text)
+    text = _PII_BANK_CARD.sub("[银行卡已脱敏]", text)
+    text = _PII_PHONE.sub("[手机号已脱敏]", text)
+    text = _PII_EMAIL.sub(_mask_email, text)
     return text
 
 
@@ -242,6 +273,12 @@ def read_day_logs(day: str, user: str = "", level: str = "", keyword: str = "",
     # 需求1：同一分钟内的日志合并为一条条目，避免单页呈现过多碎片日志；
     # 合并后级别取组内最高严重度，entries 保留各条原始记录供详情弹窗展开。
     merged = _merge_by_minute(filtered)
+    # 需求3：返回副本统一脱敏（凭据 + PII），原始日志文件不改写。
+    # 过滤/关键词匹配在脱敏前完成（管理员仍可按原文检索），仅展示副本脱敏。
+    for item in merged:
+        item["message"] = redact_log_text(item.get("message") or "")
+        for e in item.get("entries") or []:
+            e["message"] = redact_log_text(e.get("message") or "")
     result["total"] = len(merged)
     result["items"] = merged[offset:offset + max(1, limit)]
     return result

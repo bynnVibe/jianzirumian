@@ -181,6 +181,18 @@ export function compactSession(sessionId, focus = '') {
 }
 
 /**
+ * 会话笔记（五层记忆 L3，Session Memory 显性化）：查看 / 编辑结构化摘要
+ * 编辑后 edited_by_user=1，自动压缩不再覆盖（用户笔记优先）
+ */
+export function getSessionNote(sessionId) {
+  return api.get(`/chat/sessions/${encodeURIComponent(sessionId)}/note`)
+}
+
+export function updateSessionNote(sessionId, note) {
+  return api.put(`/chat/sessions/${encodeURIComponent(sessionId)}/note`, { note })
+}
+
+/**
  * 我的记忆：列表 / 主动写入 / 编辑 / 删除（个人中心「我的记忆」块）
  */
 export function listMyMemories() {
@@ -197,6 +209,36 @@ export function updateMyMemory(memoryId, { content = '', memory_type: memoryType
 
 export function deleteMyMemory(memoryId) {
   return api.delete(`/me/memories/${encodeURIComponent(memoryId)}`)
+}
+
+/**
+ * 我的指令（五层记忆 L1，类比 CLAUDE.md User 层）：读取 / 保存（每用户一条，敏感词拒绝）
+ */
+export function getMyInstructions() {
+  return api.get('/me/instructions')
+}
+
+export function saveMyInstructions(content) {
+  return api.put('/me/instructions', { content })
+}
+
+/**
+ * 助手分域记忆（五层记忆 L4）：按 agent 域隔离的列表 / 写入 / 编辑 / 删除
+ */
+export function listMyAgentMemories(agent = 'wiki_assistant') {
+  return api.get('/me/agent-memories', { params: { agent } })
+}
+
+export function createMyAgentMemory(agent, content, memoryType = '', importance = null) {
+  return api.post('/me/agent-memories', { agent, content, memory_type: memoryType, importance })
+}
+
+export function updateMyAgentMemory(agent, memoryId, { content = '', memory_type: memoryType = '', importance = null } = {}) {
+  return api.put(`/me/agent-memories/${encodeURIComponent(memoryId)}`, { agent, content, memory_type: memoryType, importance })
+}
+
+export function deleteMyAgentMemory(agent, memoryId) {
+  return api.delete(`/me/agent-memories/${encodeURIComponent(memoryId)}`, { params: { agent } })
 }
 
 /**
@@ -1210,6 +1252,43 @@ export function getObsMonitor(days = 7, range = 'days', refresh = 0) {
   return api.get('/observability/monitor', { params: { days, range, refresh } })
 }
 
+// ---- 告警实时分析（质量/性能越限 → 归因证据 + 原因分析/优化建议）----
+
+/** 告警列表：status='' 全部 | open | acked | resolved；返回 {alerts,total,unacked} */
+export function getObsAlerts(params = {}) {
+  return api.get('/observability/alerts', { params })
+}
+
+/** 确认告警（open → acked） */
+export function ackObsAlert(alertId) {
+  return api.post(`/observability/alerts/${encodeURIComponent(alertId)}/ack`)
+}
+
+/** 处置告警（→ resolved，记录处置人） */
+export function resolveObsAlert(alertId) {
+  return api.post(`/observability/alerts/${encodeURIComponent(alertId)}/resolve`)
+}
+
+/** 强制重跑原因分析（证据 + LLM 建议刷新） */
+export function reanalyzeObsAlert(alertId) {
+  return api.post(`/observability/alerts/${encodeURIComponent(alertId)}/reanalyze`)
+}
+
+/** 手动触发一次告警扫描（后台周期任务之外的即时入口） */
+export function scanObsAlerts() {
+  return api.post('/observability/alerts/scan')
+}
+
+/** 在线采样评测：近窗口聚合 + 明细（DeepEval 风格质量回流） */
+export function getObsOnlineEval(days = 7, limit = 50, offset = 0) {
+  return api.get('/observability/online-eval', { params: { days, limit, offset } })
+}
+
+/** 语义缓存监控：命中率/命中 vs 未命中对比/节省/空间/趋势/语义详情 */
+export function getObsCacheMonitor(days = 7, refresh = 0) {
+  return api.get('/observability/cache-monitor', { params: { days, refresh } })
+}
+
 /**
  * 工具调用链路：按 trace 聚合的工具 span 序列
  */
@@ -1397,9 +1476,9 @@ export function listEvalDatasets() {
   return api.get('/eval/datasets')
 }
 
-/** 新建评测集 */
-export function createEvalDataset({ name, description = '' }) {
-  return api.post('/eval/datasets', { name, description })
+/** 新建评测集（kind: rag | agent，Agent 轨迹评测集用 agent） */
+export function createEvalDataset({ name, description = '', kind = 'rag' }) {
+  return api.post('/eval/datasets', { name, description, kind })
 }
 
 /** 删除评测集（级联删除用例/运行/结果） */
@@ -1432,9 +1511,9 @@ export function importEvalCasesFromFeedback(datasetId) {
   return api.post(`/eval/datasets/${datasetId}/cases/from-feedback`)
 }
 
-/** 发起评测运行，返回 { run_id, status } */
-export function startEvalRun(datasetId) {
-  return api.post(`/eval/datasets/${datasetId}/runs`)
+/** 发起评测运行，返回 { run_id, status }；经评估器发起时携带其指标配置 */
+export function startEvalRun(datasetId, evaluatorId = '') {
+  return api.post(`/eval/datasets/${datasetId}/runs`, evaluatorId ? { evaluator_id: evaluatorId } : {})
 }
 
 /** 运行历史（含 summary 与进度计数） */
@@ -1459,19 +1538,115 @@ export function listEvalEvaluators() {
   return api.get('/eval/evaluators')
 }
 
-/** 基于已有评测集创建评估器 */
-export function createEvalEvaluator({ name, datasetId, description = '' }) {
-  return api.post('/eval/evaluators', { name, dataset_id: datasetId, description })
+/** 基于已有评测集创建评估器（metrics 空=默认 Ragas 四指标；可选 hallucination/geval；hitK=Hit@K 的 K） */
+export function createEvalEvaluator({ name, datasetId, description = '', metrics = [], gevalCriteria = '', hitK = 5 }) {
+  return api.post('/eval/evaluators', {
+    name, dataset_id: datasetId, description, metrics, geval_criteria: gevalCriteria, hit_k: hitK,
+  })
 }
 
-/** 编辑评估器名称/描述 */
-export function updateEvalEvaluator(evaluatorId, { name, description }) {
-  return api.put(`/eval/evaluators/${evaluatorId}`, { name, description })
+/** 编辑评估器名称/描述/指标配置/Hit@K */
+export function updateEvalEvaluator(evaluatorId, { name, description, metrics, gevalCriteria, hitK }) {
+  const payload = {}
+  if (name !== undefined) payload.name = name
+  if (description !== undefined) payload.description = description
+  if (metrics !== undefined) payload.metrics = metrics
+  if (gevalCriteria !== undefined) payload.geval_criteria = gevalCriteria
+  if (hitK !== undefined) payload.hit_k = hitK
+  return api.put(`/eval/evaluators/${evaluatorId}`, payload)
 }
 
 /** 删除评估器（不影响评测集与运行历史） */
 export function deleteEvalEvaluator(evaluatorId) {
   return api.delete(`/eval/evaluators/${evaluatorId}`)
+}
+
+// ---- 测试集构建：候选池（LLM 基于 KB 生成 / 日志挖掘）+ 人工审核 ----
+
+/** LLM 基于知识库生成候选用例（pending，待人工审核，不直入评测集） */
+export function generateEvalCandidates({ datasetId, kbId, count = 5 }) {
+  return api.post('/eval/candidates/generate', { dataset_id: datasetId, kb_id: kbId, count })
+}
+
+/** 立即触发一轮日志挖掘（新增配对达量才产出候选；datasetId 缺省用日志挖掘候选集） */
+export function mineEvalCandidates(datasetId = '') {
+  return api.post('/eval/candidates/mine', null, { params: { dataset_id: datasetId } })
+}
+
+/** 候选列表（分页 + 状态过滤 + pending 计数；返回前脱敏） */
+export function listEvalCandidates(params = {}) {
+  return api.get('/eval/candidates', { params })
+}
+
+/** 审核通过：可编辑字段后入评测集（origin 继承候选来源） */
+export function approveEvalCandidate(candidateId, edits = {}) {
+  return api.post(`/eval/candidates/${candidateId}/approve`, edits)
+}
+
+/** 审核拒绝（保留记录可追溯） */
+export function rejectEvalCandidate(candidateId, reviewNote = '') {
+  return api.post(`/eval/candidates/${candidateId}/reject`, { review_note: reviewNote })
+}
+
+/** 批量通过（仅处理 pending，逐条隔离） */
+export function batchApproveEvalCandidates(ids) {
+  return api.post('/eval/candidates/batch-approve', { ids })
+}
+
+// ---- BadCase 分析框架（多源收集 / 归因 / 转用例闭环 / 标记）----
+
+/** BadCase 列表（status/category/source_type 过滤 + 分页 + 分类/状态计数；脱敏） */
+export function listEvalBadCases(params = {}) {
+  return api.get('/eval/badcases', { params })
+}
+
+/** LLM 归因增强（超时/失败降级规则化模板，不阻断） */
+export function analyzeEvalBadCase(badcaseId) {
+  return api.post(`/eval/badcases/${badcaseId}/analyze`)
+}
+
+/** 转评测用例（origin=badcase，可编辑参考答案）→ 跑回归 → 自动复现判定 */
+export function evalBadCaseToCase(badcaseId, { datasetId, question, referenceAnswer, expectedKeywords, expectedSource }) {
+  const payload = { dataset_id: datasetId }
+  if (question !== undefined) payload.question = question
+  if (referenceAnswer !== undefined) payload.reference_answer = referenceAnswer
+  if (expectedKeywords !== undefined) payload.expected_keywords = expectedKeywords
+  if (expectedSource !== undefined) payload.expected_source = expectedSource
+  return api.post(`/eval/badcases/${badcaseId}/to-case`, payload)
+}
+
+/** 人工标记已修复/忽略/重新打开（status: fixed | ignored | open） */
+export function markEvalBadCase(badcaseId, status, note = '') {
+  return api.post(`/eval/badcases/${badcaseId}/mark`, { status, note })
+}
+
+// ---- Agent 轨迹评测（离线真实运行 + 在线 trace 采样 + 手动单 trace）----
+
+/** 发起 Agent 离线评测（kind=agent 评测集逐用例真实运行，立即返回 run_id） */
+export function startAgentEvalRun({ datasetId, matchMode = 'superset', argsMatch = false }) {
+  return api.post('/eval/agent/runs', { dataset_id: datasetId, match_mode: matchMode, args_match: argsMatch })
+}
+
+/** Agent 评测运行历史（含 summary 与进度计数） */
+export function listAgentEvalRuns(datasetId = '') {
+  return api.get('/eval/agent/runs', { params: { dataset_id: datasetId } })
+}
+
+/** Agent 评测详情（run + summary + 逐用例轨迹与六指标） */
+export function getAgentEvalRun(runId) {
+  return api.get(`/eval/agent/runs/${runId}`)
+}
+
+/** 在线 Agent 评测：近窗口聚合 + 明细（返回前脱敏） */
+export function getAgentOnlineEval(days = 7, limit = 50, offset = 0) {
+  return api.get('/eval/agent/online', { params: { days, limit, offset } })
+}
+
+/** 手动单 trace 评测（可附期望工具序列与匹配模式） */
+export function evaluateAgentTrace(traceId, { expectedTools, matchMode = 'superset', argsMatch = false } = {}) {
+  const payload = { match_mode: matchMode, args_match: argsMatch }
+  if (expectedTools !== undefined) payload.expected_tools = expectedTools
+  return api.post(`/eval/agent/traces/${encodeURIComponent(traceId)}/evaluate`, payload)
 }
 
 // ---- Prompt / Skill 专项评测（静态断言 + Rubric 打分 + A/B + 优化上线）----
@@ -1563,6 +1738,11 @@ export function getGatewayOverview() {
 /** 网关调用统计（仪表盘） */
 export function getGatewayStats(days = 7) {
   return api.get('/gateway/stats', { params: { days } })
+}
+
+/** Token 用量分析（两源合并）：网关日志/按密钥/配额水位 + Agent 段构成 */
+export function getGatewayTokenAnalysis(days = 7, range = 'days') {
+  return api.get('/gateway/token-analysis', { params: { days, range } })
 }
 
 // ---- 上游管理（协议 + Base URL + Key + 成本层级 + 模型清单 + 权重/健康/延迟）----

@@ -210,11 +210,35 @@ def init_db(conn: sqlite3.Connection):
             source_session_id TEXT NOT NULL DEFAULT '',
             source_message_id TEXT NOT NULL DEFAULT '',
             importance        REAL NOT NULL DEFAULT 0.5,
+            confidence        REAL NOT NULL DEFAULT 1,
             created_at        TEXT NOT NULL,
             updated_at        TEXT NOT NULL,
             last_used_at      TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_user_memories_user ON user_memories(user_id, updated_at);
+
+        CREATE TABLE IF NOT EXISTS user_instructions (
+            id         TEXT PRIMARY KEY,
+            user_id    TEXT NOT NULL UNIQUE,
+            content    TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS agent_memories (
+            id                TEXT PRIMARY KEY,
+            user_id           TEXT NOT NULL,
+            agent_key         TEXT NOT NULL,
+            memory_type       TEXT NOT NULL DEFAULT 'fact',
+            content           TEXT NOT NULL,
+            keywords          TEXT NOT NULL DEFAULT '[]',
+            importance        REAL NOT NULL DEFAULT 0.5,
+            confidence        REAL NOT NULL DEFAULT 1,
+            source_session_id TEXT NOT NULL DEFAULT '',
+            created_at        TEXT NOT NULL,
+            updated_at        TEXT NOT NULL,
+            last_used_at      TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_memories_scope ON agent_memories(user_id, agent_key, updated_at);
 
         CREATE TABLE IF NOT EXISTS turn_module_usage (
             id                TEXT PRIMARY KEY,
@@ -267,6 +291,7 @@ def init_db(conn: sqlite3.Connection):
             summary                  TEXT NOT NULL,
             covered_until_message_id TEXT NOT NULL DEFAULT '',
             token_estimate           INTEGER NOT NULL DEFAULT 0,
+            edited_by_user           INTEGER NOT NULL DEFAULT 0,
             created_at               TEXT NOT NULL,
             updated_at               TEXT NOT NULL
         );
@@ -1361,6 +1386,276 @@ def init_db(conn: sqlite3.Connection):
             conn.execute("ALTER TABLE pending_uploads ADD COLUMN ingest_title TEXT NOT NULL DEFAULT ''")
         conn.execute("INSERT INTO schema_migrations VALUES ('pending_ingest_v1',?)",
                      (datetime.now().isoformat(),))
+    if not conn.execute("SELECT 1 FROM schema_migrations WHERE version='memory_five_layer_v1'").fetchone():
+        # 五层记忆架构（借鉴 Claude Code）：L1 用户指令表、L4 Agent 分域记忆表；
+        # L2 用户记忆补置信度列（查重命中递增，召回评分因子）；
+        # L3 会话摘要补用户编辑标记（编辑过的会话笔记不被自动压缩覆盖）。
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS user_instructions ("
+            "id TEXT PRIMARY KEY, user_id TEXT NOT NULL UNIQUE,"
+            " content TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL)"
+        )
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS agent_memories ("
+            "id TEXT PRIMARY KEY, user_id TEXT NOT NULL, agent_key TEXT NOT NULL,"
+            " memory_type TEXT NOT NULL DEFAULT 'fact', content TEXT NOT NULL,"
+            " keywords TEXT NOT NULL DEFAULT '[]', importance REAL NOT NULL DEFAULT 0.5,"
+            " confidence REAL NOT NULL DEFAULT 1, source_session_id TEXT NOT NULL DEFAULT '',"
+            " created_at TEXT NOT NULL, updated_at TEXT NOT NULL, last_used_at TEXT)"
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_memories_scope"
+                     " ON agent_memories(user_id, agent_key, updated_at)")
+        mem_cols = {r[1] for r in conn.execute("PRAGMA table_info(user_memories)")}
+        if "confidence" not in mem_cols:
+            conn.execute("ALTER TABLE user_memories ADD COLUMN confidence REAL NOT NULL DEFAULT 1")
+            logger.info("user_memories 补加列: confidence")
+        sum_cols = {r[1] for r in conn.execute("PRAGMA table_info(chat_session_summaries)")}
+        if "edited_by_user" not in sum_cols:
+            conn.execute("ALTER TABLE chat_session_summaries ADD COLUMN edited_by_user INTEGER NOT NULL DEFAULT 0")
+            logger.info("chat_session_summaries 补加列: edited_by_user")
+        conn.execute("INSERT INTO schema_migrations VALUES ('memory_five_layer_v1',?)",
+                     (datetime.now().isoformat(),))
+    if not conn.execute("SELECT 1 FROM schema_migrations WHERE version='obs_deepeval_v1'").fetchone():
+        # 可观测性 × DeepEval 整合整改：
+        # - obs_alerts：质量/性能告警事件（后台实时分析引擎产出，含归因证据与原因分析/优化建议）；
+        # - semantic_cache_events：语义缓存命中/未命中事件埋点（命中率/时延/Token 对比/节省量口径）；
+        # - online_eval_results：在线采样评测结果（线上真实问答抽样跑 DeepEval 风格指标）；
+        # - eval_results 补 hallucination/geval 列；eval_evaluators 补 metrics 配置列（空=默认 Ragas 四指标）。
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS obs_alerts (
+                id          TEXT PRIMARY KEY,
+                type        TEXT NOT NULL,
+                metric      TEXT NOT NULL,
+                severity    TEXT NOT NULL DEFAULT 'warning',
+                status      TEXT NOT NULL DEFAULT 'open',
+                fingerprint TEXT NOT NULL,
+                value       REAL NOT NULL DEFAULT 0,
+                threshold   REAL NOT NULL DEFAULT 0,
+                window      TEXT NOT NULL DEFAULT '',
+                evidence    TEXT NOT NULL DEFAULT '{}',
+                analysis    TEXT NOT NULL DEFAULT '{}',
+                analyzed_at TEXT NOT NULL DEFAULT '',
+                created_at  TEXT NOT NULL,
+                acked_at    TEXT NOT NULL DEFAULT '',
+                resolved_at TEXT NOT NULL DEFAULT '',
+                resolved_by TEXT NOT NULL DEFAULT ''
+            );
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_obs_alerts_status"
+                     " ON obs_alerts(status, created_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_obs_alerts_fp"
+                     " ON obs_alerts(fingerprint, status)")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS semantic_cache_events (
+                id           TEXT PRIMARY KEY,
+                created_at   TEXT NOT NULL,
+                user_id      TEXT NOT NULL DEFAULT '',
+                scope        TEXT NOT NULL DEFAULT 'personal',
+                hit          INTEGER NOT NULL DEFAULT 0,
+                entry_id     TEXT NOT NULL DEFAULT '',
+                score        REAL NOT NULL DEFAULT 0,
+                latency_ms   INTEGER NOT NULL DEFAULT 0,
+                est_tokens   INTEGER NOT NULL DEFAULT 0,
+                saved_tokens INTEGER NOT NULL DEFAULT 0,
+                question     TEXT NOT NULL DEFAULT ''
+            );
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sc_events_created"
+                     " ON semantic_cache_events(created_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sc_events_hit"
+                     " ON semantic_cache_events(hit, created_at)")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS online_eval_results (
+                id             TEXT PRIMARY KEY,
+                created_at     TEXT NOT NULL,
+                session_id     TEXT NOT NULL DEFAULT '',
+                message_id     TEXT NOT NULL DEFAULT '',
+                user_id        TEXT NOT NULL DEFAULT '',
+                question       TEXT NOT NULL DEFAULT '',
+                answer         TEXT NOT NULL DEFAULT '',
+                context_chars  INTEGER NOT NULL DEFAULT 0,
+                faithfulness   REAL,
+                geval_score    REAL,
+                geval_reason   TEXT NOT NULL DEFAULT '',
+                metric_details TEXT NOT NULL DEFAULT '{}',
+                status         TEXT NOT NULL DEFAULT 'ok',
+                error          TEXT NOT NULL DEFAULT ''
+            );
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_online_eval_created"
+                     " ON online_eval_results(created_at)")
+        eval_cols = {r[1] for r in conn.execute("PRAGMA table_info(eval_results)")}
+        for col, ddl in (
+            ("hallucination", "REAL"),
+            ("geval_score", "REAL"),
+            ("geval_reason", "TEXT NOT NULL DEFAULT ''"),
+        ):
+            if col not in eval_cols:
+                conn.execute(f"ALTER TABLE eval_results ADD COLUMN {col} {ddl}")
+        ev_cols = {r[1] for r in conn.execute("PRAGMA table_info(eval_evaluators)")}
+        if "metrics" not in ev_cols:
+            conn.execute("ALTER TABLE eval_evaluators ADD COLUMN metrics TEXT NOT NULL DEFAULT ''")
+        conn.execute("INSERT INTO schema_migrations VALUES ('obs_deepeval_v1',?)",
+                     (datetime.now().isoformat(),))
+    if not conn.execute("SELECT 1 FROM schema_migrations WHERE version='eval_upgrade_v1'").fetchone():
+        # 评测体系升级（RAG 离线/在线 + BadCase 闭环 + Agent 评测框架）：
+        # - eval_datasets.kind 区分 rag|agent；eval_cases 补期望工具序列/期望结果/来源；
+        # - eval_evaluators.hit_k 为 Hit@K 的 K 参数；eval_results 补排名指标 hit_at_k/mrr/first_hit_rank；
+        # - eval_case_candidates：测试集构建候选池（LLM 基于知识库生成/日志挖掘 → 人工审核入集）；
+        # - bad_cases：BadCase 分析框架（多源收集/确定性分类/转用例复现闭环）；
+        # - agent_eval_runs/agent_eval_results：离线 Agent 轨迹评测（真实运行 Agent 产出 trace 后评分）；
+        # - agent_online_evals：在线 trace 采样评测（无参考 Agent 指标）。
+        ds_cols = {r[1] for r in conn.execute("PRAGMA table_info(eval_datasets)")}
+        if "kind" not in ds_cols:
+            conn.execute("ALTER TABLE eval_datasets ADD COLUMN kind TEXT NOT NULL DEFAULT 'rag'")
+        case_cols = {r[1] for r in conn.execute("PRAGMA table_info(eval_cases)")}
+        for col, ddl in (
+            ("expected_tools", "TEXT NOT NULL DEFAULT '[]'"),
+            ("expected_outcome", "TEXT NOT NULL DEFAULT ''"),
+            ("origin", "TEXT NOT NULL DEFAULT 'manual'"),
+        ):
+            if col not in case_cols:
+                conn.execute(f"ALTER TABLE eval_cases ADD COLUMN {col} {ddl}")
+        ev_cols = {r[1] for r in conn.execute("PRAGMA table_info(eval_evaluators)")}
+        if "hit_k" not in ev_cols:
+            conn.execute("ALTER TABLE eval_evaluators ADD COLUMN hit_k INTEGER NOT NULL DEFAULT 5")
+        res_cols = {r[1] for r in conn.execute("PRAGMA table_info(eval_results)")}
+        for col, ddl in (
+            ("hit_at_k", "INTEGER NOT NULL DEFAULT 0"),
+            ("mrr", "REAL"),
+            ("first_hit_rank", "INTEGER NOT NULL DEFAULT 0"),
+        ):
+            if col not in res_cols:
+                conn.execute(f"ALTER TABLE eval_results ADD COLUMN {col} {ddl}")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS eval_case_candidates (
+                id                TEXT PRIMARY KEY,
+                dataset_id        TEXT NOT NULL,
+                kb_id             TEXT NOT NULL DEFAULT '',
+                origin            TEXT NOT NULL DEFAULT 'llm_gen',
+                question          TEXT NOT NULL,
+                reference_answer  TEXT NOT NULL DEFAULT '',
+                expected_keywords TEXT NOT NULL DEFAULT '[]',
+                expected_source   TEXT NOT NULL DEFAULT '',
+                source_ref        TEXT NOT NULL DEFAULT '{}',
+                status            TEXT NOT NULL DEFAULT 'pending',
+                review_note       TEXT NOT NULL DEFAULT '',
+                created_by        TEXT NOT NULL DEFAULT '',
+                created_at        TEXT NOT NULL,
+                reviewed_at       TEXT NOT NULL DEFAULT '',
+                reviewed_by       TEXT NOT NULL DEFAULT ''
+            );
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_eval_candidates_ds"
+                     " ON eval_case_candidates(dataset_id, status, created_at)")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS bad_cases (
+                id          TEXT PRIMARY KEY,
+                created_at  TEXT NOT NULL,
+                source_type TEXT NOT NULL,
+                source_id   TEXT NOT NULL UNIQUE,
+                run_id      TEXT NOT NULL DEFAULT '',
+                session_id  TEXT NOT NULL DEFAULT '',
+                message_id  TEXT NOT NULL DEFAULT '',
+                question    TEXT NOT NULL DEFAULT '',
+                answer      TEXT NOT NULL DEFAULT '',
+                contexts    TEXT NOT NULL DEFAULT '[]',
+                metrics     TEXT NOT NULL DEFAULT '{}',
+                category    TEXT NOT NULL DEFAULT 'low_quality',
+                analysis    TEXT NOT NULL DEFAULT '{}',
+                status      TEXT NOT NULL DEFAULT 'open',
+                case_id     TEXT NOT NULL DEFAULT '',
+                repro_run_id TEXT NOT NULL DEFAULT '',
+                note        TEXT NOT NULL DEFAULT '',
+                resolved_at TEXT NOT NULL DEFAULT ''
+            );
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_bad_cases_status"
+                     " ON bad_cases(status, created_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_bad_cases_category"
+                     " ON bad_cases(category, created_at)")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS agent_eval_runs (
+                id          TEXT PRIMARY KEY,
+                dataset_id  TEXT NOT NULL,
+                status      TEXT NOT NULL DEFAULT 'running',
+                summary     TEXT NOT NULL DEFAULT '{}',
+                created_by  TEXT NOT NULL DEFAULT '',
+                started_at  TEXT NOT NULL,
+                finished_at TEXT
+            );
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_eval_runs_ds"
+                     " ON agent_eval_runs(dataset_id, started_at)")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS agent_eval_results (
+                id                 TEXT PRIMARY KEY,
+                run_id             TEXT NOT NULL,
+                case_id            TEXT NOT NULL,
+                question           TEXT NOT NULL DEFAULT '',
+                trace_id           TEXT NOT NULL DEFAULT '',
+                answer             TEXT NOT NULL DEFAULT '',
+                tools_called       TEXT NOT NULL DEFAULT '[]',
+                expected_tools     TEXT NOT NULL DEFAULT '[]',
+                match_mode         TEXT NOT NULL DEFAULT 'superset',
+                trajectory_match   INTEGER NOT NULL DEFAULT 0,
+                task_completion    REAL,
+                tool_correctness   REAL,
+                argument_correctness REAL,
+                step_efficiency    REAL,
+                plan_quality       REAL,
+                plan_adherence     REAL,
+                trajectory_judge   REAL,
+                metric_details     TEXT NOT NULL DEFAULT '{}',
+                latency_ms         INTEGER NOT NULL DEFAULT 0,
+                status             TEXT NOT NULL DEFAULT 'ok',
+                error              TEXT NOT NULL DEFAULT ''
+            );
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_eval_results_run"
+                     " ON agent_eval_results(run_id)")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS agent_online_evals (
+                id                 TEXT PRIMARY KEY,
+                created_at         TEXT NOT NULL,
+                trace_id           TEXT NOT NULL DEFAULT '',
+                agent              TEXT NOT NULL DEFAULT '',
+                user_id            TEXT NOT NULL DEFAULT '',
+                input              TEXT NOT NULL DEFAULT '',
+                answer             TEXT NOT NULL DEFAULT '',
+                tools_called       TEXT NOT NULL DEFAULT '[]',
+                task_completion    REAL,
+                tool_correctness   REAL,
+                argument_correctness REAL,
+                step_efficiency    REAL,
+                plan_quality       REAL,
+                plan_adherence     REAL,
+                trajectory_judge   REAL,
+                metric_details     TEXT NOT NULL DEFAULT '{}',
+                status             TEXT NOT NULL DEFAULT 'ok',
+                error              TEXT NOT NULL DEFAULT ''
+            );
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_online_created"
+                     " ON agent_online_evals(created_at)")
+        conn.execute("INSERT INTO schema_migrations VALUES ('eval_upgrade_v1',?)",
+                     (datetime.now().isoformat(),))
     conn.commit()
 
 
@@ -1423,6 +1718,20 @@ def _migrate(conn: sqlite3.Connection):
         if col not in eval_cols:
             conn.execute(f"ALTER TABLE eval_results ADD COLUMN {col} {ddl}")
             logger.info("eval_results 补加列: %s", col)
+
+    # DeepEval 风格扩展：eval_results 补 hallucination/geval 列；评估器补 metrics 配置列（幂等）
+    for col, ddl in (
+        ("hallucination", "REAL"),
+        ("geval_score", "REAL"),
+        ("geval_reason", "TEXT NOT NULL DEFAULT ''"),
+    ):
+        if col not in eval_cols:
+            conn.execute(f"ALTER TABLE eval_results ADD COLUMN {col} {ddl}")
+            logger.info("eval_results 补加列: %s", col)
+    evaluator_cols = {r[1] for r in conn.execute("PRAGMA table_info(eval_evaluators)")}
+    if "metrics" not in evaluator_cols:
+        conn.execute("ALTER TABLE eval_evaluators ADD COLUMN metrics TEXT NOT NULL DEFAULT ''")
+        logger.info("eval_evaluators 补加列: metrics")
 
     # 运行状态恢复只允许持有独占锁的 Agent 在启动时执行。
     # CI/CD 流水线：仅初始化默认配置行。

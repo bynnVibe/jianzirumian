@@ -243,6 +243,51 @@ class Settings:
     SEMANTIC_CACHE_WARM_HITS: int = int(os.getenv("SEMANTIC_CACHE_WARM_HITS", "3"))
     SEMANTIC_CACHE_HOT_HITS: int = int(os.getenv("SEMANTIC_CACHE_HOT_HITS", "10"))
 
+    # ---- 可观测性告警实时分析（质量/性能指标越限 → 后台归因 + 原因分析/优化建议） ----
+    ALERT_SCAN_INTERVAL_SECONDS: int = int(os.getenv("ALERT_SCAN_INTERVAL_SECONDS", "60"))
+    # 同指纹告警冷却（分钟）：冷却期内不重复建单；指标回落后自动 resolved
+    ALERT_COOLDOWN_MINUTES: int = int(os.getenv("ALERT_COOLDOWN_MINUTES", "30"))
+    # 性能规则阈值：错误率（error+timeout+interrupted 占比）/ P95 延迟（ms）
+    ALERT_ERROR_RATE_THRESHOLD: float = float(os.getenv("ALERT_ERROR_RATE_THRESHOLD", "0.10"))
+    ALERT_P95_LATENCY_MS: int = int(os.getenv("ALERT_P95_LATENCY_MS", "30000"))
+    # 质量规则阈值：回归均分下限 / 点踩占比上限 / 在线评测均分下限
+    ALERT_EVAL_SCORE_MIN: float = float(os.getenv("ALERT_EVAL_SCORE_MIN", "0.6"))
+    ALERT_DISLIKE_RATE_THRESHOLD: float = float(os.getenv("ALERT_DISLIKE_RATE_THRESHOLD", "0.30"))
+    ALERT_ONLINE_SCORE_MIN: float = float(os.getenv("ALERT_ONLINE_SCORE_MIN", "0.6"))
+    # 规则生效的最小样本量（避免小样本误报）
+    ALERT_MIN_SAMPLES: int = int(os.getenv("ALERT_MIN_SAMPLES", "5"))
+
+    # ---- 在线采样评测（DeepEval 风格：线上真实问答抽样跑质量指标，回流质量监控） ----
+    ONLINE_EVAL_ENABLED: bool = os.getenv("ONLINE_EVAL_ENABLED", "true").lower() == "true"
+    ONLINE_EVAL_INTERVAL_SECONDS: int = int(os.getenv("ONLINE_EVAL_INTERVAL_SECONDS", "300"))
+    ONLINE_EVAL_SAMPLE_RATE: float = float(os.getenv("ONLINE_EVAL_SAMPLE_RATE", "0.1"))
+    ONLINE_EVAL_MAX_PER_ROUND: int = int(os.getenv("ONLINE_EVAL_MAX_PER_ROUND", "5"))
+    # GEval 默认评估准则（在线评测与未配置准则的离线 GEval 共用）
+    ONLINE_EVAL_GEVAL_CRITERIA: str = os.getenv(
+        "ONLINE_EVAL_GEVAL_CRITERIA", "回答准确、有用、与问题相关，表述清晰无误导")
+
+    # ---- 评测体系升级：RAG 排名指标 / 测试集构建 / 在线业务指标 / BadCase / Agent 评测 ----
+    # Hit@K 默认 K（评估器 hit_k 可覆盖）；MRR=首命中排名倒数，确定性排名匹配零 LLM 成本
+    RETRIEVAL_HIT_K: int = int(os.getenv("RETRIEVAL_HIT_K", "5"))
+    # 追问率口径：助手回答后窗口内同会话出现用户新消息计为追问
+    FOLLOWUP_WINDOW_SECONDS: int = int(os.getenv("FOLLOWUP_WINDOW_SECONDS", "300"))
+    # 日志挖掘：新增问答配对达阈值才触发候选生成；周期任务开关/间隔
+    LOG_MINING_MIN_PAIRS: int = int(os.getenv("LOG_MINING_MIN_PAIRS", "20"))
+    TESTSET_MINING_ENABLED: bool = os.getenv("TESTSET_MINING_ENABLED", "true").lower() == "true"
+    TESTSET_MINING_INTERVAL_SECONDS: int = int(os.getenv("TESTSET_MINING_INTERVAL_SECONDS", "3600"))
+    # BadCase 周期收集间隔（另在离线 run 结束时增量触发）
+    BADCASE_SCAN_INTERVAL_SECONDS: int = int(os.getenv("BADCASE_SCAN_INTERVAL_SECONDS", "300"))
+    # 质量告警新规则阈值：空回答率上限 / Agent 任务完成均分下限
+    ALERT_EMPTY_ANSWER_RATE_THRESHOLD: float = float(os.getenv("ALERT_EMPTY_ANSWER_RATE_THRESHOLD", "0.10"))
+    ALERT_AGENT_SCORE_MIN: float = float(os.getenv("ALERT_AGENT_SCORE_MIN", "0.6"))
+    # Agent 在线 trace 采样评测（无参考指标）开关/间隔/采样率/单轮上限
+    AGENT_ONLINE_EVAL_ENABLED: bool = os.getenv("AGENT_ONLINE_EVAL_ENABLED", "true").lower() == "true"
+    AGENT_ONLINE_INTERVAL_SECONDS: int = int(os.getenv("AGENT_ONLINE_INTERVAL_SECONDS", "300"))
+    AGENT_ONLINE_SAMPLE_RATE: float = float(os.getenv("AGENT_ONLINE_SAMPLE_RATE", "0.1"))
+    AGENT_ONLINE_MAX_PER_ROUND: int = int(os.getenv("AGENT_ONLINE_MAX_PER_ROUND", "5"))
+    # Agent 离线评测单用例真实运行超时（秒）：超时该用例降级 error，不中断 run
+    AGENT_EVAL_CASE_TIMEOUT: int = int(os.getenv("AGENT_EVAL_CASE_TIMEOUT", "180"))
+
 
 settings = Settings()
 

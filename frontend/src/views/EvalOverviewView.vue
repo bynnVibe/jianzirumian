@@ -5,20 +5,18 @@
       <div class="header-inner">
         <div class="title-row">
           <h1 class="page-title">评测</h1>
-          <nav class="seg-tabs" role="tablist" aria-label="评测分类">
-            <button class="seg-tab" :class="{ active: tab === 'datasets' }" role="tab" :aria-selected="tab === 'datasets'" @click="tab = 'datasets'">
-              评测集
+          <nav class="domain-tabs" role="tablist" aria-label="评测域">
+            <button class="domain-tab" :class="{ active: domain === 'rag' }" role="tab" :aria-selected="domain === 'rag'" @click="switchDomain('rag')">
+              RAG 评测
             </button>
-            <button class="seg-tab" :class="{ active: tab === 'evaluators' }" role="tab" :aria-selected="tab === 'evaluators'" @click="tab = 'evaluators'">
-              评估器
-            </button>
-            <button class="seg-tab" :class="{ active: tab === 'experiments' }" role="tab" :aria-selected="tab === 'experiments'" @click="tab = 'experiments'">
-              实验
+            <button class="domain-tab" :class="{ active: domain === 'agent' }" role="tab" :aria-selected="domain === 'agent'" @click="switchDomain('agent')">
+              Agent 评测
             </button>
           </nav>
         </div>
-        <div class="toolbar">
+        <div v-if="domain === 'rag'" class="toolbar">
           <input
+            v-if="tab !== 'online' && tab !== 'badcases'"
             v-model.trim="keyword"
             class="search-input"
             type="search"
@@ -30,23 +28,31 @@
             </svg>
             刷新
           </button>
+          <button v-if="tab === 'datasets'" class="tool-btn" @click="openCandidates(null)">候选审核</button>
           <button v-if="tab === 'datasets'" class="btn-primary-btn" @click="openCreateDataset">＋ 新建评测集</button>
           <button v-else-if="tab === 'evaluators'" class="btn-primary-btn" @click="openCreateEvaluator">＋ 新建评估器</button>
-          <button v-else class="btn-primary-btn" @click="openCreateRun">＋ 新建实验</button>
+          <button v-else-if="tab === 'experiments'" class="btn-primary-btn" @click="openCreateRun">＋ 新建实验</button>
         </div>
       </div>
-      <p class="header-sub">
-        {{ tab === 'datasets'
-          ? '问答回归 · Ragas：按评测集对问答主链路跑离线回归，量化忠实度 / 回答相关性 / 上下文精确率 / 召回率，防止优化引入回退。点击卡片进入详情。'
-          : tab === 'evaluators'
-            ? '评估器：基于已有评测集构建评测工作流，一键运行并在页内实时查看评测进度与逐用例结果；Prompt / Skill 专项评测工作台已整合在本页下方。'
-            : '实验：一次评测运行即一个实验。选择评测集发起实验，点击行进入该运行的逐用例结果与环比分析。' }}
-      </p>
+      <div class="subtab-row">
+        <nav class="seg-tabs" role="tablist" aria-label="评测分类">
+          <button
+            v-for="t in currentTabs" :key="t.key"
+            class="seg-tab" :class="{ active: tab === t.key }" role="tab" :aria-selected="tab === t.key"
+            @click="switchTab(t.key)"
+          >
+            {{ t.label }}
+          </button>
+        </nav>
+      </div>
+      <p class="header-sub">{{ headerSub }}</p>
     </header>
 
     <div class="overview-body">
       <p v-if="errorMsg" class="inline-error">{{ errorMsg }}</p>
 
+      <!-- ============ RAG 评测域 ============ -->
+      <template v-if="domain === 'rag'">
       <!-- ============ 评测集卡片格 ============ -->
       <template v-if="tab === 'datasets'">
         <div v-if="loadingDatasets" class="mini-loading">加载中…</div>
@@ -75,6 +81,10 @@
             <div class="entry-tags">
               <span class="tag-chip">{{ d.case_count }} 用例</span>
               <span class="tag-chip" :class="runChipCls(d.last_run)">{{ runStatusText(d.last_run) }}</span>
+            </div>
+            <div class="entry-foot">
+              <button class="outline-btn sm" @click.stop="openBuild(d)">构建</button>
+              <button class="outline-btn sm" @click.stop="openCandidates(d)">候选审核</button>
             </div>
           </div>
         </div>
@@ -115,7 +125,7 @@
           <div v-if="loadingRun && !runDetail" class="mini-loading">加载运行详情…</div>
           <table v-else-if="runDetail && runDetail.results.length" class="monitor-table">
             <thead>
-              <tr><th style="width:34%">问题</th><th>忠实</th><th>相关</th><th>精确</th><th>召回</th><th>延迟</th><th>状态</th></tr>
+              <tr><th style="width:26%">问题</th><th>忠实</th><th>相关</th><th>精确</th><th>召回</th><th title="Hit@K：top K 内是否命中期望来源/关键词">Hit@K</th><th title="MRR：首个相关来源排名的倒数">MRR</th><th title="幻觉率：越低越好">幻觉↓</th><th>GEval</th><th>延迟</th><th>状态</th></tr>
             </thead>
             <tbody>
               <template v-for="row in runDetail.results" :key="row.id">
@@ -125,11 +135,15 @@
                   <td><span class="score" :class="scoreCls(row.answer_relevance)">{{ pct(row.answer_relevance) }}</span></td>
                   <td><span class="score" :class="scoreCls(row.context_precision)">{{ pct(row.context_precision) }}</span></td>
                   <td><span class="score" :class="scoreCls(row.context_recall)">{{ pct(row.context_recall) }}</span></td>
+                  <td><span class="score" :class="row.hit_at_k ? 'good' : 'na'">{{ row.hit_at_k ? '命中' : '未中' }}</span></td>
+                  <td><span class="score" :class="row.mrr ? scoreCls(row.mrr) : 'na'">{{ mrrText(row.mrr) }}</span></td>
+                  <td><span class="score" :class="hallucCls(row.hallucination)">{{ pct(row.hallucination) }}</span></td>
+                  <td><span class="score" :class="scoreCls(row.geval_score)">{{ pct(row.geval_score) }}</span></td>
                   <td>{{ row.latency_ms }}ms</td>
                   <td><span class="status-pill sm" :class="row.status === 'ok' ? 'finished' : 'failed'">{{ row.status === 'ok' ? '成功' : '错误' }}</span></td>
                 </tr>
                 <tr v-if="expanded.has(row.id)" class="expand-row">
-                  <td colspan="7">
+                  <td colspan="11">
                     <div class="expand-inner">
                       <div v-if="row.error" class="err-line">错误：{{ row.error }}</div>
                       <div class="expand-block">
@@ -139,6 +153,10 @@
                       <div v-if="row.judge_reason" class="expand-block">
                         <span class="expand-title">评分理由</span>
                         <div class="answer-box">{{ row.judge_reason }}</div>
+                      </div>
+                      <div v-if="row.geval_reason" class="expand-block">
+                        <span class="expand-title">GEval 准则评分理由</span>
+                        <div class="answer-box">{{ row.geval_reason }}</div>
                       </div>
                     </div>
                   </td>
@@ -186,6 +204,9 @@
               <span class="tag-chip muted">{{ ev.run_count }} 次运行</span>
               <span class="tag-chip" :class="runChipCls(ev.last_run)">{{ runStatusText(ev.last_run) }}</span>
             </div>
+            <div class="entry-tags">
+              <span v-for="m in evaluatorMetricLabels(ev)" :key="m" class="tag-chip metric-chip">{{ m }}</span>
+            </div>
             <div class="entry-foot">
               <button class="run-btn" :disabled="startingRun || !ev.dataset_exists" @click.stop="runEvaluator(ev)">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13">
@@ -198,17 +219,78 @@
           </div>
         </div>
 
-        <!-- ---- 页内整合的 Prompt / Skill 专项评测工作台 ---- -->
-        <section class="workbench-section">
-          <div class="workbench-head">
-            <div>
-              <span class="workbench-title">Prompt / Skill 专项评测工作台</span>
-              <span class="workbench-sub">静态断言 + Rubric 多维打分 + A/B 行为对比，已整合在本页，无需跳转</span>
-            </div>
-            <button class="tool-btn" @click="goPromptSkill">独立页面打开</button>
+        <!-- Prompt / Skill 专项评测工作台已移至「Agent 评测」域 -->
+      </template>
+
+      <!-- ============ 在线采样评测（DeepEval 风格 · 质量自动回流） ============ -->
+      <template v-else-if="tab === 'online'">
+        <div class="online-toolbar">
+          <select v-model.number="onlineDays" class="input online-days" @change="loadOnline(true)">
+            <option :value="7">近 7 天</option>
+            <option :value="14">近 14 天</option>
+            <option :value="30">近 30 天</option>
+          </select>
+          <span class="online-note">后台按 10% 采样率对线上回答自动评测（单轮上限 5 条）；无检索上下文时仅跑 GEval。共 {{ onlineTotal }} 条样本。</span>
+        </div>
+        <div v-if="onlineBusiness" class="biz-wrap">
+          <div class="monitor-metrics online-metrics">
+            <div class="monitor-metric"><span class="mm-value" :class="rateCls(onlineBusiness.dislike_rate, 0.1)">{{ ratePct(onlineBusiness.dislike_rate) }}</span><span class="mm-label">点踩率</span></div>
+            <div class="monitor-metric"><span class="mm-value">{{ ratePct(onlineBusiness.followup_rate) }}</span><span class="mm-label">追问率</span></div>
+            <div class="monitor-metric"><span class="mm-value" :class="rateCls(onlineBusiness.empty_answer_rate, 0.1)">{{ ratePct(onlineBusiness.empty_answer_rate) }}</span><span class="mm-label">空回答率</span></div>
           </div>
-          <PromptSkillEval />
-        </section>
+          <p class="biz-note">业务三率基于近 {{ onlineDays }} 天 {{ onlineBusiness.samples }} 条助手回答（纯 SQL 确定性口径，零 LLM 成本）；追问窗口 {{ onlineBusiness.followup_window_seconds }}s。点踩率 / 空回答率越低越好，超阈值参与质量告警。</p>
+        </div>
+        <div v-if="onlineAgg" class="monitor-metrics online-metrics">
+          <div class="monitor-metric"><span class="mm-value">{{ onlineAgg.samples }}</span><span class="mm-label">窗口样本数</span></div>
+          <div class="monitor-metric"><span class="mm-value" :class="scoreCls(onlineAgg.avg_faithfulness)">{{ pct(onlineAgg.avg_faithfulness) }}</span><span class="mm-label">平均忠实度</span></div>
+          <div class="monitor-metric"><span class="mm-value" :class="scoreCls(onlineAgg.avg_geval)">{{ pct(onlineAgg.avg_geval) }}</span><span class="mm-label">平均 GEval 分</span></div>
+          <div class="monitor-metric"><span class="mm-value" :class="onlineAgg.low_count ? 'bad' : ''">{{ onlineAgg.low_count }}</span><span class="mm-label">低分样本（&lt;60%）</span></div>
+        </div>
+        <div v-if="loadingOnline && !onlineItems.length" class="mini-loading">加载在线评测中…</div>
+        <div v-else-if="!onlineItems.length" class="empty-block">
+          <p>暂无在线评测样本。发起对话后后台会自动采样评测，稍后刷新即可查看。</p>
+        </div>
+        <table v-else class="exp-table online-table">
+          <thead>
+            <tr><th>时间</th><th style="width:38%">问题（脱敏摘要）</th><th>忠实度</th><th>GEval</th><th>上下文</th><th>状态</th></tr>
+          </thead>
+          <tbody>
+            <template v-for="row in onlineItems" :key="row.id">
+              <tr class="exp-row" @click="toggleOnlineExpand(row.id)">
+                <td class="cell-time"><span class="exp-caret" :class="{ open: onlineExpanded.has(row.id) }">▸</span>{{ row.created_at }}</td>
+                <td class="online-q">{{ row.question }}</td>
+                <td><span class="score" :class="scoreCls(row.faithfulness)">{{ pct(row.faithfulness) }}</span></td>
+                <td><span class="score" :class="scoreCls(row.geval_score)">{{ pct(row.geval_score) }}</span></td>
+                <td>{{ row.context_chars ? formatNum(row.context_chars) + ' 字符' : '无检索' }}</td>
+                <td><span class="status-pill sm" :class="row.status === 'ok' ? 'finished' : 'failed'">{{ row.status === 'ok' ? '成功' : '跳过/错误' }}</span></td>
+              </tr>
+              <tr v-if="onlineExpanded.has(row.id)" class="expand-row">
+                <td colspan="6">
+                  <div class="expand-inner">
+                    <div class="expand-block">
+                      <span class="expand-title">回答摘要（脱敏）</span>
+                      <div class="answer-box">{{ row.answer || '(空)' }}</div>
+                    </div>
+                    <div v-if="row.geval_reason" class="expand-block">
+                      <span class="expand-title">GEval 评分理由</span>
+                      <div class="answer-box">{{ row.geval_reason }}</div>
+                    </div>
+                  </div>
+                </td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+        <div v-if="onlineTotal > onlineItems.length || onlineOffset > 0" class="online-pager">
+          <button class="outline-btn sm" :disabled="onlineOffset <= 0 || loadingOnline" @click="onlinePage(-1)">上一页</button>
+          <span class="online-page-text">{{ onlineOffset + 1 }}–{{ Math.min(onlineOffset + onlineItems.length, onlineTotal) }} / {{ onlineTotal }}</span>
+          <button class="outline-btn sm" :disabled="onlineOffset + onlineItems.length >= onlineTotal || loadingOnline" @click="onlinePage(1)">下一页</button>
+        </div>
+      </template>
+
+      <!-- ============ BadCase 分析（多源收集 / 归因 / 转用例闭环） ============ -->
+      <template v-else-if="tab === 'badcases'">
+        <EvalBadCases />
       </template>
 
       <!-- ============ 实验（跨评测集的运行历史） ============ -->
@@ -241,6 +323,69 @@
           </tbody>
         </table>
       </template>
+      </template>
+
+      <!-- ============ Agent 评测域 ============ -->
+      <template v-else>
+        <AgentEvalPanel v-if="tab === 'trajectory'" />
+        <AgentOnlinePanel v-else-if="tab === 'online'" />
+        <section v-else class="workbench-section agent-pse">
+          <div class="workbench-head">
+            <div>
+              <span class="workbench-title">Prompt / Skill 专项评测工作台</span>
+              <span class="workbench-sub">静态断言 + Rubric 多维打分 + A/B 行为对比 · Agent 组件级评测，已整合在本页，无需跳转</span>
+            </div>
+            <button class="tool-btn" @click="goPromptSkill">独立页面打开</button>
+          </div>
+          <PromptSkillEval />
+        </section>
+      </template>
+    </div>
+
+    <!-- 候选审核抽屉（pending 列表 / 编辑后通过 / 拒绝 / 批量通过） -->
+    <EvalCandidates
+      v-if="candidatesTarget"
+      :dataset-id="candidatesTarget.id"
+      :dataset-name="candidatesTarget.name"
+      @close="candidatesTarget = null"
+      @changed="loadDatasets"
+    />
+
+    <!-- 构建测试集弹窗（LLM 基于知识库生成 / 日志挖掘 → 候选待审池） -->
+    <div v-if="buildTarget" class="modal-overlay" @click.self="buildTarget = null">
+      <div class="modal-box">
+        <h3 class="modal-title">构建测试集 · {{ buildTarget.name }}</h3>
+        <div class="build-tabs">
+          <button class="build-tab" :class="{ active: buildMode === 'kb' }" @click="buildMode = 'kb'">LLM 基于知识库生成</button>
+          <button class="build-tab" :class="{ active: buildMode === 'logs' }" @click="buildMode = 'logs'">日志挖掘</button>
+        </div>
+        <template v-if="buildMode === 'kb'">
+          <label class="field">
+            <span class="field-label">知识库 <em>*</em></span>
+            <select class="input" v-model="buildForm.kbId">
+              <option value="" disabled>选择知识库</option>
+              <option v-for="kb in knowledgeBases" :key="kb.id" :value="kb.id">{{ kb.name }}</option>
+            </select>
+          </label>
+          <label class="field">
+            <span class="field-label">生成数量</span>
+            <input class="input" type="number" min="1" max="20" v-model.number="buildForm.count" />
+          </label>
+          <p class="modal-sub">LLM 基于知识库内容生成问答候选（含期望来源），写入待审池，审核通过后入集，不直接污染评测集。</p>
+          <div class="modal-actions">
+            <button class="outline-btn" @click="buildTarget = null">关闭</button>
+            <button class="btn-primary-btn" :disabled="building || !buildForm.kbId" @click="doGenerate">{{ building ? '生成中…' : '生成候选' }}</button>
+          </div>
+        </template>
+        <template v-else>
+          <p class="modal-sub">从线上对话日志挖掘真实问答对（use_knowledge 且回答非空），新增配对 ≥ 20 才触发；LLM 转为候选写入待审池（origin=log_mining）。</p>
+          <div class="modal-actions">
+            <button class="outline-btn" @click="buildTarget = null">关闭</button>
+            <button class="btn-primary-btn" :disabled="building" @click="doMine">{{ building ? '挖掘中…' : '立即挖掘' }}</button>
+          </div>
+        </template>
+        <p v-if="buildMsg" class="build-msg" :class="{ ok: buildOk }">{{ buildMsg }}</p>
+      </div>
     </div>
 
     <!-- 新建评测集弹窗 -->
@@ -285,6 +430,23 @@
           <span class="field-label">描述</span>
           <textarea class="input textarea" v-model.trim="evaluatorForm.description" rows="2" placeholder="工作流用途说明（选填）"></textarea>
         </label>
+        <div class="field">
+          <span class="field-label">评测指标（DeepEval 风格 · 不选=默认 Ragas 四指标）</span>
+          <div class="metric-checks">
+            <label v-for="m in METRIC_OPTIONS" :key="m.key" class="metric-check">
+              <input type="checkbox" :value="m.key" v-model="evaluatorForm.metrics" />
+              <span>{{ m.label }}<em v-if="m.hint">{{ m.hint }}</em></span>
+            </label>
+          </div>
+        </div>
+        <label class="field" v-if="evaluatorForm.metrics.includes('geval')">
+          <span class="field-label">GEval 评估准则（自然语言描述，模型按准则链式评估打 1-10 分）</span>
+          <textarea class="input textarea" v-model.trim="evaluatorForm.geval_criteria" rows="3" placeholder="如：回答准确、有用、与问题相关，且给出可操作的建议"></textarea>
+        </label>
+        <label class="field">
+          <span class="field-label">Hit@K 的 K（检索排名指标：top K 内命中期望来源/关键词即算 Hit@K，MRR=首命中排名倒数；默认 5）</span>
+          <input class="input" type="number" min="1" max="50" v-model.number="evaluatorForm.hit_k" />
+        </label>
         <div class="modal-actions">
           <button class="outline-btn" @click="showCreateEvaluator = false">取消</button>
           <button class="btn-primary-btn" :disabled="savingEvaluator || !evaluatorForm.name || !evaluatorForm.dataset_id" @click="saveEvaluator">
@@ -320,20 +482,92 @@
 
 <script setup>
 import { ref, reactive, computed, watch, onMounted, onUnmounted } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRouter, useRoute } from 'vue-router'
 import PromptSkillEval from '@/components/PromptSkillEval.vue'
+import EvalBadCases from '@/components/eval/EvalBadCases.vue'
+import EvalCandidates from '@/components/eval/EvalCandidates.vue'
+import AgentEvalPanel from '@/components/eval/AgentEvalPanel.vue'
+import AgentOnlinePanel from '@/components/eval/AgentOnlinePanel.vue'
 import {
   listEvalDatasets, createEvalDataset, deleteEvalDataset,
   listEvalEvaluators, createEvalEvaluator, updateEvalEvaluator, deleteEvalEvaluator,
-  startEvalRun, getEvalRun, listAllEvalRuns,
+  startEvalRun, getEvalRun, listAllEvalRuns, getObsOnlineEval,
+  generateEvalCandidates, mineEvalCandidates, listKnowledgeBases,
 } from '@/api'
 
 const router = useRouter()
+const route = useRoute()
 
-// ---- 分段页签：评测集 | 评估器（基于评测集的评测工作流） ----
-const tab = ref('datasets')
+// ---- 顶级域：RAG 评测 | Agent 评测（?domain=rag|agent 深链，默认 rag；存量 ?tab= 兼容映射到 RAG） ----
+const RAG_TABS = [
+  { key: 'datasets', label: '评测集' },
+  { key: 'evaluators', label: '评估器' },
+  { key: 'experiments', label: '实验' },
+  { key: 'online', label: '在线评测' },
+  { key: 'badcases', label: 'BadCase 分析' },
+]
+const AGENT_TABS = [
+  { key: 'trajectory', label: '轨迹评测' },
+  { key: 'online', label: '在线轨迹' },
+  { key: 'prompt-skill', label: 'Prompt · Skill' },
+]
+const RAG_KEYS = RAG_TABS.map((t) => t.key)
+const AGENT_KEYS = AGENT_TABS.map((t) => t.key)
+
+function resolveDomain(q) { return q === 'agent' ? 'agent' : 'rag' }
+function resolveTab(dom, q) {
+  const keys = dom === 'agent' ? AGENT_KEYS : RAG_KEYS
+  const def = dom === 'agent' ? 'trajectory' : 'datasets'
+  return keys.includes(q) ? q : def
+}
+
+const domain = ref(resolveDomain(route.query.domain))
+const tab = ref(resolveTab(domain.value, route.query.tab))
+const currentTabs = computed(() => (domain.value === 'agent' ? AGENT_TABS : RAG_TABS))
 const keyword = ref('')
 const focusedId = ref('')
+
+// 深链同步：?domain=&tab= 变化时校正本地状态（存量仅 ?tab= 默认 RAG 域）
+watch(() => [route.query.domain, route.query.tab], ([d, t]) => {
+  const dom = resolveDomain(d)
+  domain.value = dom
+  tab.value = resolveTab(dom, t)
+})
+
+function syncQuery() {
+  router.replace({ query: { ...route.query, domain: domain.value, tab: tab.value } })
+}
+function switchDomain(d) {
+  if (domain.value === d) return
+  domain.value = d
+  tab.value = d === 'agent' ? 'trajectory' : 'datasets'
+  keyword.value = ''
+  syncQuery()
+}
+function switchTab(t) {
+  if (tab.value === t) return
+  tab.value = t
+  syncQuery()
+}
+
+const headerSub = computed(() => {
+  if (domain.value === 'agent') {
+    return tab.value === 'trajectory'
+      ? 'Agent 轨迹评测（离线）：对 kind=agent 评测集逐用例真实运行 Agent，按 AgentEvals 轨迹匹配（严格 / 无序 / 子集 / 超集）与 DeepEval 六指标（任务完成 / 步骤效率 / 工具正确 / 参数正确 / 规划质量 / 规划遵循）+ 整体轨迹评分量化。'
+      : tab.value === 'online'
+        ? 'Agent 在线轨迹：后台按采样率对线上已结束的 chat Agent 轨迹自动评测（无参考六指标），质量均分回流可观测性并参与告警；支持手动评测指定 trace。文本已脱敏。'
+        : 'Prompt / Skill 组件级评测：静态断言 + Rubric 多维打分 + A/B 行为对比，据结果一键优化并上线，作为 Agent 域的动作 / 推理组件评测补充。'
+  }
+  return tab.value === 'datasets'
+    ? '问答回归 · Ragas：按评测集对问答主链路跑离线回归，量化忠实度 / 回答相关性 / 上下文精确率 / 召回率与 Hit@K / MRR 检索排名指标。支持 LLM 基于知识库生成、日志挖掘构建测试集（候选审核入集）。点击卡片进入详情。'
+    : tab.value === 'evaluators'
+      ? '评估器：基于已有评测集构建评测工作流，可配置 DeepEval 风格指标（幻觉率 / GEval 准则评分）与 Hit@K 的 K，一键运行并在页内实时查看评测进度与逐用例结果。'
+      : tab.value === 'online'
+        ? '在线评测：后台按采样率对线上真实回答自动评测（忠实度 + GEval），并统计点踩率 / 追问率 / 空回答率业务三率；质量均分回流可观测性并参与质量告警。文本已脱敏。'
+        : tab.value === 'badcases'
+          ? 'BadCase 分析：多源自动收集低分 / 失败用例（离线 / 在线评测、点踩、空回答、Agent 低分），规则化归因 + 可选 LLM 增强，转评测用例跑回归形成闭环。文本已脱敏。'
+          : '实验：一次评测运行即一个实验。选择评测集发起实验，点击行进入该运行的逐用例结果与环比分析。'
+})
 
 const datasets = ref([])
 const loadingDatasets = ref(false)
@@ -352,9 +586,11 @@ function errMsg(e, fallback) {
 }
 
 function reloadAll() {
+  if (domain.value !== 'rag') return
   loadDatasets()
   loadEvaluators()
   if (tab.value === 'experiments') loadRunsAll()
+  if (tab.value === 'online') loadOnline(true)
 }
 
 async function loadDatasets() {
@@ -406,6 +642,73 @@ function goPromptSkill() {
   router.push({ name: 'EvalPromptSkill' })
 }
 
+// ---- 测试集构建（LLM 基于知识库生成 / 日志挖掘 → 候选待审池）+ 候选审核抽屉 ----
+const buildTarget = ref(null)        // 目标评测集对象
+const buildMode = ref('kb')          // kb | logs
+const buildForm = reactive({ kbId: '', count: 5 })
+const building = ref(false)
+const buildMsg = ref('')
+const buildOk = ref(false)
+const knowledgeBases = ref([])
+const candidatesTarget = ref(null)   // { id, name }；id='' 表示全部评测集
+
+function openBuild(d) {
+  buildTarget.value = d
+  buildMode.value = 'kb'
+  buildForm.kbId = ''
+  buildForm.count = 5
+  buildMsg.value = ''
+  buildOk.value = false
+  if (!knowledgeBases.value.length) loadKnowledgeBases()
+}
+
+async function loadKnowledgeBases() {
+  try {
+    const res = await listKnowledgeBases()
+    knowledgeBases.value = res.data.bases || []
+  } catch (e) { /* KB 列表仅用于构建下拉，失败不阻断 */ }
+}
+
+async function doGenerate() {
+  building.value = true
+  buildMsg.value = ''
+  buildOk.value = false
+  try {
+    const res = await generateEvalCandidates({
+      datasetId: buildTarget.value.id, kbId: buildForm.kbId, count: buildForm.count || 5,
+    })
+    buildOk.value = true
+    buildMsg.value = `已生成 ${res.data.created ?? 0} 条候选，请在「候选审核」中筛选通过后入集。`
+  } catch (e) {
+    buildMsg.value = errMsg(e, '生成候选失败')
+  } finally {
+    building.value = false
+  }
+}
+
+async function doMine() {
+  building.value = true
+  buildMsg.value = ''
+  buildOk.value = false
+  try {
+    const res = await mineEvalCandidates(buildTarget.value.id)
+    if (res.data.triggered) {
+      buildOk.value = true
+      buildMsg.value = `日志挖掘触发：新增配对 ${res.data.pairs ?? 0} 条，生成候选 ${res.data.created ?? 0} 条，请在「候选审核」中查看。`
+    } else {
+      buildMsg.value = `新增配对不足（${res.data.pairs ?? 0} 条，阈值 ${res.data.min_pairs ?? 20}），本轮未触发挖掘。`
+    }
+  } catch (e) {
+    buildMsg.value = errMsg(e, '日志挖掘失败')
+  } finally {
+    building.value = false
+  }
+}
+
+function openCandidates(d) {
+  candidatesTarget.value = d ? { id: d.id, name: d.name } : { id: '', name: '' }
+}
+
 // ---- 新建评测集 ----
 const showCreateDataset = ref(false)
 const creatingDataset = ref(false)
@@ -441,16 +744,36 @@ async function removeDataset(d) {
 }
 
 // ---- 新建/编辑评估器 ----
+// DeepEval 风格指标选项（与后端 deepeval_metrics.ALL_METRICS 对齐；不选=默认 Ragas 四指标）
+const METRIC_OPTIONS = [
+  { key: 'faithfulness', label: '忠实度' },
+  { key: 'answer_relevancy', label: '回答相关性' },
+  { key: 'contextual_precision', label: '上下文精确率' },
+  { key: 'contextual_recall', label: '上下文召回率' },
+  { key: 'hallucination', label: '幻觉率', hint: '越低越好' },
+  { key: 'geval', label: 'GEval 准则评分', hint: '自定义准则' },
+]
+const METRIC_LABEL_MAP = Object.fromEntries(METRIC_OPTIONS.map((m) => [m.key, m.label]))
+
+function evaluatorMetricLabels(ev) {
+  const names = ev?.metric_config?.metrics || []
+  if (!names.length) return ['Ragas 默认四指标']
+  return names.map((m) => METRIC_LABEL_MAP[m] || m)
+}
+
 const showCreateEvaluator = ref(false)
 const savingEvaluator = ref(false)
 const editingEvaluatorId = ref('')
-const evaluatorForm = reactive({ name: '', dataset_id: '', description: '' })
+const evaluatorForm = reactive({ name: '', dataset_id: '', description: '', metrics: [], geval_criteria: '', hit_k: 5 })
 
 function openCreateEvaluator() {
   editingEvaluatorId.value = ''
   evaluatorForm.name = ''
   evaluatorForm.dataset_id = ''
   evaluatorForm.description = ''
+  evaluatorForm.metrics = []
+  evaluatorForm.geval_criteria = ''
+  evaluatorForm.hit_k = 5
   if (!datasets.value.length) loadDatasets()
   showCreateEvaluator.value = true
 }
@@ -460,6 +783,9 @@ function openEditEvaluator(ev) {
   evaluatorForm.name = ev.name
   evaluatorForm.dataset_id = ev.dataset_id
   evaluatorForm.description = ev.description || ''
+  evaluatorForm.metrics = [...(ev.metric_config?.metrics || [])]
+  evaluatorForm.geval_criteria = ev.metric_config?.geval_criteria || ''
+  evaluatorForm.hit_k = ev.hit_k || 5
   showCreateEvaluator.value = true
 }
 
@@ -470,12 +796,18 @@ async function saveEvaluator() {
       await updateEvalEvaluator(editingEvaluatorId.value, {
         name: evaluatorForm.name,
         description: evaluatorForm.description,
+        metrics: evaluatorForm.metrics,
+        gevalCriteria: evaluatorForm.geval_criteria,
+        hitK: evaluatorForm.hit_k,
       })
     } else {
       await createEvalEvaluator({
         name: evaluatorForm.name,
         datasetId: evaluatorForm.dataset_id,
         description: evaluatorForm.description,
+        metrics: evaluatorForm.metrics,
+        gevalCriteria: evaluatorForm.geval_criteria,
+        hitK: evaluatorForm.hit_k,
       })
     }
     showCreateEvaluator.value = false
@@ -514,7 +846,7 @@ async function runEvaluator(ev) {
   startingRun.value = true
   errorMsg.value = ''
   try {
-    const res = await startEvalRun(ev.dataset_id)
+    const res = await startEvalRun(ev.dataset_id, ev.id)
     activeRun.value = { evaluator: ev, runId: res.data.run_id }
     runDetail.value = null
     expanded.value = new Set()
@@ -599,7 +931,7 @@ const progressPct = computed(() => {
 const runSummaryCards = computed(() => {
   const s = runDetail.value?.run?.summary || {}
   if (s.total == null) return []
-  return [
+  const cards = [
     { label: '用例', value: s.total },
     { label: '成功', value: s.ok ?? 0 },
     { label: '失败', value: s.error ?? 0, cls: s.error ? 'bad' : '' },
@@ -607,9 +939,59 @@ const runSummaryCards = computed(() => {
     { label: '答案相关', value: pct(s.avg_answer_relevance) },
     { label: '上下文精确', value: pct(s.avg_context_precision) },
     { label: '上下文召回', value: pct(s.avg_context_recall) },
-    { label: '平均延迟', value: `${Math.round(s.avg_latency_ms || 0)}ms` },
+    { label: 'Hit@K', value: pct(s.avg_hit_at_k) },
+    { label: 'MRR', value: s.avg_mrr != null ? Number(s.avg_mrr).toFixed(2) : '—' },
   ]
+  // DeepEval 风格扩展指标：仅在评估器配置了对应指标时展示
+  if (s.avg_hallucination != null) cards.push({ label: '幻觉率↓', value: pct(s.avg_hallucination) })
+  if (s.avg_geval_score != null) cards.push({ label: 'GEval', value: pct(s.avg_geval_score) })
+  cards.push({ label: '平均延迟', value: `${Math.round(s.avg_latency_ms || 0)}ms` })
+  return cards
 })
+
+// ---- 在线采样评测（DeepEval 风格 · 后台自动采样，质量回流可观测性） ----
+const onlineDays = ref(7)
+const onlineAgg = ref(null)
+const onlineBusiness = ref(null)
+const onlineItems = ref([])
+const onlineTotal = ref(0)
+const onlineOffset = ref(0)
+const loadingOnline = ref(false)
+const onlineExpanded = ref(new Set())
+const ONLINE_PAGE_SIZE = 50
+
+async function loadOnline(reset = false) {
+  if (reset) {
+    onlineOffset.value = 0
+    onlineExpanded.value = new Set()
+  }
+  loadingOnline.value = true
+  try {
+    const res = await getObsOnlineEval(onlineDays.value, ONLINE_PAGE_SIZE, onlineOffset.value)
+    onlineAgg.value = res.data.aggregate || null
+    onlineBusiness.value = res.data.business || null
+    onlineItems.value = res.data.items || []
+    onlineTotal.value = res.data.total || 0
+  } catch (e) {
+    errorMsg.value = errMsg(e, '加载在线评测失败')
+  } finally {
+    loadingOnline.value = false
+  }
+}
+
+function onlinePage(dir) {
+  const next = onlineOffset.value + dir * ONLINE_PAGE_SIZE
+  if (next < 0 || next >= onlineTotal.value) return
+  onlineOffset.value = next
+  loadOnline()
+}
+
+function toggleOnlineExpand(id) {
+  const next = new Set(onlineExpanded.value)
+  if (next.has(id)) next.delete(id)
+  else next.add(id)
+  onlineExpanded.value = next
+}
 
 // ---- 实验（跨评测集运行历史） ----
 const allRuns = ref([])
@@ -627,8 +1009,10 @@ const filteredRuns = computed(() => {
 })
 
 watch(tab, (t) => {
+  if (domain.value !== 'rag') { stopRunsPolling(); return }
   if (t === 'experiments') loadRunsAll()
   else stopRunsPolling()
+  if (t === 'online') loadOnline(true)
 })
 
 async function loadRunsAll() {
@@ -701,6 +1085,32 @@ function scoreCls(v) {
   if (v >= 0.5) return 'mid'
   return 'low'
 }
+// 幻觉率反向指标：越低越好
+function hallucCls(v) {
+  if (v == null) return 'na'
+  if (v <= 0.2) return 'good'
+  if (v <= 0.5) return 'mid'
+  return 'low'
+}
+function formatNum(n) {
+  if (n == null || Number.isNaN(Number(n))) return '-'
+  return Number(n).toLocaleString('en-US')
+}
+// MRR：首命中排名倒数，0/空显示「—」（无命中或无期望信号）
+function mrrText(v) {
+  return v ? Number(v).toFixed(2) : '—'
+}
+// 业务三率：无样本（null）显示「—」，否则百分比一位小数
+function ratePct(v) {
+  return v == null ? '—' : (v * 100).toFixed(1) + '%'
+}
+// 业务率着色（越低越好）：超阈值红 / 半阈值黄 / 其余绿；无样本灰
+function rateCls(v, threshold) {
+  if (v == null) return 'na'
+  if (v > threshold) return 'bad'
+  if (v > threshold / 2) return 'mid'
+  return 'good'
+}
 function runStatusText(lastRun) {
   if (!lastRun) return '未运行'
   return `最近${statusLabel(lastRun.status)}`
@@ -761,6 +1171,39 @@ function statusLabel(st) {
 }
 .seg-tab:hover { color: var(--color-primary); }
 .seg-tab.active { background: #cfe3fb; color: #1d4ed8; }
+
+/* ---- 顶级域分段（RAG | Agent）+ 子页签行 ---- */
+.domain-tabs {
+  display: flex; gap: 2px; background: #f0ece6; border-radius: 9px; padding: 3px;
+  pointer-events: auto;
+}
+.domain-tab {
+  border: none; background: transparent; cursor: pointer; font-size: 13px; font-weight: 700;
+  color: var(--color-text-secondary); padding: 6px 16px; border-radius: 7px; transition: all .15s;
+}
+.domain-tab:hover { color: var(--color-primary); }
+.domain-tab.active { background: linear-gradient(135deg, #c98a4b, #d9a76a); color: #fff; box-shadow: 0 2px 6px rgba(201,138,75,0.25); }
+.subtab-row { padding: 12px 32px 0; max-width: 1400px; width: 100%; margin: 0 auto; pointer-events: auto; box-sizing: border-box; }
+
+/* ---- 在线业务三率 ---- */
+.biz-wrap { margin-bottom: 14px; }
+.biz-note { font-size: 11.5px; color: var(--color-text-secondary); line-height: 1.5; margin: 6px 0 0; }
+
+/* ---- 构建测试集弹窗 ---- */
+.build-tabs { display: flex; gap: 4px; background: #f0ece6; border-radius: 9px; padding: 3px; }
+.build-tab {
+  flex: 1; border: none; background: transparent; cursor: pointer; font-size: 12.5px; font-weight: 600;
+  color: var(--color-text-secondary); padding: 7px 10px; border-radius: 7px; transition: all .15s;
+}
+.build-tab.active { background: #fff; color: var(--color-primary); box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+.build-msg {
+  font-size: 12px; line-height: 1.5; padding: 9px 12px; border-radius: 9px; margin: 0;
+  background: #fdecea; color: #c0392b; border: 1px solid #f5c6c0;
+}
+.build-msg.ok { background: #e6f4ea; color: #2e7d46; border-color: #bfe0c8; }
+
+/* ---- Agent 域 Prompt/Skill 嵌入（去掉工作台分隔线，作为页签主内容） ---- */
+.workbench-section.agent-pse { margin-top: 0; border-top: none; padding-top: 0; }
 .toolbar { display: flex; align-items: center; gap: 8px; pointer-events: auto; }
 .search-input {
   border: 1px solid var(--color-border); background: #fff; border-radius: 9px;
@@ -879,6 +1322,9 @@ function statusLabel(st) {
 }
 .mm-value { font-size: 15px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .mm-value.bad { color: #c0392b; }
+.mm-value.good { color: #2e7d46; }
+.mm-value.mid { color: #b5822a; }
+.mm-value.low { color: #c0392b; }
 .mm-label { font-size: 10.5px; color: var(--color-text-secondary); }
 .monitor-table { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 12px; }
 .monitor-table th, .monitor-table td {
@@ -932,6 +1378,23 @@ function statusLabel(st) {
 .exp-ds { font-weight: 600; }
 .cell-time { white-space: nowrap; color: var(--color-text-secondary); }
 
+/* ---- 在线评测页签 ---- */
+.online-toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
+.online-days { width: 130px; flex: none; }
+.online-note { font-size: 12px; color: var(--color-text-secondary); line-height: 1.5; }
+.online-metrics { margin: 0 0 14px; }
+.online-table { margin-top: 0; }
+.online-q { line-height: 1.55; }
+.online-pager { display: flex; align-items: center; justify-content: center; gap: 12px; margin-top: 14px; }
+.online-page-text { font-size: 12px; color: var(--color-text-secondary); font-variant-numeric: tabular-nums; }
+
+/* ---- 评估器指标配置（DeepEval 风格） ---- */
+.tag-chip.metric-chip { background: #e3edfd; color: #1d4ed8; font-weight: 600; }
+.metric-checks { display: flex; flex-wrap: wrap; gap: 6px 14px; padding: 8px 10px; border: 1px solid var(--color-border); border-radius: 9px; background: #fffdfa; }
+.metric-check { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; cursor: pointer; color: var(--color-text); }
+.metric-check input { accent-color: #2563eb; cursor: pointer; }
+.metric-check em { font-style: normal; font-size: 11px; color: var(--color-text-secondary); margin-left: 3px; }
+
 /* ---- 空/加载 ---- */
 .mini-loading { padding: 26px; text-align: center; color: var(--color-text-secondary); font-size: 12.5px; }
 .empty-block {
@@ -969,6 +1432,9 @@ select.input { appearance: auto; background: #fff; }
 @media (max-width: 768px) {
   .eval-header { padding-top: 44px; }
   .header-inner { padding: 16px 16px 0; }
+  .title-row { flex-wrap: wrap; gap: 10px; }
+  .subtab-row { padding: 12px 16px 0; }
+  .seg-tabs { flex-wrap: wrap; }
   .header-sub { padding: 0 16px; }
   .overview-body { padding: 16px 16px 40px; }
   .toolbar { width: 100%; }

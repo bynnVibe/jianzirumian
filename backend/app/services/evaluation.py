@@ -188,9 +188,41 @@ async def _judge_answer(question: str, answer: str, reference: str,
         return None, ""
 
 
+def _source_relevant(expected_keywords: List[str], expected_source: str,
+                     source: dict) -> bool:
+    """单个检索来源的相关性判定（排名指标逐位口径）：
+
+    - expected_keywords 任一命中该来源自身片段文本；或
+    - expected_source 与来源标题字段（文件名/百科标题/知识库名/片段文本）互含。
+    """
+    texts = [source.get("text") or ""] + [
+        chunk.get("text") or "" for chunk in source.get("chunks") or []
+    ]
+    ctx = " ".join(texts).lower()
+    for kw in expected_keywords or []:
+        kw = (kw or "").strip().lower()
+        if kw and kw in ctx:
+            return True
+    exp_src = (expected_source or "").strip().lower()
+    if exp_src:
+        title_fields = [
+            source.get("document_title") or "",
+            *[chunk.get("wiki_title") or "" for chunk in source.get("chunks") or []],
+            *[chunk.get("text") or "" for chunk in source.get("chunks") or []],
+            source.get("wiki_title") or "",
+            source.get("kb_name") or "",
+            str(source.get("source_image") or "").split("/")[-1],
+            source.get("text") or "",
+        ]
+        for field in title_fields:
+            if field and (exp_src in field.lower() or field.lower() in exp_src):
+                return True
+    return False
+
+
 def _compute_retrieval_hit(expected_keywords: List[str], expected_source: str,
                            context_text: str, sources: List[dict]) -> int:
-    """检索命中判定：
+    """检索命中判定（口径不变）：
 
     - expected_keywords 任一命中检索片段文本；或
     - expected_source 命中来源标题（文件名/百科标题/知识库名）
@@ -201,23 +233,30 @@ def _compute_retrieval_hit(expected_keywords: List[str], expected_source: str,
         kw = (kw or "").strip().lower()
         if kw and kw in ctx:
             return 1
-
-    exp_src = (expected_source or "").strip().lower()
-    if exp_src:
-        for s in sources or []:
-            title_fields = [
-                s.get("document_title") or "",
-                *[chunk.get("wiki_title") or "" for chunk in s.get("chunks") or []],
-                *[chunk.get("text") or "" for chunk in s.get("chunks") or []],
-                s.get("wiki_title") or "",
-                s.get("kb_name") or "",
-                str(s.get("source_image") or "").split("/")[-1],
-                s.get("text") or "",
-            ]
-            for field in title_fields:
-                if field and (exp_src in field.lower() or field.lower() in exp_src):
-                    return 1
+    if any(_source_relevant([], expected_source, s) for s in sources or []):
+        return 1
     return 0
+
+
+def _rank_metrics(expected_keywords: List[str], expected_source: str,
+                  sources: List[dict], k: int) -> tuple:
+    """检索层排名指标（确定性排名匹配，零 LLM 成本）：
+
+    按检索排序逐位判相关 → (hit_at_k, mrr, first_hit_rank)。
+    Hit@K=top K 内是否命中；MRR=首个相关来源排名的倒数；first_hit_rank=0 表示无命中。
+    无任何期望信号时全 0（与 retrieval_hit 口径一致）。
+    """
+    k = max(1, int(k or 5))
+    if not (expected_keywords or []) and not (expected_source or "").strip():
+        return 0, 0.0, 0
+    first = 0
+    for i, s in enumerate(sources or []):
+        if _source_relevant(expected_keywords, expected_source, s):
+            first = i + 1
+            break
+    hit_at_k = 1 if 0 < first <= k else 0
+    mrr = round(1.0 / first, 4) if first else 0.0
+    return hit_at_k, mrr, first
 
 
 # ---------------------------------------------------------------------------
@@ -406,9 +445,13 @@ async def _compute_answer_relevance(question: str, answer: str,
 # ---------------------------------------------------------------------------
 # 单用例执行
 # ---------------------------------------------------------------------------
-async def _run_single_case(case: dict, user_id: str, llm_provider: str = None) -> dict:
+async def _run_single_case(case: dict, user_id: str, llm_provider: str = None,
+                           metrics: Optional[List[str]] = None, geval_criteria: str = "",
+                           hit_k: int = 5) -> dict:
     """执行单条评测用例，返回结果字段 dict（不含 run_id/id）。
 
+    metrics 为空 → 默认 Ragas 四指标（存量行为不变）；非空 → 按评估器配置的
+    DeepEval 风格指标集执行（可含 hallucination/geval，Ragas 项委托同一实现）。
     全流程异常隔离：任何步骤出错都返回 status=error + error 信息。
     """
     question = case["question"]
@@ -448,37 +491,70 @@ async def _run_single_case(case: dict, user_id: str, llm_provider: str = None) -
         answer = await _generate(messages, llm_provider)
         latency_ms = int((time.monotonic() - started) * 1000)
 
-        # 4. 指标计算（Ragas 四指标并发评估，单点失败降级 None；judge 作为辅助对照）
+        # 4. 指标计算（默认 Ragas 四指标并发评估；配置指标集时走 DeepEval 风格注册表，
+        #    单点失败降级 None；judge 作为辅助对照）
         retrieval_hit = _compute_retrieval_hit(
             expected_keywords, expected_source, context_text, sources
+        )
+        hit_at_k, mrr, first_hit_rank = _rank_metrics(
+            expected_keywords, expected_source, sources, hit_k
         )
         contexts = [
             chunk.get("text") or ""
             for source in (sources or [])
             for chunk in (source.get("chunks") or [source])
         ]
-        metric_out = await asyncio.gather(
-            _statement_metric(answer, context_text, llm_provider),            # Faithfulness
-            _compute_answer_relevance(question, answer, llm_provider),       # Answer Relevance
-            _compute_context_precision(                                      # Context Precision
-                question, reference_answer, contexts, llm_provider
-            ),
-            _statement_metric(reference_answer, context_text, llm_provider),  # Context Recall
-            return_exceptions=True,
-        )
-        metric_scores = []
-        metric_details = {}
-        for key, item in zip(
-            ("faithfulness", "answer_relevance", "context_precision", "context_recall"),
-            metric_out,
-        ):
-            if isinstance(item, BaseException):
-                logger.warning("指标 %s 计算异常 case=%s: %s", key, case.get("id"), item)
-                item = (None, {})
-            score, detail = item
-            metric_scores.append(score)
-            metric_details[key] = detail
-        faith_score, rel_score, prec_score, recall_score = metric_scores
+        halluc_score = None
+        geval_score = None
+        geval_reason = ""
+        if metrics:
+            from app.services import deepeval_metrics as dm
+
+            test_case = dm.LLMTestCase(
+                input=question, actual_output=answer or "",
+                expected_output=reference_answer, retrieval_context=contexts,
+            )
+            measured = await dm.evaluate_case(test_case, metrics, geval_criteria, llm_provider)
+            # DeepEval 指标名 → 本系统 eval_results 列名映射（Ragas 项口径不变）
+            name_map = {"answer_relevancy": "answer_relevance",
+                        "contextual_precision": "context_precision",
+                        "contextual_recall": "context_recall"}
+            metric_details = {}
+            scores = {}
+            for name, (score, detail) in measured.items():
+                key = name_map.get(name, name)
+                metric_details[key] = detail
+                scores[key] = score
+            faith_score = scores.get("faithfulness")
+            rel_score = scores.get("answer_relevance")
+            prec_score = scores.get("context_precision")
+            recall_score = scores.get("context_recall")
+            halluc_score = scores.get("hallucination")
+            geval_score = scores.get("geval")
+            geval_reason = (metric_details.get("geval") or {}).get("reason", "")
+        else:
+            metric_out = await asyncio.gather(
+                _statement_metric(answer, context_text, llm_provider),            # Faithfulness
+                _compute_answer_relevance(question, answer, llm_provider),       # Answer Relevance
+                _compute_context_precision(                                      # Context Precision
+                    question, reference_answer, contexts, llm_provider
+                ),
+                _statement_metric(reference_answer, context_text, llm_provider),  # Context Recall
+                return_exceptions=True,
+            )
+            metric_scores = []
+            metric_details = {}
+            for key, item in zip(
+                ("faithfulness", "answer_relevance", "context_precision", "context_recall"),
+                metric_out,
+            ):
+                if isinstance(item, BaseException):
+                    logger.warning("指标 %s 计算异常 case=%s: %s", key, case.get("id"), item)
+                    item = (None, {})
+                score, detail = item
+                metric_scores.append(score)
+                metric_details[key] = detail
+            faith_score, rel_score, prec_score, recall_score = metric_scores
         faithfulness_pass = (
             1 if (faith_score is not None and faith_score >= FAITH_PASS_THRESHOLD) else 0
         )
@@ -511,11 +587,17 @@ async def _run_single_case(case: dict, user_id: str, llm_provider: str = None) -
             "answer": answer or "",
             "retrieved_sources": json.dumps(slim_sources, ensure_ascii=False),
             "retrieval_hit": retrieval_hit,
+            "hit_at_k": hit_at_k,
+            "mrr": mrr,
+            "first_hit_rank": first_hit_rank,
             "faithfulness_pass": faithfulness_pass,
             "faithfulness": faith_score,
             "answer_relevance": rel_score,
             "context_precision": prec_score,
             "context_recall": recall_score,
+            "hallucination": halluc_score,
+            "geval_score": geval_score,
+            "geval_reason": geval_reason,
             "metric_details": json.dumps(metric_details, ensure_ascii=False),
             "context_empty": context_empty,
             "judge_score": judge_score,
@@ -533,11 +615,17 @@ async def _run_single_case(case: dict, user_id: str, llm_provider: str = None) -
             "answer": "",
             "retrieved_sources": "[]",
             "retrieval_hit": 0,
+            "hit_at_k": 0,
+            "mrr": 0.0,
+            "first_hit_rank": 0,
             "faithfulness_pass": 0,
             "faithfulness": None,
             "answer_relevance": None,
             "context_precision": None,
             "context_recall": None,
+            "hallucination": None,
+            "geval_score": None,
+            "geval_reason": "",
             "metric_details": "{}",
             "context_empty": True,
             "judge_score": None,
@@ -551,14 +639,19 @@ async def _run_single_case(case: dict, user_id: str, llm_provider: str = None) -
 def _insert_result(run_id: str, r: dict):
     db.execute(
         "INSERT INTO eval_results (id, run_id, case_id, question, answer, retrieved_sources,"
-        " retrieval_hit, faithfulness_pass, faithfulness, answer_relevance, context_precision,"
-        " context_recall, metric_details, judge_score, judge_reason, latency_ms, status, error)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        " retrieval_hit, hit_at_k, mrr, first_hit_rank, faithfulness_pass, faithfulness,"
+        " answer_relevance, context_precision,"
+        " context_recall, hallucination, geval_score, geval_reason,"
+        " metric_details, judge_score, judge_reason, latency_ms, status, error)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             _new_id(), run_id, r["case_id"], r["question"], r["answer"],
-            r["retrieved_sources"], r["retrieval_hit"], r["faithfulness_pass"],
+            r["retrieved_sources"], r["retrieval_hit"],
+            r.get("hit_at_k", 0), r.get("mrr"), r.get("first_hit_rank", 0),
+            r["faithfulness_pass"],
             r["faithfulness"], r["answer_relevance"], r["context_precision"],
-            r["context_recall"], r["metric_details"],
+            r["context_recall"], r.get("hallucination"), r.get("geval_score"),
+            r.get("geval_reason") or "", r["metric_details"],
             r["judge_score"], r["judge_reason"], r["latency_ms"], r["status"], r["error"],
         ),
     )
@@ -572,6 +665,7 @@ def _compute_summary(results: List[dict]) -> dict:
     ok = len(ok_rows)
 
     hit_sum = sum(r["retrieval_hit"] for r in ok_rows)
+    hit_k_sum = sum(r.get("hit_at_k", 0) for r in ok_rows)
     faith_sum = sum(r["faithfulness_pass"] for r in ok_rows)
     empty_ctx = sum(1 for r in ok_rows if r.get("context_empty"))
     judge_scores = [r["judge_score"] for r in ok_rows if r["judge_score"] is not None]
@@ -586,23 +680,31 @@ def _compute_summary(results: List[dict]) -> dict:
         "ok": ok,
         "error": err_count,
         "retrieval_hit_rate": round(hit_sum / ok, 4) if ok else 0.0,
+        # 检索层排名指标：Hit@K 命中率 / MRR 均值（确定性排名匹配口径）
+        "avg_hit_at_k": round(hit_k_sum / ok, 4) if ok else 0.0,
+        "avg_mrr": _avg("mrr"),
         "empty_context_rate": round(empty_ctx / ok, 4) if ok else 0.0,
         "faithfulness_pass_rate": round(faith_sum / ok, 4) if ok else 0.0,
         "avg_faithfulness": _avg("faithfulness"),
         "avg_answer_relevance": _avg("answer_relevance"),
         "avg_context_precision": _avg("context_precision"),
         "avg_context_recall": _avg("context_recall"),
+        # DeepEval 风格扩展指标（未配置时为 None，前端按空处理）
+        "avg_hallucination": _avg("hallucination"),
+        "avg_geval_score": _avg("geval_score"),
         "avg_judge_score": round(sum(judge_scores) / len(judge_scores), 2) if judge_scores else None,
         "avg_latency_ms": round(sum(latencies) / len(latencies), 1) if latencies else 0.0,
     }
 
 
-async def _run_all(run_id: str, cases: List[dict], user_id: str, llm_provider: str = None):
+async def _run_all(run_id: str, cases: List[dict], user_id: str, llm_provider: str = None,
+                   metrics: Optional[List[str]] = None, geval_criteria: str = "",
+                   hit_k: int = 5):
     """后台逐用例执行整个 run（顺序执行，避免并发压垮 LLM/Embedding）"""
     results: List[dict] = []
     try:
         for case in cases:
-            r = await _run_single_case(case, user_id, llm_provider)
+            r = await _run_single_case(case, user_id, llm_provider, metrics, geval_criteria, hit_k)
             _insert_result(run_id, r)
             results.append(r)
         summary = _compute_summary(results)
@@ -611,6 +713,13 @@ async def _run_all(run_id: str, cases: List[dict], user_id: str, llm_provider: s
             (_now(), json.dumps(summary, ensure_ascii=False), run_id),
         )
         logger.info("评测 run 完成: %s | %s", run_id, summary)
+        # BadCase 闭环：run 结束增量收集低分用例 + 关联 BadCase 复现判定（静默不阻断）
+        try:
+            from app.services import badcase
+            badcase.collect_round()
+            badcase.repro_check(run_id)
+        except Exception as e:
+            logger.warning("BadCase 增量收集失败（不阻断）: %s", e)
     except Exception as e:
         logger.error("评测 run 整体失败: %s | %s", run_id, e)
         db.execute(
@@ -622,9 +731,54 @@ async def _run_all(run_id: str, cases: List[dict], user_id: str, llm_provider: s
 # ---------------------------------------------------------------------------
 # 对外接口
 # ---------------------------------------------------------------------------
-def start_run(dataset_id: str, user: dict, llm_provider: str = None) -> str:
+def evaluator_metric_config(evaluator_id: str) -> tuple:
+    """读取评估器的指标配置 → (metrics 列表或 None, GEval 准则)。
+
+    metrics 列为 JSON 对象 {"metrics": [...], "geval_criteria": "..."} 或 JSON 数组；
+    空/解析失败 → (None, "")，即默认 Ragas 四指标（存量评估器行为不变）。
+    """
+    if not evaluator_id:
+        return None, ""
+    row = db.query_one("SELECT metrics FROM eval_evaluators WHERE id = ?", (evaluator_id,))
+    raw = (row or {}).get("metrics") or ""
+    if not raw.strip():
+        return None, ""
+    try:
+        cfg = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return None, ""
+    if isinstance(cfg, dict):
+        names = cfg.get("metrics")
+        criteria = str(cfg.get("geval_criteria") or "")
+    else:
+        names, criteria = cfg, ""
+    if not isinstance(names, list) or not names:
+        return None, criteria
+    from app.services.deepeval_metrics import normalize_metrics
+    return normalize_metrics(names), criteria
+
+
+def evaluator_hit_k(evaluator_id: str) -> int:
+    """评估器 Hit@K 的 K 配置（缺省/非法 → settings.RETRIEVAL_HIT_K 默认 5）。"""
+    from app.config import settings
+    default = int(getattr(settings, "RETRIEVAL_HIT_K", 5))
+    if not evaluator_id:
+        return default
+    row = db.query_one("SELECT hit_k FROM eval_evaluators WHERE id = ?", (evaluator_id,))
+    try:
+        k = int((row or {}).get("hit_k") or default)
+    except (TypeError, ValueError):
+        return default
+    return k if k > 0 else default
+
+
+def start_run(dataset_id: str, user: dict, llm_provider: str = None,
+              metrics: Optional[List[str]] = None, geval_criteria: str = "",
+              hit_k: Optional[int] = None) -> str:
     """创建 run 并后台逐用例执行，立即返回 run_id。
 
+    metrics 非空时按 DeepEval 风格指标集执行（评估器配置驱动）；为空保持 Ragas 四指标。
+    hit_k 为检索层 Hit@K 的 K（缺省取 settings.RETRIEVAL_HIT_K）。
     并发保护：同一 dataset 已有 running 的 run 时抛 ConcurrentRunError。
     """
     dataset = db.query_one("SELECT * FROM eval_datasets WHERE id = ?", (dataset_id,))
@@ -653,9 +807,10 @@ def start_run(dataset_id: str, user: dict, llm_provider: str = None) -> str:
         (run_id, dataset_id, "running", _now(), None, "{}", user_id),
     )
 
-    asyncio.create_task(_run_all(run_id, cases, user_id, llm_provider))
-    logger.info("发起评测 run: %s | dataset=%s | cases=%d | by=%s",
-                run_id, dataset_id, len(cases), user_id)
+    asyncio.create_task(_run_all(run_id, cases, user_id, llm_provider, metrics, geval_criteria,
+                                 hit_k if hit_k is not None else evaluator_hit_k("")))
+    logger.info("发起评测 run: %s | dataset=%s | cases=%d | by=%s | metrics=%s",
+                run_id, dataset_id, len(cases), user_id, metrics or "ragas4")
     return run_id
 
 

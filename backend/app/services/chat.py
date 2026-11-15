@@ -30,7 +30,8 @@ from app.core.intent_rewriter import analyze_intent
 from app.core.vector_store import vector_store
 from app.services.config_manager import runtime_config
 from app.services.knowledge import knowledge_service
-from app.services.memory import memory_service
+from app.services.memory import memory_service, memory_line
+from app.services import user_instructions
 from app.services.skill import skill_service
 from app.services import module_recall
 from app.services.records import upload_records
@@ -472,24 +473,38 @@ class ChatService:
         # segment 级 token 度量：系统提示段
         obs.note_segment("system", "\n".join(m.get("content", "") for m in llm_messages))
 
+        # L1 用户指令层（类比 CLAUDE.md User 层）：静态头之后、画像卡之前注入，
+        # 靠后注入优先级更高（Managed < User，recency bias）；同用户跨会话稳定，前缀缓存友好。
+        instruction_text = user_instructions.get_instruction(user_id)
+        instruction_msgs = user_instructions.format_instruction_messages(instruction_text)
+        if instruction_msgs:
+            llm_messages.extend(instruction_msgs)
+            obs.note_segment("user_instructions", instruction_text)
+
         # 记忆两层加载（借鉴 Claude Code：常驻索引层 + 按需检索层），合计受字符预算约束
         memory_text = ""
         profile_memories = memory_service.profile_memories(user_id)
-        profile_text = "\n".join(f"- {m['content']}" for m in profile_memories)
+        profile_text = "\n".join(memory_line(m) for m in profile_memories)
         obs.note_segment("memory_profile", profile_text)
+        # L5 会话级去重：本会话已注入过的相关记忆不再重复注入（compact 后自然重置）
+        surfaced_ids = memory_service.surfaced_ids(session.session_id)
         relevant_memories = memory_service.retrieve_relevant(
-            user_id, effective_query, exclude_ids=[m["id"] for m in profile_memories]
+            user_id, effective_query,
+            exclude_ids=[m["id"] for m in profile_memories] + list(surfaced_ids),
         )
         ctx_budget = int(getattr(settings, "MEMORY_CTX_CHARS", 600))
-        relevant_lines, used = [], len(profile_text)
+        relevant_lines, used, injected_ids = [], len(profile_text), []
         for m in relevant_memories:
-            line = f"- {m['content']}"
+            line = memory_line(m)
             if used + len(line) > ctx_budget:
                 break
             relevant_lines.append(line)
+            injected_ids.append(m["id"])
             used += len(line)
         relevant_text = "\n".join(relevant_lines)
         obs.note_segment("memory_relevant", relevant_text)
+        # L5：登记本会话已注入的相关记忆 id，供后续轮次去重（compact 时重置）
+        memory_service.mark_surfaced(session.session_id, injected_ids)
         sections = []
         if profile_text:
             sections.append(f"用户画像（常驻）:\n{profile_text}")
@@ -552,6 +567,7 @@ class ChatService:
                         memory_profile=profile_text, memory_relevant=relevant_text,
                         system_prompt=self._build_system_prompt(),
                         result=agent_result,
+                        instruction_text=instruction_text,
                     ):
                         yield ev
                 except (asyncio.CancelledError, GeneratorExit):
@@ -1118,6 +1134,11 @@ class ChatService:
             )
         except Exception as e:
             logger.warning("用户记忆抽取任务异常: %s", e)
+        try:
+            # 巩固调度（Auto Dream 简化版）：时间/会话双门控达标才做簇合并，失败静默
+            await memory_service.consolidate_if_due(session.user_id)
+        except Exception as e:
+            logger.warning("记忆巩固任务异常: %s", e)
 
     def _build_system_prompt(self) -> List[dict]:
         """构建系统提示词。

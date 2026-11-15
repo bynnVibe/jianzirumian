@@ -13,6 +13,7 @@ import json
 import logging
 import math
 import re
+import time
 import uuid
 from datetime import datetime
 from typing import List, Optional
@@ -49,6 +50,63 @@ _PROFILE_MAX_ITEMS = 6
 _DECAY_DAYS = 30.0
 # 从未使用过的记忆按该天数计衰减
 _UNUSED_DAYS = 60.0
+# 新鲜度警告阈值（天）：超过该天数未更新的记忆注入时附「时点观察」提醒，
+# 防止陈旧记忆被当作当前事实（对齐 Claude Code memoryFreshnessText）。
+_FRESHNESS_WARN_DAYS = 30.0
+# 置信度上限：查重命中/用户确认后递增，召回评分因子（0.1*confidence）
+_MAX_CONFIDENCE = 5.0
+# 巩固调度门控（Auto Dream 简化版）：距上次 >=24h 且新增会话 >=5 才触发簇合并
+_CONSOLIDATE_HOURS = 24.0
+_CONSOLIDATE_SESSIONS = 5
+# 主副互斥窗口（秒）：用户刚手动写入记忆后，后台抽取在该窗口内跳过，避免竞态重复写
+_MANUAL_WRITE_MUTEX_SECONDS = 120.0
+
+# ---- L5 会话级记忆去重（类比 Claude Code collectSurfacedMemories）----
+# 扫描会话已注入记忆 id 而非持久状态：compact 时重置，允许压缩后合理重注入。
+# 模块级 dict 带容量上限裁剪，防长会话/多会话无限增长。
+_surfaced: dict = {}
+_SURFACED_MAX_SESSIONS = 500
+_SURFACED_MAX_IDS = 200
+# 主副互斥：user_id -> 最近一次手动写入时间戳（time.time()）
+_manual_write_at: dict = {}
+
+
+def surfaced_ids(session_id: str) -> set:
+    """返回本会话已注入过的相关记忆 id 集合（只读）。"""
+    if not session_id:
+        return set()
+    return set(_surfaced.get(session_id) or ())
+
+
+def mark_surfaced(session_id: str, memory_ids: list):
+    """登记本会话本轮实际注入的相关记忆 id（供后续轮次去重）。"""
+    if not session_id or not memory_ids:
+        return
+    bucket = _surfaced.setdefault(session_id, set())
+    bucket.update(memory_ids)
+    if len(bucket) > _SURFACED_MAX_IDS:
+        # 超容量时保留最近登记的一半（set 无序，裁剪仅为防膨胀，不影响正确性）
+        _surfaced[session_id] = set(list(bucket)[-(_SURFACED_MAX_IDS // 2):])
+    if len(_surfaced) > _SURFACED_MAX_SESSIONS:
+        for key in list(_surfaced.keys())[:len(_surfaced) - _SURFACED_MAX_SESSIONS]:
+            _surfaced.pop(key, None)
+
+
+def reset_surfaced(session_id: str):
+    """compact（摘要覆盖点推进）时重置本会话去重集合，允许压缩后重新注入相关记忆。"""
+    if session_id:
+        _surfaced.pop(session_id, None)
+
+
+def note_manual_write(user_id: str):
+    """用户手动写入记忆时登记时间戳（主副互斥：后台抽取近期跳过）。"""
+    if user_id:
+        _manual_write_at[user_id] = time.time()
+
+
+def _manual_write_recent(user_id: str) -> bool:
+    ts = _manual_write_at.get(user_id)
+    return bool(ts and (time.time() - ts) < _MANUAL_WRITE_MUTEX_SECONDS)
 
 
 def _is_sensitive(text: str) -> bool:
@@ -97,6 +155,28 @@ def _clamp_importance(value) -> float:
         return 0.5
 
 
+def _clamp_confidence(value) -> float:
+    try:
+        return min(_MAX_CONFIDENCE, max(1.0, float(value)))
+    except (TypeError, ValueError):
+        return 1.0
+
+
+def memory_line(m: dict) -> str:
+    """把一条记忆渲染为注入行（单一事实源，chat 画像卡/相关层共用）。
+
+    新鲜度警告（对齐 Claude Code memoryFreshnessText）：超过 _FRESHNESS_WARN_DAYS
+    未更新的记忆行尾附「时点观察」提醒，防止陈旧记忆被当作当前事实。天数在注入时
+    预计算，同会话内字节稳定（前缀缓存友好）；跨天自然变化可接受。
+    """
+    content = (m.get("content") or "").strip()
+    line = f"- {content}"
+    age_days = _days_since(m.get("updated_at") or m.get("created_at"))
+    if age_days > _FRESHNESS_WARN_DAYS:
+        line += f"（记忆沉淀于 {int(age_days)} 天前，属时点观察，如与现状冲突以用户最新表述为准）"
+    return line
+
+
 class MemoryService:
     @staticmethod
     def list_memories(user_id: str) -> List[dict]:
@@ -122,8 +202,12 @@ class MemoryService:
         content: str = None,
         importance: float = None,
         memory_type: str = None,
+        confidence: float = None,
     ) -> Optional[dict]:
-        """更新一条记忆（用户编辑或抽取侧 update 动作）；content 命中敏感词时拒绝。"""
+        """更新一条记忆（用户编辑或抽取侧 update 动作）；content 命中敏感词时拒绝。
+
+        confidence 传入时按上限截断写入（查重命中/用户确认会 +1 递增），None 保持原值。
+        """
         row = db.query_one(
             "SELECT * FROM user_memories WHERE id = ? AND user_id = ?",
             (memory_id, user_id),
@@ -137,12 +221,13 @@ class MemoryService:
         now = datetime.now().isoformat()
         db.execute(
             "UPDATE user_memories SET content = ?, keywords = ?, memory_type = ?,"
-            " importance = ?, updated_at = ? WHERE id = ?",
+            " importance = ?, confidence = ?, updated_at = ? WHERE id = ?",
             (
                 content or row["content"],
                 json.dumps(_tokenize_keywords(content), ensure_ascii=False) if content else row["keywords"],
                 mtype or row["memory_type"],
                 _clamp_importance(importance) if importance is not None else row["importance"],
+                _clamp_confidence(confidence) if confidence is not None else _clamp_confidence(row.get("confidence")),
                 now, memory_id,
             ),
         )
@@ -187,9 +272,11 @@ class MemoryService:
         if dedup:
             hit = MemoryService.find_similar(user_id, content)
             if hit:
+                # 查重命中视为再次确认：置信度 +1（上限 _MAX_CONFIDENCE），召回评分随之提升
                 return MemoryService.update_memory(
                     user_id, hit["id"], content=content,
                     importance=_clamp_importance(importance), memory_type=memory_type,
+                    confidence=_clamp_confidence(float(hit.get("confidence") or 1.0) + 1),
                 )
 
         now = datetime.now().isoformat()
@@ -197,13 +284,13 @@ class MemoryService:
         memory_id = str(uuid.uuid4())
         db.execute(
             "INSERT INTO user_memories (id, user_id, memory_type, content, keywords,"
-            " source_session_id, source_message_id, importance, created_at, updated_at)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?)",
+            " source_session_id, source_message_id, importance, confidence, created_at, updated_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             (
                 memory_id, user_id, memory_type, content,
                 json.dumps(keywords, ensure_ascii=False),
                 source_session_id, source_message_id,
-                _clamp_importance(importance), now, now,
+                _clamp_importance(importance), 1.0, now, now,
             ),
         )
         # 超出上限时清理最旧、重要度最低、长期未用的记忆
@@ -254,6 +341,24 @@ class MemoryService:
             used += len(content)
         return chosen
 
+    # ---- L5 会话级去重 / 主副互斥：委托模块级实现（单一事实源，状态存模块 dict）----
+    # 方法体内的裸名解析到模块级函数（类属性不在方法作用域链内），故非递归。
+    @staticmethod
+    def surfaced_ids(session_id: str) -> set:
+        return surfaced_ids(session_id)
+
+    @staticmethod
+    def mark_surfaced(session_id: str, memory_ids: list):
+        return mark_surfaced(session_id, memory_ids)
+
+    @staticmethod
+    def reset_surfaced(session_id: str):
+        return reset_surfaced(session_id)
+
+    @staticmethod
+    def note_manual_write(user_id: str):
+        return note_manual_write(user_id)
+
     @staticmethod
     def retrieve_relevant(
         user_id: str,
@@ -277,7 +382,9 @@ class MemoryService:
             overlap = len(query_tokens & set(m.get("keywords") or []))
             decay = math.exp(-_days_since(m.get("last_used_at") or m.get("updated_at")) / _DECAY_DAYS)
             weight = _TYPE_WEIGHT.get(m.get("memory_type") or "fact", 1.0)
-            return overlap * 2 + (float(m.get("importance", 0.5)) + decay) * weight
+            # 置信度因子（0.1*confidence）：反复确认的记忆排序更靠前，但权重低于关键词/重要度
+            conf = 0.1 * _clamp_confidence(m.get("confidence"))
+            return overlap * 2 + (float(m.get("importance", 0.5)) + decay) * weight + conf
 
         ranked = sorted(memories, key=score, reverse=True)
         # 关键词完全不重叠时，仅保留评分最高的少量记忆兜底，避免无关注入
@@ -305,6 +412,7 @@ class MemoryService:
             "retrieved_count": 0,
             "never_used_count": 0,
             "avg_importance": 0.0,
+            "avg_confidence": 0.0,
             "total_chars": 0,
             "profile_chars_budget": int(getattr(settings, "MEMORY_PROFILE_CHARS", 300)),
             "ctx_chars_budget": int(getattr(settings, "MEMORY_CTX_CHARS", 600)),
@@ -315,7 +423,7 @@ class MemoryService:
         if not user_id or user_id in {"guest", "system", "-"}:
             return empty
         rows = db.query(
-            "SELECT memory_type, content, importance, last_used_at, updated_at"
+            "SELECT memory_type, content, importance, confidence, last_used_at, updated_at"
             " FROM user_memories WHERE user_id = ? LIMIT ?",
             (user_id, MAX_MEMORIES_PER_USER * 2),
         )
@@ -324,6 +432,7 @@ class MemoryService:
         by_type = {t: 0 for t in MEMORY_TYPES}
         profile_count = retrieved_count = never_used = total_chars = 0
         importance_sum = 0.0
+        confidence_sum = 0.0
         last_updated = ""
         for r in rows:
             mtype = r.get("memory_type") or "fact"
@@ -331,6 +440,7 @@ class MemoryService:
             content = r.get("content") or ""
             total_chars += len(content)
             importance_sum += float(r.get("importance") or 0.5)
+            confidence_sum += _clamp_confidence(r.get("confidence"))
             if float(r.get("importance") or 0) >= _PROFILE_IMPORTANCE or mtype == "preference":
                 profile_count += 1
             if r.get("last_used_at"):
@@ -347,6 +457,7 @@ class MemoryService:
             "retrieved_count": retrieved_count,
             "never_used_count": never_used,
             "avg_importance": round(importance_sum / total, 3) if total else 0.0,
+            "avg_confidence": round(confidence_sum / total, 3) if total else 0.0,
             "total_chars": total_chars,
             "profile_chars_budget": int(getattr(settings, "MEMORY_PROFILE_CHARS", 300)),
             "ctx_chars_budget": int(getattr(settings, "MEMORY_CTX_CHARS", 600)),
@@ -440,6 +551,7 @@ class MemoryService:
                     MemoryService.update_memory(
                         user_id, hit["id"], content=content or None,
                         importance=importance, memory_type=mtype,
+                        confidence=_clamp_confidence(float(hit.get("confidence") or 1.0) + 1),
                     )
                     stats["update"] += 1
                     continue
@@ -518,15 +630,22 @@ class MemoryService:
         """对话结束后，调用 LLM 抽取候选记忆并执行动作（失败静默跳过，不影响主流程）"""
         if not user_id or user_id == "guest":
             return
+        # 主副互斥（对齐 Claude Code hasMemoryWritesSince）：用户近期刚手动写过记忆，
+        # 跳过本轮后台抽取，避免主链路手动写与副链路自动抽取竞态重复写。
+        if _manual_write_recent(user_id):
+            logger.info("用户 %s 近期手动写入记忆，跳过本轮后台抽取（主副互斥）", user_id)
+            return
         try:
             from app.core.llm import LLMFactory
 
             # 记忆抽取为后台辅助生成，走网关默认规则（role 仅用于日志显性化）
             llm = LLMFactory.create_for_role("memory_extract")
             prompt = (
-                "从下面这一轮对话中，提取用户值得长期记住的个人信息。写入门禁："
-                "只记「未来对话有用」的内容（偏好/禁忌、健康或个人事实、目标/计划、对回答方式的纠正）；"
-                "不记一次性提问、本轮上下文即可推导的内容与密码/密钥/身份证等敏感信息。"
+                "从下面这一轮对话中，提取用户值得长期记住的个人信息。写入门禁（What-NOT-to-save）："
+                "只记「未来对话有用、且不显而易见」的内容（偏好/禁忌、健康或个人事实、目标/计划、对回答方式的纠正）。"
+                "以下一律不记：①可从当前上下文或知识库直接推导的内容；②一次性提问/临时查询；"
+                "③对用户的负面评价或臆测；④活动流水、寒暄等低价值内容；⑤密码/密钥/身份证等敏感信息。"
+                "即使用户明确要求保存某条低价值内容，也只保留其中「不显而易见、未来可复用」的部分。"
                 "若用户纠正或覆盖了此前已记住的内容，输出 action=update 并用 target_hint 描述原记忆；"
                 "若用户明确要求遗忘，输出 action=delete 并用 target_hint 描述目标。"
                 "type 取值：preference/fact/goal/feedback。仅输出 JSON 数组，每项 "
@@ -546,13 +665,63 @@ class MemoryService:
             stats = MemoryService.apply_extraction(user_id, session_id, items)
             if sum(stats.values()):
                 logger.info("用户 %s 记忆抽取动作: %s", user_id, stats)
-            # 写入后对涉及类型做同类型高重叠簇合并（索引治理）
-            touched = {it.get("type") or "fact" for it in items[:3] if isinstance(it, dict)}
-            for mtype in touched:
-                if mtype in MEMORY_TYPES:
-                    await MemoryService._merge_cluster(user_id, mtype)
+            # 簇合并（索引治理）改由 consolidate_if_due 按时间/会话门控调度，
+            # 不再每轮抽取后无条件合并（对齐 Claude Code Auto Dream 的巩固调度）。
         except Exception as e:
             logger.warning("记忆抽取失败（忽略，不影响对话）: %s", e)
+
+    @staticmethod
+    async def consolidate_if_due(user_id: str) -> dict:
+        """巩固调度（Auto Dream 简化版）：时间门控 + 会话门控双达标才做簇合并。
+
+        距上次巩固 >= _CONSOLIDATE_HOURS 小时，且期间新增会话 >= _CONSOLIDATE_SESSIONS
+        才触发；状态存 runtime_config（键 memory_consolidation_state，per-user）。
+        由 chat 后台任务尾部调用，失败静默，不阻断主链路。返回 {"ran": bool, ...} 供观测/测试。
+        """
+        result = {"ran": False, "reason": ""}
+        if not user_id or user_id in {"guest", "system", "-"}:
+            result["reason"] = "no_user"
+            return result
+        try:
+            from app.services.config_manager import runtime_config
+
+            key = "memory_consolidation_state"
+            state = runtime_config.get(key, {}) or {}
+            if not isinstance(state, dict):
+                state = {}
+            mine = state.get(user_id) or {}
+            now = time.time()
+            last_ts = float(mine.get("last_at") or 0.0)
+            # 会话门控：统计上次巩固之后新建的会话数（无 last_at 时统计全部）
+            since_iso = datetime.fromtimestamp(last_ts).isoformat() if last_ts else ""
+            if since_iso:
+                sess_row = db.query_one(
+                    "SELECT COUNT(*) AS c FROM chat_sessions WHERE user_id = ? AND created_at > ?",
+                    (user_id, since_iso),
+                )
+            else:
+                sess_row = db.query_one(
+                    "SELECT COUNT(*) AS c FROM chat_sessions WHERE user_id = ?", (user_id,)
+                )
+            new_sessions = int((sess_row or {}).get("c") or 0)
+            hours_elapsed = (now - last_ts) / 3600.0 if last_ts else _CONSOLIDATE_HOURS
+            if hours_elapsed < _CONSOLIDATE_HOURS:
+                result["reason"] = "time_gate"
+                return result
+            if new_sessions < _CONSOLIDATE_SESSIONS:
+                result["reason"] = "session_gate"
+                return result
+            # 双门控达标：对全部类型做高重叠簇合并，然后推进状态
+            for mtype in MEMORY_TYPES:
+                await MemoryService._merge_cluster(user_id, mtype)
+            state[user_id] = {"last_at": now, "sessions_at": new_sessions}
+            runtime_config.set(key, state)
+            result.update({"ran": True, "reason": "ok", "new_sessions": new_sessions})
+            logger.info("用户 %s 记忆巩固完成（新增会话 %d，距上次 %.1fh）", user_id, new_sessions, hours_elapsed)
+        except Exception as e:
+            logger.warning("记忆巩固失败（忽略，不影响对话）: %s", e)
+            result["reason"] = "error"
+        return result
 
 
 memory_service = MemoryService()

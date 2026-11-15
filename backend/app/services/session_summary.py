@@ -81,6 +81,56 @@ def get_summary(session_id: str) -> Optional[dict]:
     )
 
 
+# 会话笔记（L3 Session Memory 显性化）：用户可编辑的摘要正文上限
+MAX_SESSION_NOTE_CHARS = 2000
+
+
+def get_session_note(session_id: str) -> dict:
+    """读取会话笔记（L3 显性化的结构化摘要），供前端查看/编辑。
+
+    返回 {session_id, note, edited_by_user, updated_at}；无摘要时 note 为空串、
+    edited_by_user=0（前端展示空态并允许用户首次填写）。只读，不改任何状态。
+    """
+    row = get_summary(session_id)
+    if not row:
+        return {"session_id": session_id, "note": "", "edited_by_user": 0, "updated_at": None}
+    return {
+        "session_id": session_id,
+        "note": row.get("summary") or "",
+        "edited_by_user": int(row.get("edited_by_user") or 0),
+        "updated_at": row.get("updated_at"),
+    }
+
+
+def update_session_note(session_id: str, user_id: str, text: str) -> Optional[dict]:
+    """用户编辑会话笔记：校验会话归属后置 edited_by_user=1（自动压缩不再覆盖）。
+
+    归属不符/会话不存在返回 None（API 转 403/404）。保留既有覆盖点，token 估算按新正文重算。
+    """
+    if not session_id or not user_id:
+        return None
+    owner = db.query_one(
+        "SELECT user_id FROM chat_sessions WHERE session_id = ?", (session_id,)
+    )
+    if not owner or (owner.get("user_id") or "") != user_id:
+        return None
+    note = (text or "").strip()[:MAX_SESSION_NOTE_CHARS]
+    existing = get_summary(session_id)
+    now = datetime.now().isoformat()
+    covered = (existing or {}).get("covered_until_message_id") or ""
+    db.execute(
+        "INSERT INTO chat_session_summaries"
+        " (session_id, user_id, summary, covered_until_message_id, token_estimate,"
+        " edited_by_user, created_at, updated_at)"
+        " VALUES (?,?,?,?,?,?,?,?)"
+        " ON CONFLICT(session_id) DO UPDATE SET"
+        " summary=excluded.summary, token_estimate=excluded.token_estimate,"
+        " edited_by_user=excluded.edited_by_user, updated_at=excluded.updated_at",
+        (session_id, user_id, note, covered, obs.estimate_tokens(note), 1, now, now),
+    )
+    return {"session_id": session_id, "note": note, "edited_by_user": 1, "updated_at": now}
+
+
 def _save_summary(session_id: str, user_id: str, summary: str, covered_until_message_id: str, token_estimate: int):
     now = datetime.now().isoformat()
     db.execute(
@@ -113,6 +163,10 @@ async def maybe_summarize(session, llm_provider: str = None, force: bool = False
                 return None
 
     existing = get_summary(session.session_id)
+    # L3 用户笔记优先：用户编辑过的摘要不被「自动」压缩覆盖（edited_by_user=1）。
+    # 手动 compact（force=True）是用户显式动作，仍允许重新生成；再水化复用已落库摘要。
+    if not force and existing and int(existing.get("edited_by_user") or 0):
+        return None
     # 批更新门控：已有摘要且新增「可摘要消息」（总条数 - 最近保留区 - 已覆盖数）不足 N 条
     # 时不重算（摘要前缀稳定，利于前缀缓存）；force=True（手动 compact）绕过门控。
     if not force and existing:
@@ -158,6 +212,13 @@ async def maybe_summarize(session, llm_provider: str = None, force: bool = False
             session.session_id, session.user_id, summary,
             to_summarize[-1].message_id, obs.estimate_tokens(summary),
         )
+        # L5：摘要覆盖点推进（compact）后重置本会话记忆去重集合，允许压缩后合理重注入
+        # （对齐 Claude Code collectSurfacedMemories「compact 后自然重置」语义）。
+        try:
+            from app.services.memory import memory_service
+            memory_service.reset_surfaced(session.session_id)
+        except Exception:
+            pass
         stats = {
             "covered_messages": len(to_summarize),
             "before_chars": before_chars,

@@ -19,6 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict
 
 from app.api.deps import require_ops, get_current_user
+from app.core.log_setup import redact_log_text
 from app.services.gateway import keys as key_svc
 from app.services.gateway import logs as log_svc
 from app.services.gateway import rules as rule_svc
@@ -196,6 +197,49 @@ async def overview(_ops: dict = Depends(require_ops)):
 async def stats(days: int = 7, _ops: dict = Depends(require_ops)):
     days = max(1, min(days, 90))
     return {"success": True, **log_svc.stats(days)}
+
+
+@router.get("/token-analysis")
+async def token_analysis(days: int = 7, range: str = "days",
+                         _ops: dict = Depends(require_ops)):
+    """Token 用量分析（两源合并，自可观测性迁移）：
+
+    - 网关侧：请求日志总览/每日趋势/按密钥（prompt/completion/总量/风险）/按模型/渠道；
+    - 密钥配额：token_quota/token_used/remaining 水位；
+    - Agent 侧：复用 obs.metrics() 的 token_comparison/segment_breakdown 段构成口径。
+    """
+    import asyncio
+    from app.core import observability as obs
+
+    days = max(1, min(days, 90))
+    range_mode = range if range in ("days", "today") else "days"
+    gw = await asyncio.to_thread(log_svc.stats, days)
+    agent = await asyncio.to_thread(obs.metrics, days, range_mode)
+    keys = await asyncio.to_thread(key_svc.list_keys)
+    quota = [{
+        "id": k["id"], "name": k["name"],
+        "key_type": k["key_type"], "key_type_label": k["key_type_label"],
+        "token_quota": k["token_quota"], "token_used": k["token_used"],
+        "token_remaining": k["token_remaining"], "enabled": k["enabled"],
+    } for k in keys]
+    agent_overview = agent.get("overview") or {}
+    return {
+        "success": True,
+        "days": days,
+        "gateway": {
+            "overview": gw["overview"], "daily": gw["daily"],
+            "by_key": gw["by_key"], "by_model": gw["by_model"],
+            "by_channel": gw["by_channel"],
+        },
+        "keys_quota": quota,
+        "agent": {
+            "overview": {k: agent_overview.get(k) for k in (
+                "total_tokens", "avg_tokens_per_request",
+                "token_warn_threshold", "token_overuse")},
+            "token_comparison": agent.get("token_comparison"),
+            "segment_breakdown": agent.get("segment_breakdown"),
+        },
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -449,6 +493,11 @@ async def get_log(log_id: str, _ops: dict = Depends(require_ops)):
     entry = log_svc.get_log(log_id)
     if not entry:
         raise HTTPException(status_code=404, detail="日志不存在")
+    # 需求3：网关日志明细返回副本脱敏（凭据 + PII），原始落库不改写。
+    # request_body/response_preview 含完整 prompt/response，error 可能携带上游回显的个人信息。
+    for field in ("request_body", "response_preview", "error"):
+        if isinstance(entry.get(field), str):
+            entry[field] = redact_log_text(entry[field])
     return {"success": True, "log": entry}
 
 
