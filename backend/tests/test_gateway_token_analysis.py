@@ -165,3 +165,72 @@ def test_token_analysis_days_clamp_and_today(mem_db):
                                      params={"range": "today"})).json()
             assert body["success"] is True
     asyncio.run(run())
+
+
+# ============================================
+# T5 钻取：按模型 / 按渠道每次请求 Token 明细
+# ============================================
+def test_token_requests_drill_by_model_and_channel(mem_db):
+    """logs.token_requests：按模型/按渠道精确匹配返回逐条请求 Token 明细。"""
+    from app.services.gateway import logs as log_svc
+    _log("d1", "k1", "公共池", 100, 200, model="qwen-max", channel="阿里云")
+    _log("d2", "k1", "公共池", 50, 50, model="qwen-max", channel="阿里云")
+    _log("d3", "k2", "专属", 10, 20, model="gpt-4o", channel="OpenRouter")
+    # 按模型钻取：仅 qwen-max 两条，Token 合计 400，逐条含 prompt/completion/延迟
+    r = log_svc.token_requests(7, model="qwen-max")
+    assert r["count"] == 2 and r["tokens"] == 400
+    assert {x["id"] for x in r["requests"]} == {"d1", "d2"}
+    assert all(x["model_requested"] == "qwen-max" for x in r["requests"])
+    row = next(x for x in r["requests"] if x["id"] == "d1")
+    assert row["prompt_tokens"] == 100 and row["completion_tokens"] == 200
+    assert row["total_tokens"] == 300 and row["latency_ms"] == 100
+    # 按渠道钻取：OpenRouter 仅 d3（channel_name 精确，不误匹配「阿里云」）
+    r2 = log_svc.token_requests(7, channel_name="OpenRouter")
+    assert r2["count"] == 1 and r2["tokens"] == 30
+    assert r2["requests"][0]["channel_name"] == "OpenRouter"
+    # model 与 channel 同时传：以 model 优先
+    r3 = log_svc.token_requests(7, model="qwen-max", channel_name="OpenRouter")
+    assert r3["count"] == 2 and r3["model"] == "qwen-max"
+    # 缺省（都空）返回空集，不报错
+    r4 = log_svc.token_requests(7)
+    assert r4["count"] == 0 and r4["requests"] == [] and r4["tokens"] == 0
+
+
+def test_token_requests_endpoint_ops(mem_db):
+    """GET /api/gateway/token-requests：ops 可按模型/渠道钻取。"""
+    import httpx
+    from app.api import deps
+    app = _gw_app()
+    app.dependency_overrides[deps.require_ops] = lambda: {"id": "a1", "role": "admin"}
+    _log("e1", "k1", "公共池", 100, 200, model="qwen-max", channel="阿里云")
+
+    async def run():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            r = await client.get("/api/gateway/token-requests",
+                                 params={"days": 7, "model": "qwen-max"})
+            assert r.status_code == 200
+            body = r.json()
+            assert body["success"] is True and body["count"] == 1 and body["tokens"] == 300
+            assert body["requests"][0]["model_requested"] == "qwen-max"
+            r2 = await client.get("/api/gateway/token-requests",
+                                  params={"days": 7, "channel": "阿里云"})
+            assert r2.status_code == 200 and r2.json()["count"] == 1
+    asyncio.run(run())
+
+
+def test_token_requests_forbidden_for_regular_user(mem_db, monkeypatch):
+    """钻取端点越权：普通用户 403。"""
+    import httpx
+    from app.api import deps
+    app = _gw_app()
+    monkeypatch.setattr(deps, "get_current_user",
+                        lambda authorization="": {"id": "u1", "role": "user"})
+
+    async def run():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get("/api/gateway/token-requests",
+                                    params={"model": "qwen-max"})
+            assert resp.status_code == 403
+    asyncio.run(run())

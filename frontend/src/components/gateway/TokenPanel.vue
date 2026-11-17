@@ -107,7 +107,8 @@
           <table v-if="gw.by_model.length" class="mini-table">
             <thead><tr><th>模型</th><th class="num">请求</th><th class="num">Token</th><th class="num">占比</th></tr></thead>
             <tbody>
-              <tr v-for="m in gw.by_model" :key="m.name">
+              <tr v-for="m in gw.by_model" :key="m.name" class="drill-row"
+                  title="点击查看该模型每次请求的 Token 明细" @click="openDrill('model', m.name)">
                 <td>{{ m.name }}</td>
                 <td class="num">{{ formatNum(m.total) }}</td>
                 <td class="num">{{ formatNum(m.tokens) }}</td>
@@ -122,7 +123,8 @@
           <table v-if="gw.by_channel.length" class="mini-table">
             <thead><tr><th>渠道</th><th class="num">请求</th><th class="num">Token</th><th class="num">成功率</th></tr></thead>
             <tbody>
-              <tr v-for="c in gw.by_channel" :key="c.name">
+              <tr v-for="c in gw.by_channel" :key="c.name" class="drill-row"
+                  title="点击查看该渠道每次请求的 Token 明细" @click="openDrill('channel', c.name)">
                 <td>{{ c.name }}</td>
                 <td class="num">{{ formatNum(c.total) }}</td>
                 <td class="num">{{ formatNum(c.tokens) }}</td>
@@ -279,18 +281,74 @@
         </template>
       </section>
     </template>
+
+    <!-- ============ Token 钻取模态：某模型/某渠道每次请求的 Token 明细 ============ -->
+    <div v-if="drill.visible" class="drill-overlay" @click.self="closeDrill">
+      <div class="drill-panel">
+        <div class="drill-head">
+          <div>
+            <h3 class="drill-title">{{ drill.dim === 'model' ? '模型' : '渠道' }}：{{ drill.name }}</h3>
+            <p class="drill-sub">
+              近 {{ days }} 天每次请求的 Token 消耗明细 · 共 {{ formatNum(drill.count) }} 次请求 ·
+              合计 {{ formatNum(drill.tokens) }} Token
+            </p>
+          </div>
+          <button class="btn btn-ghost sm" @click="closeDrill">关闭</button>
+        </div>
+        <div v-if="drill.loading" class="mini-loading">加载明细中…</div>
+        <p v-else-if="drill.error" class="err-tip">{{ drill.error }}</p>
+        <div v-else-if="!drill.requests.length" class="mini-empty">该时间窗内无请求记录</div>
+        <div v-else class="drill-body">
+          <table class="mini-table">
+            <thead>
+              <tr>
+                <th>时间</th>
+                <th v-if="drill.dim === 'channel'">模型</th>
+                <th v-else>渠道</th>
+                <th>密钥</th>
+                <th>角色</th>
+                <th>状态</th>
+                <th class="num">Prompt</th>
+                <th class="num">Completion</th>
+                <th class="num">Total</th>
+                <th class="num">延迟</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="r in drill.requests" :key="r.id">
+                <td class="nowrap">{{ formatTime(r.created_at) }}</td>
+                <td>{{ drill.dim === 'channel' ? (r.model_requested || '-') : (r.channel_name || '-') }}</td>
+                <td>{{ r.key_name || '-' }}</td>
+                <td>{{ r.role || '-' }}</td>
+                <td><span class="drill-status" :class="r.status === 'ok' ? 'ok' : 'err'">{{ r.status }}</span></td>
+                <td class="num">{{ formatNum(r.prompt_tokens) }}</td>
+                <td class="num">{{ formatNum(r.completion_tokens) }}</td>
+                <td class="num strong">{{ formatNum(r.total_tokens) }}</td>
+                <td class="num">{{ r.latency_ms }}ms</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
-import { getGatewayTokenAnalysis, getContextExplorer } from '@/api'
+import { ref, reactive, computed, onMounted } from 'vue'
+import { getGatewayTokenAnalysis, getContextExplorer, getGatewayTokenRequests } from '@/api'
 
 const days = ref(7)
 const loading = ref(false)
 const errorMsg = ref('')
 const data = ref(null)
 const expandedSegs = ref(new Set())
+
+// Token 钻取：点击「按模型 / 按渠道」表格行 → 拉取该维度每次请求的 Token 明细
+const drill = reactive({
+  visible: false, dim: 'model', name: '', loading: false, error: '',
+  requests: [], count: 0, tokens: 0,
+})
 
 // 上下文构成三模式：latest（默认最新对话）/ history（历史对话选择器）/ window（窗口聚合）
 const ctxMode = ref('latest')
@@ -362,6 +420,34 @@ async function load() {
   } finally {
     loading.value = false
   }
+}
+
+async function openDrill(dim, name) {
+  drill.dim = dim
+  drill.name = name
+  drill.visible = true
+  drill.loading = true
+  drill.error = ''
+  drill.requests = []
+  drill.count = 0
+  drill.tokens = 0
+  try {
+    const params = { days: days.value }
+    if (dim === 'model') params.model = name
+    else params.channel = name
+    const res = await getGatewayTokenRequests(params)
+    drill.requests = res.data.requests || []
+    drill.count = res.data.count || 0
+    drill.tokens = res.data.tokens || 0
+  } catch (e) {
+    drill.error = e.response?.data?.detail || '加载 Token 明细失败'
+  } finally {
+    drill.loading = false
+  }
+}
+
+function closeDrill() {
+  drill.visible = false
 }
 
 async function loadExplorer({ date = '', sessionId = '', traceId = '' } = {}) {
@@ -458,6 +544,21 @@ onMounted(() => {
 .mini-table .num { text-align: right; }
 .mini-table th.num { text-align: right; }
 .key-off { font-size: 10px; color: #a99c8c; background: #eee9e2; padding: 1px 6px; border-radius: 6px; margin-left: 6px; }
+
+/* Token 钻取：可点击行 + 明细模态 */
+.drill-row { cursor: pointer; transition: background 0.15s; }
+.drill-row:hover { background: #faf5ee; }
+.drill-overlay { position: fixed; inset: 0; background: rgba(60,45,30,0.35); display: flex; align-items: center; justify-content: center; z-index: 1000; padding: 24px; }
+.drill-panel { background: #fffdfb; border: 1px solid var(--color-border); border-radius: 14px; width: min(960px, 100%); max-height: 84vh; display: flex; flex-direction: column; box-shadow: 0 12px 40px rgba(80,60,30,0.22); }
+.drill-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 18px 22px; border-bottom: 1px solid var(--color-border); }
+.drill-title { font-size: 15px; font-weight: 700; }
+.drill-sub { font-size: 12px; color: var(--color-text-secondary); margin-top: 4px; }
+.drill-body { padding: 12px 22px 20px; overflow: auto; }
+.drill-status { font-size: 11px; font-weight: 600; padding: 1px 8px; border-radius: 8px; }
+.drill-status.ok { background: #e8f5e9; color: #2e7d32; }
+.drill-status.err { background: #fdecea; color: #c62828; }
+.nowrap { white-space: nowrap; }
+.mini-table td.strong { font-weight: 700; }
 .risk-tag { font-size: 10.5px; font-weight: 700; padding: 2px 8px; border-radius: 8px; }
 .risk-high { background: #fbe7d9; color: #c1622a; }
 

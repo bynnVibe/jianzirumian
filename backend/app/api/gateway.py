@@ -242,6 +242,20 @@ async def token_analysis(days: int = 7, range: str = "days",
     }
 
 
+@router.get("/token-requests")
+async def token_requests(days: int = 7, model: str = "", channel: str = "",
+                         _ops: dict = Depends(require_ops)):
+    """Token 分析钻取：某模型 / 某渠道（路由规则）在时间窗内每次请求的 Token 明细。
+
+    供 Token 分析面板「按模型 / 按渠道」表格行点击钻取；model 与 channel 二选一，
+    均按精确匹配（与 token-analysis 的 by_model/by_channel 聚合口径一致）。
+    """
+    import asyncio
+    data = await asyncio.to_thread(
+        log_svc.token_requests, max(1, min(days, 90)), model, channel)
+    return {"success": True, **data}
+
+
 # ---------------------------------------------------------------------------
 # 上游管理（协议 + Base URL + Key + 成本层级 + 模型清单 + 权重/健康/延迟）
 # ---------------------------------------------------------------------------

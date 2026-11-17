@@ -2228,11 +2228,12 @@ const knowledgePageState = computed(() => {
   }
 })
 
-// 展示内容/筛选/搜索变化时同步快照；离开知识库标签（computed 返回 null）时清除
+// 展示内容/筛选/搜索变化时同步快照；离开知识库标签（computed 返回 null）时清除。
+// immediate 确保进入页面即注入当前界面快照，使知识助手「首次提问」就能读到当前界面
 watch(knowledgePageState, (state) => {
   if (state) assistant.setPageState(state)
   else assistant.clearPageState()
-})
+}, { immediate: true })
 const showKbPanel = ref(false)
 const kbDeleteTarget = ref(null)
 const deletingKb = ref(false)

@@ -194,6 +194,18 @@ def test_formal_user_rejects_guest(env):
     assert exc.value.status_code == 403
 
 
+def test_list_excludes_succeeded_keeps_pending(env):
+    """入库成功（succeeded）的链接不再回到待入库列表；未完成/失败行保留。"""
+    user = env["user"]("a")
+    done = env["task"]("a", status="done", phase="parse", source_url="https://example.com/done")
+    succeeded = env["task"]("a", status="succeeded", phase="ingest",
+                            kb_id="priv-a", source_url="https://example.com/ok")
+    failed = env["task"]("a", status="error", phase="ingest", source_url="https://example.com/err")
+    ids = {row["id"] for row in env["service"].list(user)}
+    assert done in ids and failed in ids
+    assert succeeded not in ids
+
+
 def test_task_isolated_between_users(env):
     user_a, user_b = env["user"]("a"), env["user"]("b")
     task = env["task"]("a")

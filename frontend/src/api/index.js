@@ -1783,6 +1783,11 @@ export function getGatewayTokenAnalysis(days = 7, range = 'days') {
   return api.get('/gateway/token-analysis', { params: { days, range } })
 }
 
+/** Token 分析钻取：某模型/某渠道（路由规则）在时间窗内每次请求的 Token 明细 */
+export function getGatewayTokenRequests(params) {
+  return api.get('/gateway/token-requests', { params })
+}
+
 /** Agent 上下文构成 explorer：默认最新对话；历史对话按 date/session/trace 两级筛选查看 */
 export function getContextExplorer({ date = '', sessionId = '', traceId = '' } = {}) {
   return api.get('/observability/context-explorer', { params: { date, session_id: sessionId, trace_id: traceId } })

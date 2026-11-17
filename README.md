@@ -374,22 +374,32 @@ Agent/Gateway分别导出持久counter，清理日志不回退；共享Gateway�
 安全组只开放批准的80/443及受限SSH，不公开8000/8001/9090/3000。安装Docker/Compose和Python3.6+（部署助手兼容老ECS系统自带python3），预留镜像与静止快照空间，核对脚本的目标服务器参数（修改方法见下节「修改目标 ECS 与上传目录」）。
 
 ```bash
-# 开发机：分别执行，不能用管道连接子命令
-bash scripts/deploy-aliyun.sh build
-bash scripts/deploy-aliyun.sh save
-bash scripts/deploy-aliyun.sh upload
+# 开发机：一键 build → save → upload（等价于分步执行三者）
+bash scripts/deploy-aliyun.sh all
 
-# 新服务器：在部署目录解包；已有部署先按下节备份旧配置
+# 新服务器（/opt/jianziruyang）：解包 → 加载 → 首次配置 → 启动
 tar xzf jianzirumian-deploy.tar.gz
-mkdir -p backend
-cp .env.example backend/.env  # 仅首次，没有现有文件时
-# 编辑配置后
 bash deploy-aliyun.sh server-load
-bash deploy-aliyun.sh server-preflight
-bash deploy-aliyun.sh server-start
+mkdir -p backend && cp .env.example backend/.env && vim backend/.env   # 仅首次
+bash deploy-aliyun.sh server-start        # 内含安全预检；preflight 仅作只读排查
 ```
 
-服务器使用包根目录脚本；包必须包含 `deploy_runtime.py`、`nginx-https.conf` 和 `monitoring/`。`server-status`/`server-logs`查看状态，`server-stop`停止，`server-update`预检后更新。Compose统一显式使用 `--env-file backend/.env`。脚本默认瘦身构建，需要本地重排序/LibreOffice时使用 `SLIM=0`。
+服务器使用包根目录脚本；包必须包含 `deploy_runtime.py`、`nginx-https.conf`、`nginx-edge.conf` 和 `monitoring/`。`server-status`/`server-logs` 查看状态，`server-stop` 停止。Compose 统一显式使用 `--env-file backend/.env`；脚本默认瘦身构建，需本地重排序/LibreOffice 时 `SLIM=0`。公网 IP / 域名接入见「边缘接入：公网 80 先行 → 域名 HTTPS」。
+
+### 日常更新：从本地重新部署
+
+本地改代码后重复「本地一键 + 服务器两步」滚动更新；部署包**不含** `backend/.env` 与 `data/`，解包不会覆盖配置与业务数据：
+
+```bash
+# 开发机
+bash scripts/deploy-aliyun.sh all          # build → save → upload
+
+# 服务器（/opt/jianziruyang）
+tar xzf jianzirumian-deploy.tar.gz         # 覆盖 compose/脚本/monitoring/镜像包
+bash deploy-aliyun.sh server-update        # 加载新镜像 + 预检 + 重建变更容器
+```
+
+仅改 `backend/.env`（不换镜像）时无需重新 upload：服务器编辑后 `bash deploy-aliyun.sh server-start` 重新应用（单纯 `restart` 不更新容器环境）。
 
 ### ECS 规格与资源预算（4U8G 推荐）
 
@@ -443,73 +453,55 @@ df -h /opt/jianziruyang          # 磁盘余量
 bash deploy-aliyun.sh server-status
 ```
 
-### 修改目标 ECS 与上传目录（详细步骤）
+### 修改目标 ECS 与上传目录
 
-`upload` 的目标由 `scripts/deploy-aliyun.sh` 顶部「配置项」区（约 16–24 行）的三个变量决定，默认 `REMOTE_USER=root`、`REMOTE_HOST=39.107.12.196`（历史部署机，**部署到新 4U8G ECS 时必须改为你的新公网 IP**）、`REMOTE_DIR=/opt/jianziruyang`。打包后若 `upload` 报 `Connection refused`（连接被拒绝），多数是这三个值与实际 ECS 不符——**改地址只改这里，不需要重新 build/save**（镜像包与服务器无关）。
+`upload` 目标由 `scripts/deploy-aliyun.sh` 顶部配置区（约 16–24 行）决定：`REMOTE_USER`、`REMOTE_HOST`、`REMOTE_DIR`（默认 `/opt/jianziruyang`）。**改地址只改这里，无需重新 build/save**（镜像包与服务器无关）。
 
-**① 在哪里改地址（两种方式任选）**
+| 方式 | 操作 |
+|------|------|
+| 改文件（长期） | 编辑脚本顶部 `REMOTE_HOST="<新ECS公网IP>"`，按需改 `REMOTE_USER`/`REMOTE_DIR` |
+| 环境变量（一次性） | `REMOTE_HOST=<新IP> REMOTE_DIR=/opt/jianziruyang bash scripts/deploy-aliyun.sh upload` |
 
-| 方式 | 操作 | 适用场景 |
-|------|------|---------|
-| 改文件（长期生效） | 编辑 `scripts/deploy-aliyun.sh` 顶部：`REMOTE_HOST="<新ECS公网IP>"`，按需改 `REMOTE_USER`、`REMOTE_DIR` | 固定生产机 |
-| 环境变量覆盖（一次性、不改文件） | `REMOTE_HOST=<新IP> REMOTE_USER=root REMOTE_DIR=/opt/jianziruyang bash scripts/deploy-aliyun.sh upload` | 临时切换/多机部署 |
+上传产物为 `${REMOTE_DIR}/jianzirumian-deploy.tar.gz` 与 `${REMOTE_DIR}/scripts/deploy-aliyun.sh`；解包后 `backend/.env` 与 `data/` 在服务器侧生成、不在包内。改了 `REMOTE_DIR` 则服务器端 `server-*` 须 cd 进该目录执行（按相对路径读 compose 与 `.env`）。
 
-**② 上传到 ECS 的哪个位置**
-
-- 部署包：`${REMOTE_DIR}/jianzirumian-deploy.tar.gz`（默认 `/opt/jianziruyang/jianzirumian-deploy.tar.gz`）；
-- 部署脚本副本：`${REMOTE_DIR}/scripts/deploy-aliyun.sh`；
-- 解包后部署目录含 `docker-compose.yml`、`deploy_runtime.py`、`nginx.conf`/`nginx-https.conf`、`monitoring/`、`.env.example` 与后端/前端镜像包；`backend/.env` 与业务数据在服务器侧创建/生成，不在包内；
-- 若改了 `REMOTE_DIR`，服务器端所有 `server-*` 子命令必须 **cd 进该目录** 执行（按相对路径读 `docker-compose.yml` 与 `backend/.env`）。
-
-**③ 完整操作步骤**
-
-```bash
-# 1) 改目标地址（上表任选其一；改文件方式直接编辑脚本顶部配置区）
-
-# 2) SSH 前置：安全组对开发机出口 IP 开放 22；配置密钥登录并做连接测试
-ssh-copy-id root@<新IP>                      # 首次输入一次密码存入公钥
-ssh -o ConnectTimeout=5 root@<新IP> "echo ok"  # 必须返回 ok 再继续
-
-# 3) 本地上传（镜像已 build/save 过则直接 upload；地址已改文件时无需前缀）
-bash scripts/deploy-aliyun.sh upload
-# 或一次性覆盖：REMOTE_HOST=<新IP> bash scripts/deploy-aliyun.sh upload
-
-# 4) 服务器端：解包 → 加载 → 配置 → 预检 → 启动
-ssh root@<新IP>
-cd /opt/jianziruyang                          # 改过 REMOTE_DIR 则 cd 对应目录
-tar xzf jianzirumian-deploy.tar.gz
-bash deploy-aliyun.sh server-load
-mkdir -p backend && cp .env.example backend/.env   # 仅首次部署
-vim backend/.env                              # 模型密钥、强密码、RERANKER_PROVIDER=dashscope（SLIM 必须远端）等
-bash deploy-aliyun.sh server-preflight
-bash deploy-aliyun.sh server-start
-
-# 5) 验证（ECS 宿主机回环；对外访问走批准的 80/443）
-bash deploy-aliyun.sh server-status
-curl -s http://127.0.0.1:8000/api/health
-curl -s http://127.0.0.1:5173/ | head -c 200
-free -h && docker stats --no-stream         # 4U8G 资源余量核验（见「ECS 规格与资源预算」）
-```
-
-**④ `Connection refused` / 上传失败排查**
-
-| 现象 | 原因 | 处理 |
-|------|------|------|
-| 仍连旧 IP（如脚本默认 39.107.12.196）被拒绝 | `REMOTE_HOST` 未改或环境变量未生效 | 按①修改后重跑 `upload`；看输出「上传到 user@host:dir/」一行确认目标 |
-| 新 IP 连接被拒绝 | 安全组未放 22 / sshd 未运行 | ECS 控制台安全组入方向添加 22；控制台 VNC 登录检查 `systemctl status sshd` |
-| `Permission denied (publickey)` | 未配置密钥登录 | 先 `ssh-copy-id`，或在控制台绑定 SSH 密钥对 |
-| SSH 为非 22 端口 | 脚本 ssh/scp 走默认端口 | `~/.ssh/config` 配置 `Host ecs` + `HostName <IP>` + `Port <端口>` + `User root`，再 `REMOTE_HOST=ecs` 运行脚本 |
-| `server-preflight` 报 `TypeError: ... capture_output` | ECS python3 为 3.6，旧版 `deploy_runtime.py` 用了 3.7+ API | 单文件覆盖上传修复版：`scp scripts/deploy_runtime.py root@<ECS>:/opt/jianziruyang/` 后重跑；新版助手已兼容 3.6+ |
+| 上传/连接失败 | 处理 |
+|------|------|
+| 仍连旧 IP 被拒绝 | `REMOTE_HOST` 未改或未生效；看输出「上传到 user@host:dir/」确认目标 |
+| 新 IP `Connection refused` | 安全组未放 22 / sshd 未运行；控制台入方向加 22 或 VNC 查 `systemctl status sshd` |
+| `Permission denied (publickey)` | 先 `ssh-copy-id root@<IP>`，或控制台绑定 SSH 密钥对 |
+| SSH 非 22 端口 | `~/.ssh/config` 配 `Host ecs`+`HostName`+`Port`+`User`，再 `REMOTE_HOST=ecs` 运行 |
 
 > 注意：`docker-images/deploy-aliyun.sh` 是 `scripts/deploy-aliyun.sh` 的部署快照（`scripts/sync_deploy.py` 管理、CI 校验一致性），不要直接改副本；修改脚本后重跑 `save` 才会把新脚本打进部署包。环境变量覆盖只影响本地 `upload` 目标，服务器端 `server-*` 命令不读取这三个变量。
 
-**与 CI/CD 工作流衔接**：`docker-images.yml` 工作流可在 GitHub Actions 上构建并导出同名 `jianzirumian-backend.tar.gz` / `jianzirumian-frontend.tar.gz` 镜像包（SLIM 可选）；下载工件放入 ECS 部署目录后即可 `server-load` → `server-preflight` → `server-start`。工件仅含两个镜像包，部署脚本 / `deploy_runtime.py` / `nginx-https.conf` / `monitoring/` 等辅助文件仍用本地 `save` 流程生成的部署包（或部署目录已有文件）。
+**与 CI/CD 工作流衔接**：`docker-images.yml` 工作流可在 GitHub Actions 上构建并导出同名 `jianzirumian-backend.tar.gz` / `jianzirumian-frontend.tar.gz` 镜像包（SLIM 可选）；下载工件放入 ECS 部署目录后即可 `server-load` → `server-preflight` → `server-start`。工件仅含两个镜像包，部署脚本 / `deploy_runtime.py` / `nginx-https.conf` / `nginx-edge.conf` / `monitoring/` 等辅助文件仍用本地 `save` 流程生成的部署包（或部署目录已有文件）。
 
-### 外部 HTTPS
+### 边缘接入：公网 80 先行 → 域名 HTTPS
 
-参考 [宿主Nginx示例](scripts/nginx-https.conf)，替换域名与已有证书路径：80重定向HTTPS，443的所有路径代理回环5173，SSE超时420秒；不要单独将业务路径绕到8000。
+compose 所有端口默认回环，公网流量由**宿主 Nginx** 终止并反代回环 `127.0.0.1:5173`（证书放宿主、容器不申请）。先用公网 IP + 80 验证，再绑域名上 HTTPS，容器与 compose 全程不动。
 
-`EDGE_PROXY_CIDR`只配置容器实际看到的外部代理来源（Linux宿主通常是桥网关地址，必须核实）；后端仅信任固定frontend地址。云LB场景只把 `FRONTEND_BIND_IP` 改为批准内网地址，其余端口仍回环。监控使用SSH隧道，例如 `ssh -L 3000:127.0.0.1:3000 用户@服务器`。
+**① 宿主 Nginx 边缘（CentOS 7 实测）**
+
+```bash
+yum install -y epel-release && yum install -y nginx
+# SELinux 非 Disabled 时放行反代出网，否则 502
+[ "$(getenforce 2>/dev/null)" != "Disabled" ] && setsebool -P httpd_can_network_connect 1
+```
+
+中和发行版默认 80 站点（RHEL 系内嵌 `nginx.conf`、Debian 系 `sites-enabled/default`），新建 `/etc/nginx/conf.d/jianziruyang.conf`：`listen 80 default_server;` + `location / { proxy_pass http://127.0.0.1:5173; ... }`（`proxy_buffering off`、读写超时 420s、`client_max_body_size 50m`、边缘同禁 `/metrics` 与 `/internal`；location 模板见 [scripts/nginx-https.conf](scripts/nginx-https.conf)）。`nginx -t` 通过后 `systemctl enable --now nginx`。安全组放行 80（后续加 443），不公开 8000/8001/9090/3000。
+
+**② 可信代理链（必配，否则限流/审计拿不到真实客户端 IP）**
+
+宿主 Nginx 经 `127.0.0.1:5173` 进容器时，容器看到的直接来源是 compose 网桥网关（默认 `172.30.0.1`，核实：`docker inspect jianziruyang-frontend --format '{{range .NetworkSettings.Networks}}{{.Gateway}}{{end}}'`）。在 `backend/.env` 设 `EDGE_PROXY_CIDR=172.30.0.1/32` 后重建前端使其生效：
+
+```bash
+docker compose --env-file backend/.env up -d --force-recreate frontend
+```
+
+后端仅信任固定 frontend 地址（`TRUSTED_PROXY_CIDRS`），无需另配。
+
+**③ 绑域名上 HTTPS**
+
+直接套用完整双 server 模板 [scripts/nginx-edge.conf](scripts/nginx-edge.conf)（80→308 + 443 终止 TLS + 反代回环 5173）：替换 `server_name` 与证书路径后放入 `/etc/nginx/conf.d/`，`nginx -t && systemctl reload nginx`，安全组补 443；透传 `X-Forwarded-Proto` 后容器内 `forwarded_scheme` 自动识别 https，无需改应用。云 LB 场景仅把 `FRONTEND_BIND_IP` 改为批准内网地址，其余端口仍回环。监控走 SSH 隧道：`ssh -L 3000:127.0.0.1:3000 用户@服务器`。
 
 ### 旧 backend 拓扑迁移与回滚
 

@@ -346,11 +346,12 @@ const bookmarksPageState = computed(() => {
   }
 })
 
-// 列表/筛选/翻页变化时同步快照
+// 列表/筛选/翻页变化时同步快照；immediate 确保进入页面即注入当前界面快照，
+// 使知识助手「首次提问」就能读到当前界面（不必等列表数据变化才触发 watch）
 watch(bookmarksPageState, (state) => {
   if (state) assistant.setPageState(state)
   else assistant.clearPageState()
-})
+}, { immediate: true })
 
 // 搜索防抖记一条行文动作（避免逐字刷屏）
 let searchActionTimer = null

@@ -93,6 +93,10 @@ class RequestLogMiddleware(BaseHTTPMiddleware):
 async def lifespan(app: FastAPI):
     """应用生命周期"""
     runtime.acquire()
+    # 线程池双池隔离：交互请求走显式限界的默认池，后台上传/编译重活走独立重活池，
+    # 避免普通用户上传解析（CPU/GIL 密集）占满默认线程池拖慢管理员等其他账号的响应
+    from app.core.heavy_executor import get_interactive_executor, shutdown as _heavy_shutdown
+    asyncio.get_running_loop().set_default_executor(get_interactive_executor())
     for directory in (settings.UPLOAD_DIR, settings.KNOWLEDGE_DIR, settings.WIKI_DIR,
                       str(Path(settings.VECTOR_STORE_PATH).parent)):
         Path(directory).mkdir(parents=True, exist_ok=True)
@@ -203,6 +207,7 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         runtime.stop()
+        _heavy_shutdown()
         from app.services.url_imports import url_imports
         await url_imports.shutdown()
         try:

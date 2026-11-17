@@ -20,7 +20,7 @@ PROJECT_NAME="jianzirumian"
 #     REMOTE_HOST=47.xx.xx.xx REMOTE_USER=root REMOTE_DIR=/opt/jianziruyang \
 #       bash scripts/deploy-aliyun.sh upload
 REMOTE_USER="${REMOTE_USER:-root}"
-REMOTE_HOST="${REMOTE_HOST:-39.107.12.196}"
+REMOTE_HOST="${REMOTE_HOST:-8.134.99.236}"
 REMOTE_DIR="${REMOTE_DIR:-/opt/jianziruyang}"
 
 # 镜像标签

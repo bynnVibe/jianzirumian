@@ -20,6 +20,7 @@ from pydantic import BaseModel
 from app.api.deps import get_current_user, get_optional_user, require_admin
 from app.services.guest_limiter import guest_limiter
 from app.config import settings
+from app.core.heavy_executor import run_in_heavy_pool
 from app.core.llm import LLMFactory
 from app.core.vector_store import vector_store
 from app.models.schemas import (
@@ -846,7 +847,7 @@ async def convert_word_pdf(
             raise HTTPException(status_code=403, detail="只能转换自己上传的文档")
 
     try:
-        pdf_path = await asyncio.to_thread(
+        pdf_path = await run_in_heavy_pool(
             knowledge_service._convert_word_to_pdf, str(file_path)
         )
     except Exception as e:

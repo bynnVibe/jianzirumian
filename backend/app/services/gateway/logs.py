@@ -234,6 +234,55 @@ def stats(days: int = 7) -> dict:
     }
 
 
+def token_requests(days: int = 7, model: str = "", channel_name: str = "",
+                   limit: int = 200) -> dict:
+    """Token 分析钻取：某模型 或 某渠道（路由规则）在时间窗内每次请求的 Token 明细。
+
+    供 Token 分析面板「按模型 / 按渠道」表格行点击钻取：返回该维度下逐条请求的
+    时间/模型/渠道/密钥/业务角色/状态/延迟/prompt/completion/total Token。
+    model 与 channel_name 二选一（同时传以 model 优先），均按精确匹配（与 stats 的
+    GROUP BY model_requested / channel_name 口径一致）；缺省或都空则返回空集。
+    """
+    days = max(1, min(days, 90))
+    since = (datetime.now() - timedelta(days=days - 1)).replace(
+        hour=0, minute=0, second=0, microsecond=0).isoformat()
+    model = (model or "").strip()
+    channel_name = (channel_name or "").strip()
+    if model:
+        clause, params = "created_at >= ? AND model_requested = ?", (since, model)
+    elif channel_name:
+        clause, params = "created_at >= ? AND channel_name = ?", (since, channel_name)
+    else:
+        return {"days": days, "model": "", "channel_name": "",
+                "count": 0, "tokens": 0, "requests": []}
+    lim = max(1, min(limit, 500))
+    rows = db.query(
+        "SELECT id, created_at, model_requested, model_mapped, channel_name, key_name, role,"
+        " status, status_code, latency_ms, prompt_tokens, completion_tokens, cached_tokens,"
+        f" total_tokens, risk_level FROM gateway_logs WHERE {clause}"
+        " ORDER BY created_at DESC LIMIT ?", params + (lim,))
+    requests = [{
+        "id": r["id"], "created_at": r.get("created_at"),
+        "model_requested": r.get("model_requested") or "",
+        "model_mapped": r.get("model_mapped") or "",
+        "channel_name": r.get("channel_name") or "",
+        "key_name": r.get("key_name") or "", "role": r.get("role") or "",
+        "status": r.get("status") or "ok", "status_code": int(r.get("status_code") or 0),
+        "latency_ms": int(r.get("latency_ms") or 0),
+        "prompt_tokens": int(r.get("prompt_tokens") or 0),
+        "completion_tokens": int(r.get("completion_tokens") or 0),
+        "cached_tokens": int(r.get("cached_tokens") or 0),
+        "total_tokens": int(r.get("total_tokens") or 0),
+        "risk_level": r.get("risk_level") or "none",
+    } for r in rows]
+    return {
+        "days": days, "model": model, "channel_name": channel_name,
+        "count": len(requests),
+        "tokens": sum(x["total_tokens"] for x in requests),
+        "requests": requests,
+    }
+
+
 def purge_old(days: int = 30) -> int:
     """清理过期日志（启动时调用）。"""
     cutoff = (datetime.now() - timedelta(days=max(1, days))).isoformat()

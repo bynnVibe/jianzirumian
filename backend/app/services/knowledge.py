@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from app.config import settings
+from app.core.heavy_executor import run_in_heavy_pool
 from app.core.ocr import OCRFactory
 from app.models.schemas import DocumentPage
 from app.services.records import upload_records
@@ -312,9 +313,8 @@ class KnowledgeService:
                 "source_image": image_path,
             }
 
-        # 2. 文本分割 + 3. 向量化存储（含 Embedding 调用，同步重计算移入线程池）
-        import asyncio
-
+        # 2. 文本分割 + 3. 向量化存储（含 Embedding 调用，同步重计算移入后台重活池，
+        # 与交互请求的默认线程池隔离，避免批量图片上传占满交互线程拖慢其他账号）
         def _vectorize():
             if write_guard:
                 write_guard()
@@ -325,7 +325,7 @@ class KnowledgeService:
             metadatas = [c[1] for c in chunks]
             return len(chunks), vector_store.add_texts(texts, metadatas)
 
-        chunk_count, doc_ids = await asyncio.to_thread(_vectorize)
+        chunk_count, doc_ids = await run_in_heavy_pool(_vectorize)
 
         return {
             "ocr_text": ocr_text,
@@ -813,8 +813,6 @@ class KnowledgeService:
                 "source_path": str,       # 原始文档路径
             }
         """
-        import asyncio
-
         kb_id, visibility, owner_id = KnowledgeService._resolve_kb(kb_id, visibility, owner_id)
 
         def _extract():
@@ -826,7 +824,7 @@ class KnowledgeService:
                 return read_markdown_text(file_path)
             raise ValueError(f"不支持的文档类型: {doc_type}")
 
-        text = await asyncio.to_thread(_extract)
+        text = await run_in_heavy_pool(_extract)
         if not text.strip():
             return {
                 "text": text,
@@ -835,7 +833,7 @@ class KnowledgeService:
                 "source_path": file_path,
             }
 
-        # 分割 + 向量化（含 Embedding 调用）整体移入线程池，避免阻塞事件循环
+        # 分割 + 向量化（含 Embedding 调用）整体移入后台重活池，与交互请求隔离
         def _vectorize():
             if write_guard:
                 write_guard()
@@ -853,7 +851,7 @@ class KnowledgeService:
             metadatas = [c[1] for c in chunks]
             return len(chunks), vector_store.add_texts(texts, metadatas)
 
-        chunk_count, doc_ids = await asyncio.to_thread(_vectorize)
+        chunk_count, doc_ids = await run_in_heavy_pool(_vectorize)
 
         return {
             "text": text,
@@ -865,8 +863,6 @@ class KnowledgeService:
     @staticmethod
     async def preview_document(file_path: str, doc_type: str) -> dict:
         """预览文档，按页返回内容，不入库。"""
-        import asyncio
-
         if doc_type == "word":
             def _parse_word():
                 # 优先用 LibreOffice 转为原始排版 PDF 后按 PDF 分页，
@@ -877,15 +873,15 @@ class KnowledgeService:
                     return pdf_path, KnowledgeService._extract_pdf_pages(pdf_path)
                 return None, KnowledgeService._extract_docx_pages(file_path)
 
-            pdf_preview_path, pages = await asyncio.to_thread(_parse_word)
+            pdf_preview_path, pages = await run_in_heavy_pool(_parse_word)
         elif doc_type == "pdf":
             pdf_preview_path = file_path
-            pages = await asyncio.to_thread(
+            pages = await run_in_heavy_pool(
                 KnowledgeService._extract_pdf_pages, file_path
             )
         elif doc_type == "markdown":
             pdf_preview_path = None
-            pages = await asyncio.to_thread(
+            pages = await run_in_heavy_pool(
                 KnowledgeService._extract_markdown_pages, file_path
             )
         else:
@@ -950,7 +946,6 @@ class KnowledgeService:
           page_error  {page_number, error}
           save_done   {success, text, chunk_count, doc_ids, pages, pdf_preview_path}
         """
-        import asyncio
         from pathlib import Path
 
         save_title = title.strip() or Path(file_path).stem
@@ -962,7 +957,7 @@ class KnowledgeService:
         if doc_type == "pdf":
             pdf_preview_path = file_path
         elif doc_type == "word":
-            pdf_preview_path = await asyncio.to_thread(
+            pdf_preview_path = await run_in_heavy_pool(
                 KnowledgeService._convert_word_to_pdf, file_path
             )
 
@@ -1003,7 +998,7 @@ class KnowledgeService:
                         [c[0] for c in chunks], [c[1] for c in chunks]
                     )
 
-                doc_ids = await asyncio.to_thread(_save_one)
+                doc_ids = await run_in_heavy_pool(_save_one)
             except Exception as e:
                 logger.warning("保存第 %s 页失败: %s", page_number, e)
                 yield {"event": "page_error", "page_number": page_number, "error": str(e)}

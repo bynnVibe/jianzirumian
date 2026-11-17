@@ -37,6 +37,7 @@ from typing import List, Optional
 from app.config import settings
 from app.core import db
 from app.core import observability as obs
+from app.core.heavy_executor import run_in_heavy_pool
 from app.core.llm import LLMFactory
 from app.core.vector_store import vector_store
 from app.services import wiki_store
@@ -444,8 +445,8 @@ class WikiService:
 
             wiki_title = _first_heading(card, base_title)
             # 落库段（DB 写 + embed HTTP + FAISS 索引 + 派生视图重建）为同步重活，
-            # 移出主事件循环到工作线程执行，避免存量补编译阻塞其他请求
-            page = await asyncio.to_thread(
+            # 移入后台重活专用线程池（与交互请求的默认池隔离，避免存量补编译拖慢全站）
+            page = await run_in_heavy_pool(
                 self._persist_page,
                 card, base_title, wiki_title, sha, analysis,
                 source_image, kb_id, visibility, owner_id,

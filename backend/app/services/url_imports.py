@@ -12,6 +12,7 @@ from fastapi import HTTPException
 from app.config import settings
 from app.core import db, observability as obs
 from app.core.agent_runtime import runtime
+from app.core.heavy_executor import run_in_heavy_pool
 from app.services.url_fetch import UrlImportError, normalize_url
 
 logger = logging.getLogger("jianziruyang.url_imports")
@@ -69,7 +70,11 @@ class UrlImportService:
 
     def list(self, user):
         formal_user(user)
-        rows = db.query("SELECT * FROM url_imports WHERE owner_id=? ORDER BY created_at DESC LIMIT 200", (user["id"],))
+        # 入库成功（succeeded）的链接不再回到待入库列表（与文件入库后移除 pending 行一致）；
+        # 失败/中断行保留供核对重试；入库结果可在入库历史与知识库管理中追溯
+        rows = db.query(
+            "SELECT * FROM url_imports WHERE owner_id=? AND status != 'succeeded'"
+            " ORDER BY created_at DESC LIMIT 200", (user["id"],))
         return [item(row, False) for row in rows]
 
     def _capacity(self, conn, user):
@@ -222,7 +227,7 @@ class UrlImportService:
                 if not chunks:
                     raise ValueError("empty_chunks")
                 return vector_store.add_texts([chunk[0] for chunk in chunks], [chunk[1] for chunk in chunks])
-            doc_ids = await asyncio.to_thread(vectorize)
+            doc_ids = await run_in_heavy_pool(vectorize)
             record = upload_records.add_record(filename=f"{title}.md", image_path=str(path), ocr_text=row["parsed_text"],
                 ocr_provider="url:" + metadata.get("extraction_method", "manual"), chunk_count=len(doc_ids), doc_ids=doc_ids,
                 visibility=target["visibility"], owner_id=row["owner_id"], source_type="url", title=title,

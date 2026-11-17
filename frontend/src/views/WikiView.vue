@@ -320,11 +320,12 @@ const wikiPageState = computed(() => {
   }
 })
 
-// 列表/筛选变化时同步快照
+// 列表/筛选变化时同步快照；immediate 确保进入页面即注入当前界面快照，
+// 使知识助手「首次提问」就能读到当前界面（不必等列表数据变化才触发 watch）
 watch(wikiPageState, (state) => {
   if (state) assistant.setPageState(state)
   else assistant.clearPageState()
-})
+}, { immediate: true })
 
 // 筛选变化记一条行文动作
 watch([typeFilter, kbFilter], ([t, k], [ot, ok]) => {

@@ -12,12 +12,14 @@
 import asyncio
 import json
 import logging
+import os
 import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
 from app.core import db
+from app.core.heavy_executor import run_in_heavy_pool
 from app.core.ocr import OCRFactory
 from app.core.vector_store import vector_store
 from app.services.knowledge import clean_ocr_text
@@ -31,9 +33,10 @@ _BG_PARSE_TASKS: set = set()
 # 后台入库任务引用集（入库向量化重活后台执行，不阻塞请求线程）
 _BG_INGEST_TASKS: set = set()
 
-# 解析并发上限：多个文件多线程并发解析，同时避免 OCR/文档解析压垮本机
+# 解析并发上限：多个文件多线程并发解析，同时避免 OCR/文档解析压垮本机；
+# 低核数 ECS 上收敛为 1，减少 CPU 密集解析对事件循环的 GIL 饿死
 _PARSE_SEMAPHORE: Optional[asyncio.Semaphore] = None
-_PARSE_CONCURRENCY = 3
+_PARSE_CONCURRENCY = 3 if (os.cpu_count() or 2) >= 4 else 1
 
 
 def _get_semaphore() -> asyncio.Semaphore:
@@ -224,7 +227,7 @@ class UploadPipelineService:
                 return pdf_path, pages
             return None, knowledge_service._extract_docx_pages(file_path)
 
-        pdf_preview_path, pages = await asyncio.to_thread(_work)
+        pdf_preview_path, pages = await run_in_heavy_pool(_work)
         parsed_text = "\n\n".join(p.text for p in pages if p.text.strip())
         if not parsed_text.strip():
             raise ValueError("文档解析结果为空，请确认文档包含文字内容")
@@ -235,7 +238,7 @@ class UploadPipelineService:
         """PDF：按页解析（含表格 Markdown 化），原始文件即预览文件"""
         from app.services.knowledge import knowledge_service
 
-        pages = await asyncio.to_thread(knowledge_service._extract_pdf_pages, file_path)
+        pages = await run_in_heavy_pool(knowledge_service._extract_pdf_pages, file_path)
         parsed_text = "\n\n".join(p.text for p in pages if p.text.strip())
         if not parsed_text.strip():
             raise ValueError("PDF 解析结果为空，请确认文档包含文字内容（扫描件需走图片上传）")
@@ -246,7 +249,7 @@ class UploadPipelineService:
         """Markdown：按标题层级拆为章节页（page_number=章节序号），无 PDF 预览"""
         from app.services.knowledge import knowledge_service
 
-        pages = await asyncio.to_thread(knowledge_service._extract_markdown_pages, file_path)
+        pages = await run_in_heavy_pool(knowledge_service._extract_markdown_pages, file_path)
         parsed_text = "\n\n".join(p["text"] for p in pages if p["text"].strip())
         if not parsed_text.strip():
             raise ValueError("Markdown 解析结果为空，请确认文档包含文字内容")
@@ -331,7 +334,7 @@ class UploadPipelineService:
                     return []
                 return vector_store.add_texts([c[0] for c in chunks], [c[1] for c in chunks])
 
-            doc_ids = await asyncio.to_thread(_vectorize)
+            doc_ids = await run_in_heavy_pool(_vectorize)
             chunk_count = len(doc_ids)
             pdf_preview_path = None
         else:
@@ -356,7 +359,7 @@ class UploadPipelineService:
                         [c[0] for c in chunks], [c[1] for c in chunks]
                     )
 
-                doc_ids = await asyncio.to_thread(_save_markdown)
+                doc_ids = await run_in_heavy_pool(_save_markdown)
             else:
                 all_doc_ids: List[str] = []
                 for page in item_pages:
@@ -379,7 +382,7 @@ class UploadPipelineService:
                             [c[0] for c in chunks], [c[1] for c in chunks]
                         )
 
-                    all_doc_ids.extend(await asyncio.to_thread(_save_one))
+                    all_doc_ids.extend(await run_in_heavy_pool(_save_one))
 
                 doc_ids = all_doc_ids
             chunk_count = len(doc_ids)

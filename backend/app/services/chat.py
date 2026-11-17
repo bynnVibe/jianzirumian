@@ -772,22 +772,29 @@ class ChatService:
         # 6. 添加用户问题
         llm_messages.append({"role": "user", "content": augmented_query})
 
-        # 6.5 语义缓存标签注入（需求1/2）：把「意图识别后的问题 + 公共/个人 + 实时/非实时」
-        # 经 extra_body 传入网关，由代理层做命中/回写。scope 综合 LLM 意图标签与安全网
-        # （个人数据信号 / 本轮注入了用户相关记忆 → 强制个人域，避免个性化答案被公共共享）。
-        # 仅纯文本、启用知识库、无附件工具上下文时缓存；游客不写个人域（公共域仍可命中）。
-        if (use_knowledge and search_query and not attachments and not tool_context_text
-                and getattr(llm, "extra_body", None) is not None):
+        # 6.5 语义缓存标签注入（需求1/2）：把「用户原始问题 + 公共/个人 + 实时/非实时」
+        # 经 extra_body 传入网关，由代理层做命中/回写。
+        # 【缓存键用原始问题 effective_query，而非 intent 改写后的检索查询 search_query】：
+        #   改写查询是为向量检索优化的短语（去口语化、抽关键词），LLM 改写不稳定——语义
+        #   相似的原始问题会被改写成不同短语，短语间余弦相似度显著偏低（实测 0.58~0.88），
+        #   在 0.90 阈值下恒不命中；而完整原始问题间相似度可达 0.98+，才能稳定命中缓存。
+        # 【不再要求 use_knowledge】：未开知识检索/仅联网搜索的问答同样纳入缓存，
+        #   满足「不论是否开启知识检索、联网搜索，相似问题都能命中」的诉求；
+        #   未开知识检索时 intent_scope 保持默认 personal（安全），实时类由 route.is_realtime 标短 TTL。
+        # scope 综合 LLM 意图标签与安全网（个人数据信号 / 本轮注入了用户相关记忆 → 强制个人域，
+        #   避免个性化答案被公共共享）。仅纯文本、无附件工具上下文时缓存；游客不写个人域。
+        if (effective_query and effective_query.strip() and not attachments
+                and not tool_context_text and getattr(llm, "extra_body", None) is not None):
             cache_scope = resolve_scope(
                 intent_scope, effective_query, uses_relevant_memory=bool(relevant_text)
             )
-            llm.extra_body["_gw_cache_query"] = search_query
+            llm.extra_body["_gw_cache_query"] = effective_query
             llm.extra_body["_gw_cache_scope"] = cache_scope
             llm.extra_body["_gw_cache_realtime"] = bool(route.is_realtime)
             obs.record_step(
                 "semantic_cache_tag",
                 f"scope={cache_scope}（意图={intent_scope}） realtime={bool(route.is_realtime)}"
-                f" key={search_query[:40]}",
+                f" key={effective_query[:40]}",
                 fail_trace=False,
             )
 
@@ -1047,17 +1054,26 @@ class ChatService:
 
         # 知识库为主来源
         if kb_has_content:
-            augmented = knowledge_service.build_knowledge_prompt(query, context_text, True)
+            # 知识库 + 联网搜索同时命中：先基于知识库作答，再综合联网搜索补充/印证/更新，
+            # 两类来源都要在回答与引用中实际体现（修复「答案只引用知识检索来源、忽略联网搜索」）。
             if search_context:
-                augmented += (
-                    f"\n\n【联网搜索结果（供参考）】\n{search_context}\n\n"
-                    f"要求：\n"
-                    f"1. 【核心】优先以知识库内容为主要回答依据\n"
-                    f"2. 联网搜索结果仅作补充参考\n"
-                    f"3. 两者冲突时以知识库为准\n"
-                    f"4. 标注引用时区分「来源 X」（知识库）和「网络来源 X」（搜索）"
+                return (
+                    f"请综合【知识库内容】与【联网搜索结果】两部分资料回答用户的问题。\n\n"
+                    f"【知识库内容】\n{context_text}\n\n"
+                    f"【联网搜索结果】\n{search_context}\n\n"
+                    f"【用户问题】\n{query}\n\n"
+                    f"回答要求（请严格按以下结构组织答案）：\n"
+                    f"1. 第一部分——先基于知识库内容给出核心回答，引用处标注 [来源 X]"
+                    f"（同一文档的多个片段共用一个来源编号）；\n"
+                    f"2. 第二部分——再结合联网搜索结果对知识库回答进行补充、印证或更新"
+                    f"（如最新进展、数据变化、知识库未覆盖之处），引用处标注 [网络来源 X]；\n"
+                    f"3. 最后用一两句话综合两类资料给出总结性结论；\n"
+                    f"4. 知识库与联网搜索结果都必须在回答中被实际引用，不得只用其一；\n"
+                    f"5. 若两者存在冲突，请如实指出差异，并说明以更新、更权威的联网信息为准；\n"
+                    f"6. 不要编造两类资料中都没有的内容。"
                 )
-            return augmented
+            # 仅知识库命中（无联网搜索）：沿用原检索增强提示词
+            return knowledge_service.build_knowledge_prompt(query, context_text, True)
 
         # 知识库无命中且无搜索结果（或未启用检索）
         if skip_search_prompt:

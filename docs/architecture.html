@@ -260,7 +260,7 @@
 
     <!-- ============ 层间手写注释 ============ -->
     <div class="note" style="left:760px; top:246px;">HTTP 发命令（Bearer Token）· SSE 流式回传 status / token / done 事件</div>
-    <div class="note" style="left:40px; top:434px;">AuthMiddleware 统一登录态校验：游客白名单 + IP 限流 · server 只做轻量编排，长耗时 OCR / 向量化走 asyncio.to_thread 线程池</div>
+    <div class="note" style="left:40px; top:434px;">AuthMiddleware 统一登录态校验：游客白名单 + IP 限流 · server 只做轻量编排，长耗时文档解析 / 向量化走独立「重活线程池」，与交互请求默认池隔离（一人上传不拖慢他人响应）</div>
     <div class="note" style="left:40px; top:620px;">知识检索与联网搜索 asyncio 并行、知识库优先 · 附件意图路由 upload / summarize / ocr，游客仅识别不入库</div>
     <div class="note" style="left:40px; top:806px;">LLM / OCR / 搜索 / Embedding / Rerank 五类提供商均可在 ConfigView 在线配置，runtime_config.json 优先于 .env 默认值</div>
     <div class="note" style="left:40px; top:992px;">services/* 业务持久化统一经 core/db.py 写入 SQLite · vector_store 管理 FAISS 索引与 metadata.json · BM25 稀疏索引关键词召回</div>

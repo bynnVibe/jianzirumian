@@ -6,6 +6,7 @@
 """
 import logging
 
+from app.core.heavy_executor import run_in_heavy_pool
 from app.services.knowledge import knowledge_service
 from app.services.records import upload_records
 from app.services.tools.base import BaseTool, ToolContext, ToolResult, register_tool
@@ -78,11 +79,9 @@ class KnowledgeSummarizeTool(BaseTool):
         doc_ids: list[str] = []
         if save_to_kb:
             try:
-                import asyncio
-
                 from app.core.vector_store import vector_store
 
-                # 分割 + Embedding 向量化为同步重计算，移入线程池避免阻塞事件循环
+                # 分割 + Embedding 向量化为同步重计算，移入后台重活池（与交互请求隔离）
                 def _vectorize():
                     chunks = vector_store.split_text(
                         summary_text, ctx.file_path, ctx.visibility, ctx.user_id, kb_id=ctx.kb_id,
@@ -93,7 +92,7 @@ class KnowledgeSummarizeTool(BaseTool):
                     metadatas = [c[1] for c in chunks]
                     return len(chunks), vector_store.add_texts(texts, metadatas)
 
-                chunk_count, doc_ids = await asyncio.to_thread(_vectorize)
+                chunk_count, doc_ids = await run_in_heavy_pool(_vectorize)
                 if chunk_count:
                     upload_records.add_record(
                         filename=f"{ctx.filename}（总结）",
