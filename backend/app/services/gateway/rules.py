@@ -34,13 +34,15 @@ from app.core import db
 logger = logging.getLogger("jianziruyang.gateway.rules")
 
 LB_STRATEGIES = ("round_robin", "weighted", "random", "priority", "primary_backup")
+# 视为熔断开启的健康状态（与 upstreams.OPEN_HEALTH_STATES 一致；down 为存量旧值）
+_OPEN_HEALTH_STATES = ("circuit_open", "down")
 # 业务角色清单（供前端下拉与校验）：凡经 create_for_role 出网的 role 都应在此登记，
 # 否则无法在「业务路由」中绑定规则/模型（如记忆抽取曾缺席导致只能走默认模型报 503）
 ROLES = (
     "chat_answer", "assistant", "intent_rewrite", "evidence_check",
     "wiki_compile", "embed", "rerank", "ocr",
     "memory_extract", "session_summary", "knowledge_summarize", "text_polish",
-    "content_polish",
+    "content_polish", "kb_summary",
 )
 
 # role → 上游分类映射：select_upstreams 按此过滤候选上游 category，防跨类误选
@@ -49,7 +51,7 @@ ROLE_CATEGORY = {
     "chat_answer": "llm", "assistant": "llm", "intent_rewrite": "llm",
     "evidence_check": "llm", "wiki_compile": "llm", "memory_extract": "llm",
     "session_summary": "llm", "knowledge_summarize": "llm", "text_polish": "llm",
-    "content_polish": "llm",
+    "content_polish": "llm", "kb_summary": "llm",
     "embed": "embedding", "rerank": "rerank", "ocr": "ocr",
 }
 
@@ -307,8 +309,8 @@ def _order_primary_backup(rows: List[dict], rule: Optional[dict]) -> List[dict]:
 
     - 主路由 = rule.primary_upstream 指定的上游；备用路由 = 列表内其余上游（按原序）；
     - 判定依据 gateway_upstreams.fail_count（成功一次即清零=自动回切主路由）；
-    - fail_count >= failover_threshold 或已熔断(down) 时视为「主路由失效」，备路由领衔；
-    - 组内仍保持健康上游在前、熔断上游兜底。
+    - fail_count >= failover_threshold 或已熔断(circuit_open/down) 时视为「主路由失效」，备路由领衔；
+    - 组内仍保持健康上游在前、熔断上游置后（代理侧对冷却中的熔断上游 fail-fast）。
     """
     primary_id = str((rule or {}).get("primary_upstream") or "")
     threshold = max(1, int((rule or {}).get("failover_threshold") or 3))
@@ -317,7 +319,7 @@ def _order_primary_backup(rows: List[dict], rule: Optional[dict]) -> List[dict]:
     if primary is None:
         return _health_first(rows)
     fails = int(primary.get("fail_count") or 0)
-    down = (primary.get("health") or "healthy") == "down"
+    down = (primary.get("health") or "healthy") in _OPEN_HEALTH_STATES
     if fails >= threshold or down:
         logger.warning("主备路由：主路由「%s」连续失败 %d 次（阈值 %d%s），已切换到备用路由",
                        primary.get("name"), fails, threshold, "，且已熔断" if down else "")
@@ -326,9 +328,9 @@ def _order_primary_backup(rows: List[dict], rule: Optional[dict]) -> List[dict]:
 
 
 def _health_first(rows: List[dict]) -> List[dict]:
-    """健康上游在前、熔断(down)上游兜底（组内保持原序）。"""
-    healthy = [r for r in rows if (r.get("health") or "healthy") != "down"]
-    down = [r for r in rows if (r.get("health") or "healthy") == "down"]
+    """健康上游在前、熔断(circuit_open/down)上游置后（组内保持原序）。"""
+    healthy = [r for r in rows if (r.get("health") or "healthy") not in _OPEN_HEALTH_STATES]
+    down = [r for r in rows if (r.get("health") or "healthy") in _OPEN_HEALTH_STATES]
     return healthy + down
 
 
@@ -340,8 +342,8 @@ def _order_by_strategy(rows: List[dict], strategy: Optional[str],
     s = _normalize_lb_strategy(strategy)
     if s == "primary_backup":
         return _order_primary_backup(rows, rule)
-    healthy = [r for r in rows if (r.get("health") or "healthy") != "down"]
-    down = [r for r in rows if (r.get("health") or "healthy") == "down"]
+    healthy = [r for r in rows if (r.get("health") or "healthy") not in _OPEN_HEALTH_STATES]
+    down = [r for r in rows if (r.get("health") or "healthy") in _OPEN_HEALTH_STATES]
 
     def order(group: List[dict]) -> List[dict]:
         if s == "round_robin":
@@ -354,7 +356,7 @@ def _order_by_strategy(rows: List[dict], strategy: Optional[str],
             return list(group)  # 保持规则内上游列表顺序
         return _weighted_order(group)  # weighted（A-Res）默认
 
-    return order(healthy) + order(down)  # 熔断上游兜底
+    return order(healthy) + order(down)  # 熔断上游置后（冷却中由代理 fail-fast）
 
 
 def resolve_rule_models(rule_id: str) -> Tuple[bool, List[str]]:

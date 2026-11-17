@@ -2,6 +2,7 @@
 见字如面 - SQLite 存储层
 统一管理用户、会话、上传记录、收藏、知识库、反馈、用量统计的持久化
 """
+import json
 import logging
 import sqlite3
 import threading
@@ -1655,6 +1656,113 @@ def init_db(conn: sqlite3.Connection):
         conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_online_created"
                      " ON agent_online_evals(created_at)")
         conn.execute("INSERT INTO schema_migrations VALUES ('eval_upgrade_v1',?)",
+                     (datetime.now().isoformat(),))
+    if not conn.execute("SELECT 1 FROM schema_migrations WHERE version='gateway_outbound_heal_v1'").fetchone():
+        # 存量自愈：enabled 的 user/public 密钥若明文未登记 outbound_keys（旧链路创建/
+        # 数据迁移丢失），重新签发并登记，保证「绑定用户密钥必不走公共密钥」。
+        import hashlib as _hl
+        import secrets as _sec
+        srow = conn.execute("SELECT outbound_keys FROM gateway_settings WHERE id='default'").fetchone()
+        try:
+            outbound = json.loads((srow[0] if srow else "") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            outbound = {}
+        if not isinstance(outbound, dict):
+            outbound = {}
+        healed = 0
+        for kr in conn.execute(
+                "SELECT id, key_type FROM gateway_keys WHERE enabled=1 AND key_type IN ('user','public')").fetchall():
+            if kr[0] in outbound and outbound[kr[0]]:
+                continue
+            plain = "sk-jzrm-" + _sec.token_urlsafe(32)
+            conn.execute("UPDATE gateway_keys SET key_prefix=?, key_hash=? WHERE id=?",
+                         (plain[:14], _hl.sha256(plain.encode("utf-8")).hexdigest(), kr[0]))
+            outbound[kr[0]] = plain
+            healed += 1
+        if healed:
+            if srow:
+                conn.execute("UPDATE gateway_settings SET outbound_keys=? WHERE id='default'",
+                             (json.dumps(outbound, ensure_ascii=False),))
+            else:
+                conn.execute(
+                    "INSERT OR IGNORE INTO gateway_settings (id, outbound_keys, updated_at)"
+                    " VALUES ('default',?,?)",
+                    (json.dumps(outbound, ensure_ascii=False), datetime.now().isoformat()))
+            logger.warning("gateway_outbound_heal: 重签登记 %d 个缺失明文的出网密钥", healed)
+        conn.execute("INSERT INTO schema_migrations VALUES ('gateway_outbound_heal_v1',?)",
+                     (datetime.now().isoformat(),))
+    if not conn.execute("SELECT 1 FROM schema_migrations WHERE version='gateway_circuit_v1'").fetchone():
+        # 上游熔断：连续失败≥5 次置 health='circuit_open'，记录熔断开启时间供冷却半开探测。
+        ucols = {r[1] for r in conn.execute("PRAGMA table_info(gateway_upstreams)")}
+        if "circuit_opened_at" not in ucols:
+            conn.execute("ALTER TABLE gateway_upstreams ADD COLUMN circuit_opened_at TEXT NOT NULL DEFAULT ''")
+        conn.execute("INSERT INTO schema_migrations VALUES ('gateway_circuit_v1',?)",
+                     (datetime.now().isoformat(),))
+    if not conn.execute("SELECT 1 FROM schema_migrations WHERE version='kb_eval_groups_v1'").fetchone():
+        # KB 评测用例组：生成用例按组归属，评估按组选择；存量用例归入「默认用例组」。
+        # 注意：逐条 execute（不用 executescript，避免隐式提交破坏 init_db 的 BEGIN IMMEDIATE 串行化）。
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS kb_eval_groups (
+                id         TEXT PRIMARY KEY,
+                kb_id      TEXT NOT NULL,
+                name       TEXT NOT NULL,
+                note       TEXT NOT NULL DEFAULT '',
+                created_by TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_kb_eval_groups_kb ON kb_eval_groups(kb_id)")
+        ccols = {r[1] for r in conn.execute("PRAGMA table_info(kb_eval_cases)")}
+        if "group_id" not in ccols:
+            conn.execute("ALTER TABLE kb_eval_cases ADD COLUMN group_id TEXT NOT NULL DEFAULT ''")
+        rcols = {r[1] for r in conn.execute("PRAGMA table_info(kb_eval_runs)")}
+        if "group_id" not in rcols:
+            conn.execute("ALTER TABLE kb_eval_runs ADD COLUMN group_id TEXT NOT NULL DEFAULT ''")
+        if "group_name" not in rcols:
+            conn.execute("ALTER TABLE kb_eval_runs ADD COLUMN group_name TEXT NOT NULL DEFAULT ''")
+        import uuid as _uuid
+        for kb_row in conn.execute(
+                "SELECT DISTINCT kb_id FROM kb_eval_cases WHERE group_id=''").fetchall():
+            gid = str(_uuid.uuid4())
+            conn.execute(
+                "INSERT INTO kb_eval_groups (id, kb_id, name, note, created_by, created_at)"
+                " VALUES (?,?,?,?,?,?)",
+                (gid, kb_row[0], "默认用例组", "存量用例自动归组", "system", datetime.now().isoformat()),
+            )
+            conn.execute("UPDATE kb_eval_cases SET group_id=? WHERE kb_id=? AND group_id=''",
+                         (gid, kb_row[0]))
+        conn.execute("INSERT INTO schema_migrations VALUES ('kb_eval_groups_v1',?)",
+                     (datetime.now().isoformat(),))
+    if not conn.execute("SELECT 1 FROM schema_migrations WHERE version='kb_eval_source_v1'").fetchone():
+        # KB 评测用例补「期望来源」列（生成用例标注来源文档标题）。
+        ccols = {r[1] for r in conn.execute("PRAGMA table_info(kb_eval_cases)")}
+        if "expected_source" not in ccols:
+            conn.execute("ALTER TABLE kb_eval_cases ADD COLUMN expected_source TEXT NOT NULL DEFAULT ''")
+        conn.execute("INSERT INTO schema_migrations VALUES ('kb_eval_source_v1',?)",
+                     (datetime.now().isoformat(),))
+    if not conn.execute("SELECT 1 FROM schema_migrations WHERE version='kb_summary_v1'").fetchone():
+        # 知识总结（book-to-skill 融合）：每文档一份结构化摘要，后台任务状态机。
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS kb_doc_summaries (
+                id         TEXT PRIMARY KEY,
+                kb_id      TEXT NOT NULL,
+                record_id  TEXT NOT NULL,
+                title      TEXT NOT NULL DEFAULT '',
+                owner_id   TEXT NOT NULL DEFAULT '',
+                status     TEXT NOT NULL DEFAULT 'pending',
+                structure  TEXT NOT NULL DEFAULT '{}',
+                error      TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_kb_doc_summaries_record ON kb_doc_summaries(record_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_kb_doc_summaries_kb ON kb_doc_summaries(kb_id)")
+        conn.execute("INSERT INTO schema_migrations VALUES ('kb_summary_v1',?)",
                      (datetime.now().isoformat(),))
     conn.commit()
 

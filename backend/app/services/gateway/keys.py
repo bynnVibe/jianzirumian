@@ -7,8 +7,8 @@
             每日 Token/请求限额（daily_token_limit/daily_request_limit）与每分钟流控
             （rate_per_minute）；每用户额度用尽 → 拒绝并提示「联系管理员」；
 - user    ：用户密钥——生成时强制绑定 1..n 个用户（bound_users），沿用 Token/请求
-            总配额并可设每分钟流控；配额用尽时系统自动降级切换公共密钥，
-            不阻碍正常使用（界面友好提示见 /api/gateway/my-quota）。
+            总配额并可设每分钟流控；绑定用户密钥的用户出网一定携带该密钥，
+            不降级公共密钥；配额用尽由校验层明确报错（界面友好提示见 /api/gateway/my-quota）。
 
 真实上游 Key 保存在渠道里，不分发给调用方。密钥明文只在创建时返回一次，
 数据库仅存 sha256(key) 与前缀（便于识别）；公共/用户密钥的明文另存于
@@ -397,6 +397,40 @@ def find_user_key(user_id: str) -> Optional[dict]:
     return None
 
 
+def find_bound_user_key(user_id: str) -> Optional[dict]:
+    """该用户绑定的首个启用且未过期的用户密钥（不看总配额）。
+
+    出网解析专用：绑定即强制携带，配额用尽由 authenticate/_validate 抛
+    KeyRejected(quota_exceeded) 明确报错，而非静默降级公共密钥。
+    """
+    if not user_id:
+        return None
+    rows = db.query("SELECT * FROM gateway_keys WHERE key_type='user' AND enabled=1"
+                    " ORDER BY created_at ASC")
+    for r in rows:
+        info = _row_to_dict(r)
+        if str(user_id) in set(info["bound_users"]) and not info["expired"]:
+            return info
+    return None
+
+
+def reissue_plaintext(key_id: str) -> str:
+    """重新签发出网密钥明文并登记 outbound_keys（自愈）。
+
+    适用于存量密钥明文丢失（旧链路创建/数据迁移）：密钥本为系统签发，
+    旧明文不可找回，重签是唯一恢复手段；同步更新 key_prefix/key_hash。
+    """
+    from app.services.gateway import settings as settings_svc
+    plain = _generate_key()
+    db.execute(
+        "UPDATE gateway_keys SET key_prefix=?, key_hash=? WHERE id=?",
+        (plain[:len(_KEY_PREFIX) + 6], _hash(plain), key_id),
+    )
+    settings_svc.set_outbound_key(key_id, plain)
+    logger.warning("出网密钥明文缺失，已重签登记: key_id=%s", key_id)
+    return plain
+
+
 def find_public_key() -> Optional[dict]:
     """首个可用的公共密钥（key_type=public，按创建先后取一）。"""
     rows = db.query("SELECT * FROM gateway_keys WHERE key_type='public' AND enabled=1"
@@ -412,19 +446,22 @@ def resolve_outbound_key(user_id: str = "") -> Tuple[str, str]:
     """系统出网时按用户解析应携带的密钥：返回 (明文, key_type)。
 
     优先级：该用户绑定的用户密钥 → 公共密钥 → 系统内部密钥（兜底，永不为空）。
-    用户密钥总配额用尽时此处即降级公共密钥（代理侧另有每用户日限额兜底）。
+    绑定用户密钥一定不走公共密钥：明文缺失时重签自愈；总配额用尽由下游
+    校验层抛 KeyRejected(quota_exceeded) 明确报错，不静默降级。
     """
     if user_id:
-        info = find_user_key(str(user_id))
+        info = find_bound_user_key(str(user_id))
         if info:
             plain = _plain_of(info["id"])
-            if plain:
-                return plain, "user"
+            if not plain:
+                plain = reissue_plaintext(info["id"])
+            return plain, "user"
     info = find_public_key()
     if info:
         plain = _plain_of(info["id"])
-        if plain:
-            return plain, "public"
+        if not plain:
+            plain = reissue_plaintext(info["id"])
+        return plain, "public"
     return ensure_internal_key(), "internal"
 
 

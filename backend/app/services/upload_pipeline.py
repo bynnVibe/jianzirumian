@@ -427,6 +427,13 @@ class UploadPipelineService:
             pdf_preview_path=pdf_preview_path,
         )
 
+        # 知识总结（book-to-skill）：技能开启→后台结构化摘要；未开启仅登记等待，不摘要
+        try:
+            from app.services import kb_summary
+            kb_summary.schedule_summary(kb_id, record["id"], save_title, owner_id)
+        except Exception as e:
+            logger.warning("知识总结登记失败（不影响入库）: %s", e)
+
         # 入库成功：移除流水线记录（原始文件由上传记录接管，不删除）
         db.execute("DELETE FROM pending_uploads WHERE id = ?", (item_id,))
         logger.info(

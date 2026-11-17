@@ -886,6 +886,49 @@ BUILTIN_AB_DATASET = {
 }
 
 
+def _ground_expected_source(case: dict) -> str:
+    """内置用例「期望来源」接地：按关键词匹配真实知识库的百科/文档标题。
+
+    优先百科标题命中→文档标题命中→正文关键词频次最高文档；
+    无命中返回明确占位文案（而非空值导致界面显示「—」）。
+    """
+    keywords = [str(k).strip() for k in (case.get("expected_keywords") or []) if str(k).strip()]
+    try:
+        for kw in keywords:
+            row = db.query_one(
+                "SELECT title FROM wiki_pages WHERE title LIKE ? LIMIT 1", (f"%{kw}%",))
+            if row and (row.get("title") or "").strip():
+                return f"[百科] {row['title']}"
+        for kw in keywords:
+            row = db.query_one(
+                "SELECT title, filename FROM upload_records"
+                " WHERE title LIKE ? OR filename LIKE ? LIMIT 1", (f"%{kw}%", f"%{kw}%"))
+            if row:
+                return (row.get("title") or "").strip() or row.get("filename") or ""
+        best_title, best_score = "", 0
+        for row in db.query(
+                "SELECT title, filename, ocr_text FROM upload_records LIMIT 500"):
+            text = row.get("ocr_text") or ""
+            score = sum(text.count(kw) for kw in keywords)
+            if score > best_score:
+                best_score = score
+                best_title = (row.get("title") or "").strip() or row.get("filename") or ""
+        if best_title:
+            return best_title
+    except Exception as e:
+        logger.warning("内置用例期望来源接地失败（忽略）: %s", e)
+    return "内置基准题（知识库暂无对应文档）"
+
+
+def _case_expected_source(spec: dict, case: dict) -> str:
+    """内置用例期望来源：RAGAS 集接地到真实文档；A/B 行为集标注行为型用例。"""
+    if case.get("expected_source"):
+        return case["expected_source"]
+    if spec is BUILTIN_AB_DATASET:
+        return "行为对比用例（考察提示词行为，无特定来源文档）"
+    return _ground_expected_source(case)
+
+
 def seed_builtin_datasets() -> int:
     """幂等创建内置评测集（按名称判重，已存在则跳过）。返回新建评测集数。"""
     created = 0
@@ -902,7 +945,7 @@ def seed_builtin_datasets() -> int:
             (
                 _new_id(), ds_id, c["question"],
                 json.dumps(c.get("expected_keywords") or [], ensure_ascii=False),
-                c.get("reference_answer") or "", c.get("expected_source") or "", now,
+                c.get("reference_answer") or "", _case_expected_source(spec, c), now,
             )
             for c in spec["cases"]
         ]
@@ -914,7 +957,31 @@ def seed_builtin_datasets() -> int:
             )
         created += 1
         logger.info("内置评测集种子化：%s（%d 用例）", spec["name"], len(params))
+    _backfill_builtin_sources()
     return created
+
+
+def _backfill_builtin_sources() -> None:
+    """存量内置集回填：期望来源为空的用例子以接地（一次性自愈，幂等）。"""
+    for spec in (BUILTIN_RAGAS_DATASET, BUILTIN_AB_DATASET):
+        row = db.query_one("SELECT id FROM eval_datasets WHERE name = ?", (spec["name"],))
+        if not row:
+            continue
+        empties = db.query(
+            "SELECT id, question, expected_keywords FROM eval_cases"
+            " WHERE dataset_id = ? AND (expected_source IS NULL OR expected_source = '')",
+            (row["id"],),
+        )
+        for c in empties:
+            try:
+                c["expected_keywords"] = json.loads(c["expected_keywords"] or "[]")
+            except (json.JSONDecodeError, TypeError):
+                c["expected_keywords"] = []
+            source = _case_expected_source(spec, c)
+            db.execute("UPDATE eval_cases SET expected_source = ? WHERE id = ?",
+                       (source, c["id"]))
+        if empties:
+            logger.info("内置评测集期望来源回填：%s（%d 用例）", spec["name"], len(empties))
 
 
 def refresh_builtin_datasets() -> dict:
@@ -936,7 +1003,7 @@ def refresh_builtin_datasets() -> dict:
             (
                 _new_id(), ds_id, c["question"],
                 json.dumps(c.get("expected_keywords") or [], ensure_ascii=False),
-                c.get("reference_answer") or "", c.get("expected_source") or "", now,
+                c.get("reference_answer") or "", _case_expected_source(spec, c), now,
             )
             for c in spec["cases"]
         ]

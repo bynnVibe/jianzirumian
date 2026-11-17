@@ -1,10 +1,12 @@
 <template>
-  <!-- 全局安全风险弹窗：任意页面轮询未确认且达阈值的风险事件（仅 admin/ops） -->
+  <!-- 全局安全风险弹窗：任意页面轮询未确认且达阈值的风险事件（仅 admin/ops）；
+       每批告警仅提示一次，支持手动关闭，关闭后存量告警不再弹窗（安全审计中心仍可处理） -->
   <div v-if="auth.canOps && auth.isAuthenticated && alertQueue.length" class="sec-modal-mask">
     <div class="sec-modal" :class="`sev-${alertCurrent.risk_level}`">
       <div class="sec-modal-head">
         <h3 class="sec-modal-title">⚠️ 安全风险告警</h3>
         <span class="sec-alert-count">{{ alertIndex + 1 }} / {{ alertQueue.length }}</span>
+        <button class="sec-close" title="关闭（存量告警不再重复提示）" aria-label="关闭" @click="onClose">×</button>
       </div>
       <div class="sec-alert-top">
         <span class="risk-tag" :class="`risk-${alertCurrent.risk_level}`">
@@ -37,6 +39,7 @@
         <p v-else class="sec-suggest-empty">建议生成中（模型不可用时自动降级规则化建议），也可点「立即生成」。</p>
       </div>
       <div class="sec-modal-actions">
+        <button class="btn btn-ghost" @click="onClose">关闭</button>
         <button class="btn btn-ghost" @click="onDismiss">确认</button>
         <button class="btn btn-primary" @click="onHandle">去处理</button>
       </div>
@@ -72,17 +75,33 @@ function formatTime(iso) {
   return `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
 
-// 轮询未确认告警：达到阈值即弹窗（确认后不再打扰；全局唯一弹窗口）
+// 提示水位：手动关闭/确认完毕/去处理后记录时间，早于水位的未确认事件不再弹窗，
+// 仅新产生的事件提示一次（localStorage 持久，刷新/重开页面不重复打扰）
+const NOTIFY_WM_KEY = 'sec_alert_notify_watermark'
+function notifyWatermark() {
+  const t = Date.parse(localStorage.getItem(NOTIFY_WM_KEY) || '')
+  return Number.isNaN(t) ? 0 : t
+}
+function markNotified() { localStorage.setItem(NOTIFY_WM_KEY, new Date().toISOString()) }
+
+// 轮询未确认告警：仅水位之后的新事件弹窗（确认后不再打扰；全局唯一弹窗口）
 async function pollAlerts() {
   if (!auth.canOps || !auth.isAuthenticated) return
   if (alertQueue.value.length) return // 已有弹窗在处理，跳过本轮
   try {
     const res = await listGatewaySecurityEvents({ alert_only: true, limit: 20 })
-    const list = res.data.events || []
+    const wm = notifyWatermark()
+    const list = (res.data.events || []).filter(e => Date.parse(e.created_at) > wm)
     if (list.length) { alertQueue.value = list; alertIndex.value = 0 }
   } catch (e) {
     // 轮询失败静默
   }
+}
+
+// 手动关闭：不强制逐条确认，整窗收起并记录水位，存量告警留待安全审计中心处理
+function onClose() {
+  alertQueue.value = []; alertIndex.value = 0
+  markNotified()
 }
 
 async function ackCurrent() {
@@ -96,12 +115,14 @@ async function onDismiss() {
     alertIndex.value += 1
   } else {
     alertQueue.value = []; alertIndex.value = 0
+    markNotified()
   }
 }
 
 async function onHandle() {
   const cur = alertCurrent.value
   alertQueue.value = []; alertIndex.value = 0
+  markNotified()
   await ackCurrent()
   if (cur?.id) {
     router.push({ name: 'Gateway', query: { tab: 'security', event: cur.id } })
@@ -137,9 +158,11 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 .sec-modal.sev-medium { border-top-color: #e0a92e; }
 .sec-modal.sev-high { border-top-color: #d97b3f; }
 .sec-modal.sev-low { border-top-color: #6a9fd8; }
-.sec-modal-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+.sec-modal-head { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
 .sec-modal-title { font-size: 16px; font-weight: 700; margin: 0; }
-.sec-alert-count { font-size: 11.5px; color: var(--color-text-secondary); }
+.sec-alert-count { font-size: 11.5px; color: var(--color-text-secondary); margin-left: auto; }
+.sec-close { border: none; background: transparent; font-size: 18px; line-height: 1; cursor: pointer; color: var(--color-text-secondary); padding: 2px 7px; border-radius: 6px; }
+.sec-close:hover { color: var(--color-text); background: #f4efe8; }
 .sec-alert-top { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
 .sec-alert-meta { font-size: 12px; color: var(--color-text-secondary); }
 .sec-alert-time { font-size: 11px; color: var(--color-text-secondary); margin-left: auto; }

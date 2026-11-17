@@ -52,6 +52,7 @@
         />
         <KbRetrievalPanel v-else-if="tab === 'retrieval'" :kb-id="kbId" />
         <KbMindmapPanel v-else-if="tab === 'mindmap'" :kb-id="kbId" @jump-doc="onJumpDoc" />
+        <KbSummaryPanel v-else-if="tab === 'summary'" :kb-id="kbId" />
         <KbGraphPanel v-else-if="tab === 'graph'" :kb-id="kbId" />
         <BookmarksView v-else-if="tab === 'bookmarks'" embedded />
         <WikiView v-else-if="tab === 'wiki'" embedded :kb-id="kbId" />
@@ -105,6 +106,7 @@ import { listKnowledgeBases } from '@/api'
 import KbDocumentsPanel from '@/components/kb/KbDocumentsPanel.vue'
 import KbRetrievalPanel from '@/components/kb/KbRetrievalPanel.vue'
 import KbMindmapPanel from '@/components/kb/KbMindmapPanel.vue'
+import KbSummaryPanel from '@/components/kb/KbSummaryPanel.vue'
 import KbGraphPanel from '@/components/kb/KbGraphPanel.vue'
 import KbEvalPanel from '@/components/kb/KbEvalPanel.vue'
 import BookmarksView from '@/views/BookmarksView.vue'
@@ -120,6 +122,7 @@ const ALL_TABS = [
   { key: 'documents', label: '文档' },
   { key: 'retrieval', label: '检索测试' },
   { key: 'mindmap', label: '思维导图' },
+  { key: 'summary', label: '知识总结' },
   { key: 'graph', label: '知识图谱' },
   { key: 'bookmarks', label: '知识收藏' },
   { key: 'wiki', label: '知识百科' },

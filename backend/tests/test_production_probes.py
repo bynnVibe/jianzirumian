@@ -106,10 +106,12 @@ def test_gateway_health_and_failover_order():
     low = add_upstream("low")
     add_rule([high["id"], low["id"]])
     assert [u["id"] for u in rules.select_upstreams("test-model")[1]] == [high["id"], low["id"]]
-    for _ in range(3):
+    for _ in range(4):
         upstreams.mark_failure(high["id"], "合成失败")
-    assert upstreams.get_upstream(high["id"])["health"] == "down"
-    # 熔断上游排到最后，但仍是候选（保留兜底切换）
+    assert upstreams.get_upstream(high["id"])["health"] == "degraded"
+    upstreams.mark_failure(high["id"], "合成失败")  # 第 5 次→熔断
+    assert upstreams.get_upstream(high["id"])["health"] == "circuit_open"
+    # 熔断上游排到最后（proxy 层在冷却期内 fail-fast，不再锤击）
     assert [u["id"] for u in rules.select_upstreams("test-model")[1]] == [low["id"], high["id"]]
     upstreams.mark_success(high["id"])
     assert upstreams.get_upstream(high["id"])["health"] == "healthy"

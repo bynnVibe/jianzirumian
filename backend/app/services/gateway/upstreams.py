@@ -7,7 +7,8 @@
 
 - tier=paid|free|subscription；tier=free 且未填 Base URL/Key 时回退系统 OpenRouter 配置。
 - 模型清单（models）为该上游可服务的模型名列表；请求命中规则后按原名出网（无模型映射）。
-- 健康度：连续失败 >=3 次熔断为 down，1~2 次 degraded，成功一次恢复 healthy 并 EMA 更新延迟。
+- 健康度：连续失败 >=5 次熔断为 circuit_open（冷却 60s 后半开探测），1~4 次 degraded，
+  成功一次恢复 healthy 并 EMA 更新延迟；熔断期间路由不再锤击该上游。
 """
 import json
 import logging
@@ -29,8 +30,12 @@ TIERS = ("paid", "free", "subscription")
 # 业务路由按 role→category 过滤候选上游（rules.ROLE_CATEGORY），防跨类误选。
 CATEGORIES = ("llm", "ocr", "embedding", "rerank")
 CATEGORY_LABELS = {"llm": "LLM", "ocr": "OCR", "embedding": "Embedding", "rerank": "ReRank"}
-# 连续失败达到该阈值即熔断为 down
-_DOWN_THRESHOLD = 3
+# 连续失败达到该阈值即熔断（circuit_open），超过后直接拒绝调用并提示用户
+_DOWN_THRESHOLD = 5
+# 熔断冷却期（秒）：过后允许一次半开探测，成功恢复/失败重新熔断并重置冷却
+_CIRCUIT_COOLDOWN_SECONDS = 60
+# 视为熔断开启的健康状态（down 为存量旧值，同等对待）
+OPEN_HEALTH_STATES = ("circuit_open", "down")
 # 延迟 EMA 平滑系数（新样本权重）
 _LATENCY_ALPHA = 0.3
 _TEST_TIMEOUT = httpx.Timeout(connect=8, read=30, write=15, pool=5)
@@ -167,6 +172,7 @@ def _row_to_dict(row: dict, with_secret: bool = False) -> dict:
         "weight": int(row.get("weight") or 100),
         "enabled": bool(row.get("enabled")),
         "health": row.get("health") or "healthy",
+        "circuit_opened_at": row.get("circuit_opened_at") or "",
         "fail_count": int(row.get("fail_count") or 0),
         "success_count": int(row.get("success_count") or 0),
         "last_error": row.get("last_error") or "",
@@ -296,7 +302,7 @@ def delete_upstream(upstream_id: str) -> bool:
 # ---------------------------------------------------------------------------
 
 def mark_success(upstream_id: str, latency_ms: int = 0) -> None:
-    row = db.query_one("SELECT latency_ms FROM gateway_upstreams WHERE id=?", (upstream_id,))
+    row = db.query_one("SELECT latency_ms, health FROM gateway_upstreams WHERE id=?", (upstream_id,))
     if not row:
         return
     prev = int(row.get("latency_ms") or 0)
@@ -305,31 +311,64 @@ def mark_success(upstream_id: str, latency_ms: int = 0) -> None:
         lat = int(prev * (1 - _LATENCY_ALPHA) + latency_ms * _LATENCY_ALPHA) if prev \
             else int(latency_ms)
     db.execute(
-        "UPDATE gateway_upstreams SET fail_count=0, health='healthy',"
+        "UPDATE gateway_upstreams SET fail_count=0, health='healthy', circuit_opened_at='',"
         " success_count=success_count+1, last_error='', latency_ms=?, updated_at=? WHERE id=?",
         (lat, _now(), upstream_id),
     )
+    if (row.get("health") or "") in OPEN_HEALTH_STATES:
+        logger.warning("上游 %s 半开探测成功，熔断已恢复(healthy)", upstream_id)
 
 
 def mark_failure(upstream_id: str, error: str = "") -> None:
-    row = db.query_one("SELECT fail_count FROM gateway_upstreams WHERE id=?", (upstream_id,))
+    row = db.query_one("SELECT fail_count, health FROM gateway_upstreams WHERE id=?", (upstream_id,))
     if not row:
         return
     fails = int(row.get("fail_count") or 0) + 1
-    health = "down" if fails >= _DOWN_THRESHOLD else "degraded"
-    db.execute(
-        "UPDATE gateway_upstreams SET fail_count=?, health=?, last_error=?, updated_at=?"
-        " WHERE id=?",
-        (fails, health, (error or "")[:300], _now(), upstream_id),
-    )
-    if health == "down":
-        logger.warning("上游 %s 连续失败 %d 次，已熔断(down)", upstream_id, fails)
+    was_open = (row.get("health") or "") in OPEN_HEALTH_STATES
+    if fails >= _DOWN_THRESHOLD or was_open:
+        # 达到阈值首次熔断；或半开探测再失败→重新熔断并重置冷却
+        health = "circuit_open"
+        opened_at = _now()
+    else:
+        health = "degraded"
+        opened_at = None
+    if opened_at is not None:
+        db.execute(
+            "UPDATE gateway_upstreams SET fail_count=?, health=?, circuit_opened_at=?,"
+            " last_error=?, updated_at=? WHERE id=?",
+            (fails, health, opened_at, (error or "")[:300], _now(), upstream_id),
+        )
+        logger.warning("上游 %s 连续失败 %d 次，已熔断(circuit_open)，冷却 %ds 后半开探测",
+                       upstream_id, fails, _CIRCUIT_COOLDOWN_SECONDS)
+    else:
+        db.execute(
+            "UPDATE gateway_upstreams SET fail_count=?, health=?, last_error=?, updated_at=?"
+            " WHERE id=?",
+            (fails, health, (error or "")[:300], _now(), upstream_id),
+        )
+
+
+def circuit_probe_allowed(info: dict) -> bool:
+    """熔断上游是否允许一次半开探测：冷却期（60s）已过。
+
+    存量 down 无 circuit_opened_at 时以 updated_at 为冷却起点。
+    """
+    if (info.get("health") or "") not in OPEN_HEALTH_STATES:
+        return True
+    opened = info.get("circuit_opened_at") or info.get("updated_at") or ""
+    if not opened:
+        return True
+    try:
+        dt = datetime.fromisoformat(opened)
+    except ValueError:
+        return True
+    return (datetime.now() - dt).total_seconds() >= _CIRCUIT_COOLDOWN_SECONDS
 
 
 def reset_health(upstream_id: str) -> None:
     db.execute(
-        "UPDATE gateway_upstreams SET fail_count=0, health='healthy', last_error='', updated_at=?"
-        " WHERE id=?", (_now(), upstream_id),
+        "UPDATE gateway_upstreams SET fail_count=0, health='healthy', circuit_opened_at='',"
+        " last_error='', updated_at=? WHERE id=?", (_now(), upstream_id),
     )
 
 

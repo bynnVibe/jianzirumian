@@ -156,6 +156,118 @@ def get_my_memory_drill(
     return {"success": True, **memory_service.drill_memories(user_id, kind)}
 
 
+@router.get("/context-explorer")
+async def get_context_explorer(
+    session_id: str = Query("", max_length=64),
+    trace_id: str = Query("", max_length=64),
+    date: str = Query("", max_length=10, pattern="^(\\d{4}-\\d{2}-\\d{2})?$"),
+    _admin: dict = Depends(require_ops),
+):
+    """Agent 上下文构成按对话查看（需求5）：
+
+    - 缺省：取全局最新一条完成 trace 所属会话，展示该次对话各语义段 token 构成；
+    - date：先按日期筛选，sessions 仅返回该日期活跃的会话（两级筛选：日期→对话）；
+    - session_id/trace_id：历史对话选择器联动查看指定会话/请求；
+    - sessions：最近 50 个会话（标题+用户+最近活跃）供下拉选择；
+    - dates：全部会话活跃日期（降序）供日期下拉；
+    - compare：本对话总耗 vs 上次对话 / 平均对话（session 维度 token 消耗对比）。
+    复用 obs.session_observability（默认最新 trace、per-trace segments），
+    仅返回上下文构成所需字段（不含 span 明细，避免 PII 暴露）。
+    """
+    def _load():
+        names = {r["id"]: r["username"] for r in db.query("SELECT id, username FROM users")}
+
+        # 日期下拉：全部会话活跃日期去重降序
+        dates = [
+            r["d"] for r in db.query(
+                "SELECT DISTINCT substr(updated_at, 1, 10) AS d FROM chat_sessions"
+                " WHERE updated_at IS NOT NULL AND updated_at != '' ORDER BY d DESC")
+            if r.get("d")
+        ]
+
+        # 会话下拉：按日期两级筛选（date 为空则返回最近 50 个）
+        if date:
+            sess_rows = db.query(
+                "SELECT session_id, title, user_id, updated_at FROM chat_sessions"
+                " WHERE substr(updated_at, 1, 10) = ? ORDER BY updated_at DESC LIMIT 50",
+                (date,))
+        else:
+            sess_rows = db.query(
+                "SELECT session_id, title, user_id, updated_at FROM chat_sessions"
+                " ORDER BY updated_at DESC LIMIT 50")
+        sessions = [
+            {"session_id": r["session_id"], "title": r["title"] or "新对话",
+             "username": names.get(r["user_id"], "游客"),
+             "last_active": (r["updated_at"] or "")[:16]}
+            for r in sess_rows
+        ]
+
+        # 缺省会话：优先按日期选该日期最新会话，否则取全局最新完成 trace 所属会话
+        sid = session_id
+        if not sid:
+            if date and sess_rows:
+                sid = sess_rows[0]["session_id"]
+            else:
+                row = db.query_one(
+                    "SELECT session_id FROM agent_traces"
+                    " WHERE status != 'running' AND session_id != ''"
+                    " ORDER BY started_at DESC LIMIT 1")
+                sid = (row or {}).get("session_id") or ""
+        if sid:
+            data = obs.session_observability(sid, "", trace_id)
+        else:
+            data = {"session_id": "", "title": "", "username": "", "traces": [],
+                    "selected_trace_id": "", "selected_at": "", "segments": [], "total_tokens": 0}
+
+        # 对比：每个会话的 token 总耗（完成 trace 的 prompt+completion 求和）
+        tok_rows = db.query(
+            "SELECT session_id, SUM(prompt_tokens + completion_tokens) AS tokens"
+            " FROM agent_traces WHERE status != 'running' AND session_id != ''"
+            " GROUP BY session_id")
+        sess_tokens = {r["session_id"]: int(r["tokens"] or 0) for r in tok_rows}
+        # 全量会话按活跃时间降序，用于定位“上次对话”
+        all_sessions = db.query(
+            "SELECT session_id, title, user_id, updated_at FROM chat_sessions"
+            " ORDER BY updated_at DESC")
+        cur_tokens = sess_tokens.get(sid, 0)
+        prev = None
+        if sid:
+            idx = next((i for i, r in enumerate(all_sessions) if r["session_id"] == sid), -1)
+            if idx >= 0 and idx + 1 < len(all_sessions):
+                pr = all_sessions[idx + 1]
+                prev = {
+                    "session_id": pr["session_id"],
+                    "title": pr["title"] or "新对话",
+                    "last_active": (pr["updated_at"] or "")[:16],
+                    "tokens": sess_tokens.get(pr["session_id"], 0),
+                }
+        totals = [v for v in sess_tokens.values() if v > 0]
+        avg_tokens = round(sum(totals) / len(totals)) if totals else 0
+        compare = {
+            "session_tokens": cur_tokens,
+            "prev": prev,
+            "avg_tokens": avg_tokens,
+        }
+
+        return {
+            "sessions": sessions,
+            "dates": dates,
+            "date": date,
+            "compare": compare,
+            "session_id": data["session_id"],
+            "title": data["title"],
+            "username": data["username"],
+            "traces": data["traces"],
+            "selected_trace_id": data["selected_trace_id"],
+            "selected_at": data.get("selected_at", ""),
+            "segments": data["segments"],
+            "total_tokens": data["total_tokens"],
+        }
+
+    data = await asyncio.to_thread(_load)
+    return {"success": True, **data}
+
+
 @router.get("/metrics")
 async def get_metrics(
     days: int = Query(7, ge=1, le=90),

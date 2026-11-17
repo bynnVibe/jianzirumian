@@ -338,6 +338,37 @@ def _max_attempts(ctx: Ctx) -> int:
     return max(1, int(ctx.settings.get("retry_count", 2)) + 1)
 
 
+def _filter_circuit(ctx: Ctx) -> tuple[List[dict], List[dict]]:
+    """候选上游熔断过滤：返回 (可调用候选, 熔断冷却中的上游)。
+
+    熔断开启且冷却期未过的上游不再锤击；冷却已过的允许一次半开探测。
+    """
+    allowed: List[dict] = []
+    opened: List[dict] = []
+    for up in ctx.candidates[:_max_attempts(ctx)]:
+        if (up.get("health") or "") in up_svc.OPEN_HEALTH_STATES \
+                and not up_svc.circuit_probe_allowed(up):
+            opened.append(up)
+        else:
+            allowed.append(up)
+    return allowed, opened
+
+
+def _circuit_message(opened: List[dict]) -> str:
+    names = "、".join(str(u.get("name") or u.get("id")) for u in opened)
+    return (f"上游模型已熔断：{names} 连续失败超过 {up_svc._DOWN_THRESHOLD} 次，已暂停调用，"
+            f"请 {up_svc._CIRCUIT_COOLDOWN_SECONDS} 秒后重试或联系管理员检查上游配置")
+
+
+def _circuit_error(ctx: Ctx, opened: List[dict]) -> None:
+    """全部候选熔断冷却中：fail-fast 抛 503，用户可见熔断原因。"""
+    msg = _circuit_message(opened)
+    ctx.tracer.add("response", "响应下游", "error", msg)
+    ctx.tracer.add("log", "日志入库", "ok", "已留存熔断失败链路")
+    _finalize(ctx, status="error", status_code=503, error=msg, response_preview="")
+    raise GatewayError(503, msg, "upstream_circuit_open")
+
+
 def _first_chunk_limit(ctx: Ctx) -> float:
     """首块保护期限：工具类角色紧、回答类宽。"""
     return _FIRST_CHUNK_UTILITY if ctx.role in _UTILITY_ROLES else _FIRST_CHUNK_DEFAULT
@@ -512,7 +543,10 @@ async def _json_response(ctx: Ctx) -> tuple[int, dict]:
         _finalize(ctx, status="ok", status_code=200, response_preview=cached)
         return 200, _synthetic_completion(ctx, cached)
     last_err = ""
-    for idx, up in enumerate(ctx.candidates[:_max_attempts(ctx)]):
+    candidates, opened = _filter_circuit(ctx)
+    if not candidates and opened:
+        _circuit_error(ctx, opened)
+    for idx, up in enumerate(candidates):
         ctx.retries = idx
         # 上游自身持有出网配置；请求模型名原样出网（无模型映射）
         eff = up_svc.effective(up)
@@ -600,7 +634,10 @@ async def json_response_kind(ctx: Ctx, kind: str) -> tuple[int, dict]:
 
 async def _json_response_kind(ctx: Ctx, kind: str) -> tuple[int, dict]:
     last_err = ""
-    for idx, up in enumerate(ctx.candidates[:_max_attempts(ctx)]):
+    candidates, opened = _filter_circuit(ctx)
+    if not candidates and opened:
+        _circuit_error(ctx, opened)
+    for idx, up in enumerate(candidates):
         ctx.retries = idx
         eff = up_svc.effective(up)
         url = up_svc.build_upstream_url(eff, kind)
@@ -705,8 +742,13 @@ async def stream_response(ctx: Ctx) -> AsyncGenerator[str, None]:
     tool_names: List[str] = []
     final_status, final_code, final_err = "error", 502, "所有上游均调用失败"
     committed = False
+    candidates, opened = _filter_circuit(ctx)
+    if not candidates and opened:
+        # 全部候选熔断冷却中：不再锤击上游，直接下发用户可见的熔断错误
+        final_status, final_code, final_err = "error", 503, _circuit_message(opened)
+        ctx.tracer.add("upstream", "熔断检查", "error", final_err)
     try:
-        for idx, up in enumerate(ctx.candidates[:_max_attempts(ctx)]):
+        for idx, up in enumerate(candidates):
             ctx.retries = idx
             eff = up_svc.effective(up)
             url = up_svc.build_upstream_url(eff)
@@ -777,8 +819,10 @@ async def stream_response(ctx: Ctx) -> AsyncGenerator[str, None]:
             finally:
                 await close_resources(iterator, resp, client)
         if final_status != "ok":
-            error = {"error": {"message": final_err, "type": final_status,
-                               "code": "request_timeout" if final_status == "timeout" else "upstream_error"}}
+            err_code = ("request_timeout" if final_status == "timeout"
+                        else "upstream_circuit_open" if final_code == 503
+                        else "upstream_error")
+            error = {"error": {"message": final_err, "type": final_status, "code": err_code}}
             yield "data: " + json.dumps(error, ensure_ascii=False) + "\n\n"
     except (asyncio.CancelledError, GeneratorExit):
         if final_status != "ok":

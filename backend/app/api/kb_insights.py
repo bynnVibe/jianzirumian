@@ -16,7 +16,7 @@ from app.config import settings
 from app.core import db
 from app.core.vector_store import vector_store
 from app.services import kb as kb_service
-from app.services import kb_eval, kb_mindmap, knowledge_graph
+from app.services import kb_eval, kb_mindmap, kb_summary, knowledge_graph
 from app.services.records import upload_records
 
 logger = logging.getLogger("jianziruyang.kb_insights")
@@ -310,15 +310,18 @@ async def get_kb_graph_source_content(
 # RAG 评估
 # ============================================
 @router.get("/{kb_id}/eval/cases")
-async def list_kb_eval_cases(kb_id: str, current_user: dict = Depends(get_current_user)):
+async def list_kb_eval_cases(kb_id: str, group_id: str = "",
+                             current_user: dict = Depends(get_current_user)):
     _check_kb(kb_id, current_user)
-    return {"success": True, "cases": kb_eval.list_cases(kb_id)}
+    return {"success": True, "cases": kb_eval.list_cases(kb_id, group_id)}
 
 
 class EvalCaseRequest(BaseModel):
     question: str
     reference_answer: str = ""
     expected_keywords: list[str] = []
+    expected_source: str = ""
+    group_id: str = ""
 
 
 @router.post("/{kb_id}/eval/cases")
@@ -329,7 +332,8 @@ async def create_kb_eval_case(
     try:
         case = kb_eval.add_case(
             kb_id, body.question, body.reference_answer, body.expected_keywords,
-            _user_id(current_user),
+            _user_id(current_user), group_id=body.group_id,
+            expected_source=body.expected_source,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -346,24 +350,98 @@ async def delete_kb_eval_case(
     return {"success": True}
 
 
+class EvalGenerateRequest(BaseModel):
+    count: int = 5
+    group_name: str = ""
+    group_note: str = ""
+
+
 @router.post("/{kb_id}/eval/cases/generate")
-async def generate_kb_eval_cases(kb_id: str, current_user: dict = Depends(get_current_user)):
+async def generate_kb_eval_cases(
+    kb_id: str, body: EvalGenerateRequest = EvalGenerateRequest(),
+    current_user: dict = Depends(get_current_user),
+):
     kb = _check_kb(kb_id, current_user)
     try:
-        cases = await kb_eval.generate_cases(kb_id, kb["name"], _user_id(current_user))
+        result = await kb_eval.generate_cases(
+            kb_id, kb["name"], _user_id(current_user),
+            count=max(1, min(20, body.count)),
+            group_name=body.group_name, group_note=body.group_note,
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.warning("[KB_EVAL] 用例生成失败 kb=%s: %s", kb_id, e)
         raise HTTPException(status_code=502, detail=f"用例生成失败: {e}")
-    return {"success": True, "cases": cases}
+    return {"success": True, "group": result["group"], "cases": result["cases"]}
+
+
+# ---------- 用例组 CRUD ----------
+@router.get("/{kb_id}/eval/groups")
+async def list_kb_eval_groups(kb_id: str, current_user: dict = Depends(get_current_user)):
+    _check_kb(kb_id, current_user)
+    return {"success": True, "groups": kb_eval.list_groups(kb_id)}
+
+
+class EvalGroupRequest(BaseModel):
+    name: str
+    note: str = ""
+
+
+@router.post("/{kb_id}/eval/groups")
+async def create_kb_eval_group(
+    kb_id: str, body: EvalGroupRequest, current_user: dict = Depends(get_current_user),
+):
+    _check_kb(kb_id, current_user)
+    try:
+        group = kb_eval.create_group(kb_id, body.name, body.note, _user_id(current_user))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"success": True, "group": group}
+
+
+class EvalGroupPatch(BaseModel):
+    name: str | None = None
+    note: str | None = None
+
+
+@router.patch("/{kb_id}/eval/groups/{group_id}")
+async def update_kb_eval_group(
+    kb_id: str, group_id: str, body: EvalGroupPatch,
+    current_user: dict = Depends(get_current_user),
+):
+    _check_kb(kb_id, current_user)
+    try:
+        group = kb_eval.update_group(kb_id, group_id, body.name, body.note)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not group:
+        raise HTTPException(status_code=404, detail="用例组不存在")
+    return {"success": True, "group": group}
+
+
+@router.delete("/{kb_id}/eval/groups/{group_id}")
+async def delete_kb_eval_group(
+    kb_id: str, group_id: str, current_user: dict = Depends(get_current_user),
+):
+    _check_kb(kb_id, current_user)
+    if not kb_eval.delete_group(kb_id, group_id):
+        raise HTTPException(status_code=404, detail="用例组不存在")
+    return {"success": True}
+
+
+class EvalRunRequest(BaseModel):
+    group_id: str = ""
 
 
 @router.post("/{kb_id}/eval/runs")
-async def start_kb_eval_run(kb_id: str, current_user: dict = Depends(get_current_user)):
+async def start_kb_eval_run(
+    kb_id: str, body: EvalRunRequest = EvalRunRequest(),
+    current_user: dict = Depends(get_current_user),
+):
     _check_kb(kb_id, current_user)
     try:
-        run_id = kb_eval.start_run(kb_id, _user_id(current_user))
+        run_id = kb_eval.start_run(kb_id, _user_id(current_user), group_id=body.group_id)
     except kb_eval.evaluation.ConcurrentRunError as e:
         raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
@@ -386,3 +464,52 @@ async def get_kb_eval_run(
     if not run:
         raise HTTPException(status_code=404, detail="运行不存在")
     return {"success": True, "run": run}
+
+
+# ============================================
+# 知识总结（book-to-skill 融合内置技能）
+# ============================================
+@router.get("/{kb_id}/summaries")
+async def list_kb_summaries(kb_id: str, current_user: dict = Depends(get_current_user)):
+    _check_kb(kb_id, current_user)
+    return {"success": True, "summaries": kb_summary.list_summaries(kb_id),
+            "documents": kb_summary.kb_documents(kb_id)}
+
+
+@router.get("/{kb_id}/summaries/job_status")
+async def kb_summary_job_status(kb_id: str, current_user: dict = Depends(get_current_user)):
+    _check_kb(kb_id, current_user)
+    return {"success": True, "job": kb_summary.job_status(kb_id)}
+
+
+class SummaryGenerateRequest(BaseModel):
+    record_id: str = ""
+    force: bool = False
+
+
+@router.post("/{kb_id}/summaries/generate")
+async def generate_kb_summary(
+    kb_id: str, body: SummaryGenerateRequest = SummaryGenerateRequest(),
+    current_user: dict = Depends(get_current_user),
+):
+    _check_kb(kb_id, current_user)
+    try:
+        result = kb_summary.generate(kb_id, _user_id(current_user),
+                                     record_id=body.record_id, force=body.force)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if result.get("skill_disabled"):
+        # 技能未开启：已登记等待任务，引导用户开启后后台继续执行
+        raise HTTPException(status_code=409, detail=result)
+    return {"success": True, **result}
+
+
+@router.get("/{kb_id}/summaries/{summary_id}")
+async def get_kb_summary(
+    kb_id: str, summary_id: str, current_user: dict = Depends(get_current_user),
+):
+    _check_kb(kb_id, current_user)
+    item = kb_summary.get_summary(kb_id, summary_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="摘要不存在")
+    return {"success": True, "summary": item}

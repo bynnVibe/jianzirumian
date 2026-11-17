@@ -14,7 +14,7 @@
     <!-- 搜索筛选栏 -->
     <div class="filter-bar">
       <input v-model.trim="filters.keyword" class="field-input" placeholder="关键词（请求体/响应/密钥名）" @keyup.enter="reload" />
-      <select v-model="filters.status" class="field-input">
+      <select v-model="filters.status" class="field-input" @change="reload">
         <option value="">全部状态</option>
         <option value="ok">成功</option>
         <option value="error">失败</option>
@@ -22,7 +22,7 @@
         <option value="cancelled">已取消</option>
         <option value="timeout">超时</option>
       </select>
-      <select v-model="filters.risk_level" class="field-input">
+      <select v-model="filters.risk_level" class="field-input" @change="reload">
         <option value="">全部风险</option>
         <option value="none">无风险</option>
         <option value="low">低</option>
@@ -30,16 +30,16 @@
         <option value="high">高</option>
         <option value="critical">严重</option>
       </select>
-      <select v-model="filters.role" class="field-input">
+      <select v-model="filters.role" class="field-input" @change="reload">
         <option value="">全部场景</option>
         <option v-for="(label, r) in ROLE_LABELS" :key="r" :value="r">{{ label }}</option>
       </select>
       <input v-model.trim="filters.model" class="field-input" placeholder="模型名" @keyup.enter="reload" />
-      <select v-model="filters.key_id" class="field-input">
+      <select v-model="filters.key_id" class="field-input" @change="reload">
         <option value="">全部密钥</option>
         <option v-for="k in keyOptions" :key="k.id" :value="k.id">{{ k.name }}</option>
       </select>
-      <select v-model="filters.channel_id" class="field-input">
+      <select v-model="filters.channel_id" class="field-input" @change="reload">
         <option value="">全部规则</option>
         <option v-for="c in channelOptions" :key="c.id" :value="c.id">{{ c.name }}</option>
       </select>

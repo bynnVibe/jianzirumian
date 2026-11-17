@@ -1,24 +1,39 @@
 <template>
   <div class="kb-eval">
-    <!-- 用例区 -->
+    <!-- 用例区（按用例组） -->
     <section class="eval-section">
       <div class="section-bar">
         <h3>评估用例 <span class="count">{{ cases.length }}</span></h3>
         <div class="bar-actions">
-          <button class="btn-tool" :disabled="generating" @click="generate">{{ generating ? '生成中…' : '自动生成用例' }}</button>
+          <button class="btn-tool" :disabled="generating" @click="openGenerateForm">{{ generating ? '生成中…' : '自动生成用例' }}</button>
           <button class="btn-tool" @click="openCaseForm">添加用例</button>
-          <button class="btn-dark" :disabled="starting || !cases.length || hasRunning" @click="startRun">
+          <button class="btn-dark" :disabled="starting || hasRunning" @click="openRunForm">
             {{ starting ? '启动中…' : hasRunning ? '评估进行中…' : '开始评估' }}
           </button>
         </div>
       </div>
+
+      <!-- 用例组选择与管理 -->
+      <div class="group-bar">
+        <select v-model="selectedGroupId" class="group-select" @change="loadCases">
+          <option v-for="g in groups" :key="g.id" :value="g.id">{{ g.name }}（{{ g.case_count }}）</option>
+        </select>
+        <template v-if="selectedGroup">
+          <span v-if="selectedGroup.note" class="group-note" :title="selectedGroup.note">{{ selectedGroup.note }}</span>
+          <button class="link-btn" @click="openGroupForm(selectedGroup)">重命名/备注</button>
+          <button class="link-btn danger" @click="removeGroup(selectedGroup)">删除组</button>
+        </template>
+        <button class="link-btn" @click="openGroupForm(null)">新建组</button>
+      </div>
       <p v-if="caseMessage" class="msg" :class="{ error: caseMessageError }">{{ caseMessage }}</p>
-      <div v-if="!cases.length" class="empty-hint">暂无用例：可手动添加，或基于知识库内容自动生成</div>
+      <div v-if="!groups.length" class="empty-hint">暂无用例组：可新建组后手动添加，或基于知识库内容自动生成用例组</div>
+      <div v-else-if="!cases.length" class="empty-hint">该组暂无用例：可手动添加，或自动生成新用例组</div>
       <div v-else class="case-list">
         <div v-for="c in cases" :key="c.id" class="case-item">
           <div class="case-main">
             <span class="case-q">{{ c.question }}</span>
             <span v-if="c.reference_answer" class="case-ref" :title="c.reference_answer">参考答案：{{ c.reference_answer }}</span>
+            <span v-if="c.expected_source" class="case-src" :title="c.expected_source">期望来源：{{ c.expected_source }}</span>
             <span v-if="c.expected_keywords?.length" class="case-kws">
               <i v-for="k in c.expected_keywords" :key="k">{{ k }}</i>
             </span>
@@ -28,7 +43,7 @@
       </div>
     </section>
 
-    <!-- 运行区 -->
+    <!-- 运行区（按时间序，标注用例组） -->
     <section class="eval-section">
       <div class="section-bar">
         <h3>评估运行</h3>
@@ -42,6 +57,7 @@
           @click="openRun(r)"
         >
           <span class="run-time">{{ formatTime(r.started_at) }}</span>
+          <span v-if="r.group_name" class="run-group">{{ r.group_name }}</span>
           <span class="status-badge" :class="r.status">{{ statusLabel(r.status) }}</span>
           <template v-if="r.status === 'finished' && r.summary">
             <span class="run-metric">命中 {{ pct(r.summary.retrieval_hit_rate) }}</span>
@@ -99,16 +115,68 @@
       </div>
     </section>
 
+    <!-- 自动生成用例弹窗（可自命名组与备注） -->
+    <div v-if="generateFormVisible" class="modal-mask" @click.self="generateFormVisible = false">
+      <div class="modal-card">
+        <h3>自动生成用例组</h3>
+        <label class="field-label">用例组名称（可选，默认「自动生成 月-日 时:分」）</label>
+        <input v-model="generateForm.name" class="field-input" placeholder="例如：核心章节问答" />
+        <label class="field-label">备注（可选）</label>
+        <textarea v-model="generateForm.note" class="field-input" rows="2" placeholder="本组用例的用途说明"></textarea>
+        <p v-if="formError" class="form-error">{{ formError }}</p>
+        <div class="modal-actions">
+          <button class="btn-ghost" @click="generateFormVisible = false">取消</button>
+          <button class="btn-dark" :disabled="generating" @click="generate">{{ generating ? '生成中…' : '生成' }}</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 开始评估弹窗（选择用例组） -->
+    <div v-if="runFormVisible" class="modal-mask" @click.self="runFormVisible = false">
+      <div class="modal-card">
+        <h3>开始评估</h3>
+        <label class="field-label">选择用例组（仅评估该组用例）</label>
+        <select v-model="runFormGroupId" class="field-input">
+          <option v-for="g in groups" :key="g.id" :value="g.id" :disabled="!g.case_count">
+            {{ g.name }}（{{ g.case_count }} 例）{{ g.case_count ? '' : ' · 无用例' }}
+          </option>
+        </select>
+        <p v-if="formError" class="form-error">{{ formError }}</p>
+        <div class="modal-actions">
+          <button class="btn-ghost" @click="runFormVisible = false">取消</button>
+          <button class="btn-dark" :disabled="starting" @click="startRun">{{ starting ? '启动中…' : '启动评估' }}</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 用例组新建/重命名备注弹窗 -->
+    <div v-if="groupFormVisible" class="modal-mask" @click.self="groupFormVisible = false">
+      <div class="modal-card">
+        <h3>{{ groupForm.id ? '重命名 / 备注' : '新建用例组' }}</h3>
+        <label class="field-label">名称</label>
+        <input v-model="groupForm.name" class="field-input" placeholder="用例组名称" />
+        <label class="field-label">备注（可选）</label>
+        <textarea v-model="groupForm.note" class="field-input" rows="2"></textarea>
+        <p v-if="formError" class="form-error">{{ formError }}</p>
+        <div class="modal-actions">
+          <button class="btn-ghost" @click="groupFormVisible = false">取消</button>
+          <button class="btn-dark" :disabled="saving" @click="submitGroup">{{ groupForm.id ? '保存' : '创建' }}</button>
+        </div>
+      </div>
+    </div>
+
     <!-- 添加用例弹窗 -->
     <div v-if="caseFormVisible" class="modal-mask" @click.self="caseFormVisible = false">
       <div class="modal-card">
-        <h3>添加评估用例</h3>
+        <h3>添加评估用例<span v-if="selectedGroup" class="modal-sub">（{{ selectedGroup.name }}）</span></h3>
         <label class="field-label">问题</label>
         <textarea v-model="caseForm.question" class="field-input" rows="2" placeholder="例如：糖尿病患者的饮食原则是什么？"></textarea>
         <label class="field-label">参考答案（可选，用于召回率/评审）</label>
         <textarea v-model="caseForm.reference" class="field-input" rows="3"></textarea>
         <label class="field-label">期望关键词（可选，逗号分隔，用于命中率）</label>
         <input v-model="caseForm.keywords" class="field-input" placeholder="血糖, 膳食纤维" />
+        <label class="field-label">期望来源（可选，来源文档标题）</label>
+        <input v-model="caseForm.source" class="field-input" placeholder="例如：糖尿病饮食指南.pdf" />
         <p v-if="formError" class="form-error">{{ formError }}</p>
         <div class="modal-actions">
           <button class="btn-ghost" @click="caseFormVisible = false">取消</button>
@@ -124,12 +192,15 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import {
   listKbEvalCases, addKbEvalCase, deleteKbEvalCase, generateKbEvalCases,
   startKbEvalRun, listKbEvalRuns, getKbEvalRun,
+  listKbEvalGroups, createKbEvalGroup, updateKbEvalGroup, deleteKbEvalGroup,
 } from '@/api'
 
 const props = defineProps({
   kbId: { type: String, required: true },
 })
 
+const groups = ref([])
+const selectedGroupId = ref('')
 const cases = ref([])
 const runs = ref([])
 const runsLoading = ref(false)
@@ -141,6 +212,7 @@ const selectedRunId = ref('')
 const runDetail = ref(null)
 const expandedId = ref('')
 
+const selectedGroup = computed(() => groups.value.find((g) => g.id === selectedGroupId.value) || null)
 const hasRunning = computed(() => runs.value.some((r) => r.status === 'running'))
 
 function pct(v) {
@@ -156,9 +228,23 @@ function statusLabel(s) {
   return { running: '进行中', finished: '已完成', failed: '失败' }[s] || s
 }
 
-async function loadCases() {
+async function loadGroups(keepSelection = false) {
   try {
-    const res = await listKbEvalCases(props.kbId)
+    const res = await listKbEvalGroups(props.kbId)
+    groups.value = res.data.groups || []
+    if (!keepSelection || !groups.value.some((g) => g.id === selectedGroupId.value)) {
+      selectedGroupId.value = groups.value[0]?.id || ''
+    }
+  } catch (e) {
+    caseMessage.value = e.response?.data?.detail || '加载用例组失败'
+    caseMessageError.value = true
+  }
+}
+
+async function loadCases() {
+  if (!selectedGroupId.value) { cases.value = []; return }
+  try {
+    const res = await listKbEvalCases(props.kbId, selectedGroupId.value)
     cases.value = res.data.cases || []
   } catch (e) {
     caseMessage.value = e.response?.data?.detail || '加载用例失败'
@@ -197,42 +283,111 @@ async function openRun(r, keepSelection = false) {
   }
 }
 
+// ---------- 自动生成（成组，可自命名/备注） ----------
+const generateFormVisible = ref(false)
+const generateForm = ref({ name: '', note: '' })
+
+function openGenerateForm() {
+  generateForm.value = { name: '', note: '' }
+  formError.value = ''
+  generateFormVisible.value = true
+}
+
 async function generate() {
   generating.value = true
+  formError.value = ''
   caseMessage.value = ''
   try {
-    const res = await generateKbEvalCases(props.kbId)
-    caseMessage.value = `已生成 ${res.data.cases?.length || 0} 条用例`
+    const res = await generateKbEvalCases(props.kbId, {
+      groupName: generateForm.value.name.trim(),
+      groupNote: generateForm.value.note.trim(),
+    })
+    generateFormVisible.value = false
+    caseMessage.value = `已生成用例组「${res.data.group?.name || ''}」，共 ${res.data.cases?.length || 0} 条用例`
     caseMessageError.value = false
-    await loadCases()
+    selectedGroupId.value = res.data.group?.id || ''
+    await Promise.all([loadGroups(true), loadCases()])
   } catch (e) {
-    caseMessage.value = e.response?.data?.detail || '生成失败'
-    caseMessageError.value = true
+    formError.value = e.response?.data?.detail || '生成失败'
   } finally {
     generating.value = false
   }
 }
 
+// ---------- 开始评估（选组） ----------
+const runFormVisible = ref(false)
+const runFormGroupId = ref('')
+
+function openRunForm() {
+  if (!groups.value.length) {
+    caseMessage.value = '请先创建用例组并添加用例'
+    caseMessageError.value = true
+    return
+  }
+  runFormGroupId.value = selectedGroupId.value || groups.value.find((g) => g.case_count)?.id || ''
+  formError.value = ''
+  runFormVisible.value = true
+}
+
 async function startRun() {
+  if (!runFormGroupId.value) { formError.value = '请选择用例组'; return }
   starting.value = true
+  formError.value = ''
   caseMessage.value = ''
   try {
-    await startKbEvalRun(props.kbId)
+    await startKbEvalRun(props.kbId, runFormGroupId.value)
+    runFormVisible.value = false
     caseMessage.value = '评估已启动'
     caseMessageError.value = false
     await loadRuns()
   } catch (e) {
-    caseMessage.value = e.response?.data?.detail || '启动失败'
-    caseMessageError.value = true
+    formError.value = e.response?.data?.detail || '启动失败'
   } finally {
     starting.value = false
   }
 }
 
-async function removeCase(c) {
-  if (!window.confirm(`确定删除用例「${c.question.slice(0, 30)}」？`)) return
+// ---------- 用例组管理 ----------
+const groupFormVisible = ref(false)
+const saving = ref(false)
+const formError = ref('')
+const groupForm = ref({ id: '', name: '', note: '' })
+
+function openGroupForm(g) {
+  groupForm.value = { id: g?.id || '', name: g?.name || '', note: g?.note || '' }
+  formError.value = ''
+  groupFormVisible.value = true
+}
+
+async function submitGroup() {
+  if (!groupForm.value.name.trim()) { formError.value = '请输入名称'; return }
+  saving.value = true
+  formError.value = ''
   try {
-    await deleteKbEvalCase(props.kbId, c.id)
+    if (groupForm.value.id) {
+      await updateKbEvalGroup(props.kbId, groupForm.value.id, {
+        name: groupForm.value.name.trim(), note: groupForm.value.note.trim(),
+      })
+    } else {
+      const res = await createKbEvalGroup(props.kbId, {
+        name: groupForm.value.name.trim(), note: groupForm.value.note.trim(),
+      })
+      selectedGroupId.value = res.data.group?.id || ''
+    }
+    groupFormVisible.value = false
+    await Promise.all([loadGroups(true), loadCases()])
+  } catch (e) {
+    formError.value = e.response?.data?.detail || '保存失败'
+  } finally {
+    saving.value = false
+  }
+}
+
+async function removeGroup(g) {
+  if (!window.confirm(`确定删除用例组「${g.name}」？组内 ${g.case_count} 条用例将一并删除。`)) return
+  try {
+    await deleteKbEvalGroup(props.kbId, g.id)
+    await Promise.all([loadGroups(), loadRuns()])
     await loadCases()
   } catch (e) {
     caseMessage.value = e.response?.data?.detail || '删除失败'
@@ -240,13 +395,28 @@ async function removeCase(c) {
   }
 }
 
+// ---------- 用例增删 ----------
+async function removeCase(c) {
+  if (!window.confirm(`确定删除用例「${c.question.slice(0, 30)}」？`)) return
+  try {
+    await deleteKbEvalCase(props.kbId, c.id)
+    await Promise.all([loadCases(), loadGroups(true)])
+  } catch (e) {
+    caseMessage.value = e.response?.data?.detail || '删除失败'
+    caseMessageError.value = true
+  }
+}
+
 const caseFormVisible = ref(false)
-const saving = ref(false)
-const formError = ref('')
-const caseForm = ref({ question: '', reference: '', keywords: '' })
+const caseForm = ref({ question: '', reference: '', keywords: '', source: '' })
 
 function openCaseForm() {
-  caseForm.value = { question: '', reference: '', keywords: '' }
+  if (!selectedGroupId.value) {
+    caseMessage.value = '请先创建或选择一个用例组'
+    caseMessageError.value = true
+    return
+  }
+  caseForm.value = { question: '', reference: '', keywords: '', source: '' }
   formError.value = ''
   caseFormVisible.value = true
 }
@@ -260,9 +430,11 @@ async function submitCase() {
       question: caseForm.value.question.trim(),
       referenceAnswer: caseForm.value.reference.trim(),
       expectedKeywords: caseForm.value.keywords.split(/[,，]/).map((s) => s.trim()).filter(Boolean),
+      expectedSource: caseForm.value.source.trim(),
+      groupId: selectedGroupId.value,
     })
     caseFormVisible.value = false
-    await loadCases()
+    await Promise.all([loadCases(), loadGroups(true)])
   } catch (e) {
     formError.value = e.response?.data?.detail || '添加失败'
   } finally {
@@ -272,6 +444,7 @@ async function submitCase() {
 
 let pollTimer = null
 onMounted(async () => {
+  await loadGroups()
   await Promise.all([loadCases(), loadRuns()])
   pollTimer = setInterval(() => { if (hasRunning.value) loadRuns() }, 3000)
 })
@@ -294,6 +467,11 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
 .btn-dark:hover:not(:disabled) { opacity: 0.85; }
 .btn-dark:disabled { opacity: 0.5; cursor: not-allowed; }
 
+.group-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
+.group-select { border: 1px solid var(--color-border); border-radius: 8px; padding: 6px 10px; font-size: 12.5px; color: var(--color-text); background: #fff; outline: none; min-width: 200px; max-width: 320px; }
+.group-select:focus { border-color: var(--color-primary); }
+.group-note { font-size: 11.5px; color: var(--color-text-secondary); max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 .msg { font-size: 12.5px; color: var(--color-text-secondary); margin: 0 0 10px; }
 .msg.error { color: #c0392b; }
 .empty-hint { padding: 18px; border: 1px dashed var(--color-border); border-radius: 10px; text-align: center; color: var(--color-text-secondary); font-size: 12.5px; }
@@ -303,6 +481,7 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
 .case-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 .case-q { font-size: 13px; font-weight: 500; color: var(--color-text); }
 .case-ref { font-size: 11.5px; color: var(--color-text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.case-src { font-size: 11.5px; color: #2e7d32; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .case-kws { display: flex; gap: 4px; flex-wrap: wrap; }
 .case-kws i { font-style: normal; font-size: 10.5px; background: var(--color-primary-light); color: var(--color-primary); padding: 1px 6px; border-radius: 4px; }
 .link-btn { border: none; background: none; color: var(--color-primary); font-size: 12px; cursor: pointer; flex-shrink: 0; }
@@ -318,6 +497,7 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
 .run-item:hover { border-color: var(--color-primary); }
 .run-item.active { border-color: var(--color-primary); background: #fdf8f1; }
 .run-time { color: var(--color-text); font-weight: 500; }
+.run-group { font-size: 11px; background: var(--color-primary-light); color: var(--color-primary); padding: 2px 8px; border-radius: 6px; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .run-metric { color: var(--color-text-secondary); font-size: 12px; }
 
 .status-badge { font-size: 11px; padding: 2px 8px; border-radius: 6px; background: #f3efe9; color: var(--color-text-secondary); }
@@ -345,8 +525,9 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
 .modal-mask { position: fixed; inset: 0; background: rgba(45, 42, 36, 0.4); display: flex; align-items: center; justify-content: center; z-index: 100; }
 .modal-card { background: #fff; border-radius: 14px; padding: 22px 24px; width: 440px; max-width: calc(100vw - 40px); box-shadow: 0 12px 40px rgba(0, 0, 0, 0.15); }
 .modal-card h3 { margin: 0 0 12px; font-size: 16px; }
+.modal-sub { font-size: 12px; color: var(--color-text-secondary); font-weight: 400; margin-left: 6px; }
 .field-label { display: block; font-size: 12.5px; color: var(--color-text-secondary); margin: 10px 0 5px; }
-.field-input { width: 100%; box-sizing: border-box; border: 1px solid var(--color-border); border-radius: 8px; padding: 8px 11px; font-size: 13px; outline: none; font-family: inherit; color: var(--color-text); }
+.field-input { width: 100%; box-sizing: border-box; border: 1px solid var(--color-border); border-radius: 8px; padding: 8px 11px; font-size: 13px; outline: none; font-family: inherit; color: var(--color-text); background: #fff; }
 .field-input:focus { border-color: var(--color-primary); }
 .form-error { color: #c0392b; font-size: 12.5px; margin: 10px 0 0; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }

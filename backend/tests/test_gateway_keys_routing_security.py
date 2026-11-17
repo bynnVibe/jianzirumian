@@ -62,25 +62,28 @@ def test_resolve_outbound_falls_back_internal(mem_db):
     assert plain
 
 
-def test_user_key_exhausted_degrades_to_public(mem_db):
-    """用户密钥总配额用尽 → 出网自动降级公共密钥（不阻断使用）。"""
+def test_user_key_exhausted_never_degrades_to_public(mem_db):
+    """用户密钥总配额用尽 → 仍强制携带用户密钥（绝不降级公共），
+    由下游校验层抛 KeyRejected(quota_exceeded) 明确报错。"""
     from app.services.gateway import keys as key_svc
 
-    pub = key_svc.create_key("公共池", key_type="public")
+    key_svc.create_key("公共池", key_type="public")
     uk = key_svc.create_key("张三专属", key_type="user", bound_users=["u1"], token_quota=100)
     # 用尽用户密钥总配额
     key_svc.consume_tokens(uk["id"], 100)
 
     plain, ktype = key_svc.resolve_outbound_key("u1")
-    assert ktype == "public"
-    assert plain == pub["key"]
+    assert ktype == "user"  # 绑定即强制，不因配额降级
+    assert plain
 
-    # 友好提示：降级但不阻断
+    # 下游校验明确报错（而非静默走公共）
+    with pytest.raises(key_svc.KeyRejected) as ei:
+        key_svc.authenticate(plain)
+    assert ei.value.code == "quota_exceeded"
+
+    # 友好提示：配额状态仍可查（非阻断性展示）
     status = key_svc.user_quota_status("u1")
-    assert status["key_type"] == "public"
-    assert status["degraded"] is True
-    assert status["exhausted"] is False
-    assert "降级" in status["message"]
+    assert status["key_type"] in ("user", "public")
 
 
 def test_public_daily_limit_rejects_with_contact_admin(mem_db):

@@ -159,9 +159,83 @@
         <p class="token-note warn" v-if="agent.overview.token_overuse">⚠ 单请求平均 Token（{{ formatNum(agent.overview.avg_tokens_per_request) }}）已超过告警阈值 {{ formatNum(agent.overview.token_warn_threshold) }}，可收紧历史窗口（SESSION_MAX_HISTORY）或附件上下文预算。</p>
       </section>
 
-      <!-- ============ Agent 侧：上下文段构成 ============ -->
+      <!-- ============ Agent 侧：上下文构成（最新对话 / 历史对话 / 窗口聚合） ============ -->
       <section class="card">
-        <h3 class="card-title">Agent 上下文构成 · 按语义段（点击行展开最近会话明细）</h3>
+        <div class="ctx-head">
+          <h3 class="card-title">Agent 上下文构成 · 按语义段</h3>
+          <div class="ctx-modes">
+            <button class="ctx-mode" :class="{ active: ctxMode === 'latest' }" @click="switchCtxMode('latest')">最新对话</button>
+            <button class="ctx-mode" :class="{ active: ctxMode === 'history' }" @click="switchCtxMode('history')">历史对话</button>
+            <button class="ctx-mode" :class="{ active: ctxMode === 'window' }" @click="switchCtxMode('window')">窗口聚合</button>
+          </div>
+        </div>
+
+        <!-- 最新对话 / 历史对话：单次请求的语义段构成 -->
+        <template v-if="ctxMode !== 'window'">
+          <div v-if="ctxMode === 'history'" class="ctx-selectors">
+            <select v-model="histDate" class="field-input sm ctx-date" @change="onHistDateChange">
+              <option value="">全部日期…</option>
+              <option v-for="d in explorerDates" :key="d" :value="d">{{ d }}</option>
+            </select>
+            <select v-model="histSessionId" class="field-input sm ctx-session" @change="onHistSessionChange">
+              <option value="" disabled>选择会话…</option>
+              <option v-for="s in explorerSessions" :key="s.session_id" :value="s.session_id">
+                {{ s.title }} · {{ s.username }} · {{ s.last_active }}
+              </option>
+            </select>
+            <select v-model="histTraceId" class="field-input sm" :disabled="!explorerTraces.length" @change="onHistTraceChange">
+              <option v-for="t in explorerTraces" :key="t.trace_id" :value="t.trace_id">
+                {{ formatTime(t.started_at) }} · {{ t.input || t.agent }} · {{ formatNum(t.prompt_tokens) }} tok
+              </option>
+            </select>
+          </div>
+          <p v-if="explorerError" class="err-tip">{{ explorerError }}</p>
+          <div v-if="explorerLoading" class="mini-loading">加载上下文构成中…</div>
+          <template v-else-if="explorer && explorer.session_id">
+            <p class="ctx-meta">
+              <strong>{{ explorer.title }}</strong>
+              <span>· {{ explorer.username }}</span>
+              <span v-if="explorer.selected_at">· {{ formatTime(explorer.selected_at) }}</span>
+              <span>· 本次请求 {{ formatNum(explorer.total_tokens) }} Token</span>
+              <button class="btn btn-ghost sm" @click="reloadExplorer">刷新</button>
+            </p>
+            <!-- 对话消耗对比：本对话总耗 vs 上次对话 / 平均对话 -->
+            <div v-if="explorerCompare" class="ctx-compare">
+              <span class="cmp-chip cur">本对话总耗 <b>{{ formatNum(explorerCompare.session_tokens) }}</b> tok</span>
+              <span v-if="explorerCompare.prev" class="cmp-chip">
+                上次对话 <b>{{ formatNum(explorerCompare.prev.tokens) }}</b> tok
+                <em :class="deltaClass(explorerCompare.session_tokens, explorerCompare.prev.tokens)">
+                  {{ deltaText(explorerCompare.session_tokens, explorerCompare.prev.tokens) }}
+                </em>
+              </span>
+              <span v-else class="cmp-chip first">首次对话（无上次对比）</span>
+              <span class="cmp-chip">
+                平均对话 <b>{{ formatNum(explorerCompare.avg_tokens) }}</b> tok
+                <em :class="deltaClass(explorerCompare.session_tokens, explorerCompare.avg_tokens)">
+                  {{ deltaText(explorerCompare.session_tokens, explorerCompare.avg_tokens) }}
+                </em>
+              </span>
+            </div>
+            <table v-if="explorer.segments.length" class="mini-table">
+              <thead><tr><th>上下文段</th><th class="num">Token</th><th class="num">占比</th></tr></thead>
+              <tbody>
+                <tr v-for="seg in explorer.segments" :key="seg.segment">
+                  <td>{{ seg.label }}</td>
+                  <td class="num">{{ formatNum(seg.tokens) }}</td>
+                  <td class="num">
+                    <div class="share-bar"><span :style="{ width: ((seg.share || 0) * 100).toFixed(1) + '%' }"></span></div>
+                    {{ ((seg.share || 0) * 100).toFixed(1) }}%
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+            <div v-else class="mini-empty">该次请求暂无语义段度量数据</div>
+          </template>
+          <div v-else-if="!explorerLoading" class="mini-empty">暂无对话 trace 数据（发起一次对话后即可查看）</div>
+        </template>
+
+        <!-- 窗口聚合：原有 segment_breakdown 表与钻取 -->
+        <template v-else>
         <table v-if="segments.length" class="mini-table seg-table">
           <thead>
             <tr><th>上下文段</th><th class="num">累计 Token</th><th class="num">占比</th><th class="num">次数</th><th class="num">平均/次</th><th class="num">较前期</th></tr>
@@ -201,6 +275,8 @@
           </tbody>
         </table>
         <div v-else class="mini-empty">暂无 segment 度量数据（发起一次带知识检索的对话后即可看到）</div>
+        <p class="card-note">窗口聚合 = 所选时间范围内全部请求的累计；点击行展开最近会话明细。</p>
+        </template>
       </section>
     </template>
   </div>
@@ -208,13 +284,26 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import { getGatewayTokenAnalysis } from '@/api'
+import { getGatewayTokenAnalysis, getContextExplorer } from '@/api'
 
 const days = ref(7)
 const loading = ref(false)
 const errorMsg = ref('')
 const data = ref(null)
 const expandedSegs = ref(new Set())
+
+// 上下文构成三模式：latest（默认最新对话）/ history（历史对话选择器）/ window（窗口聚合）
+const ctxMode = ref('latest')
+const explorer = ref(null)
+const explorerLoading = ref(false)
+const explorerError = ref('')
+const histSessionId = ref('')
+const histTraceId = ref('')
+const histDate = ref('')
+const explorerSessions = computed(() => explorer.value?.sessions || [])
+const explorerTraces = computed(() => explorer.value?.traces || [])
+const explorerDates = computed(() => explorer.value?.dates || [])
+const explorerCompare = computed(() => explorer.value?.compare || null)
 
 const gw = computed(() => data.value?.gateway || { overview: {}, daily: [], by_key: [], by_model: [], by_channel: [] })
 const agent = computed(() => data.value?.agent || { overview: {}, token_comparison: null, segment_breakdown: [] })
@@ -275,7 +364,63 @@ async function load() {
   }
 }
 
-onMounted(load)
+async function loadExplorer({ date = '', sessionId = '', traceId = '' } = {}) {
+  explorerLoading.value = true
+  explorerError.value = ''
+  try {
+    const res = await getContextExplorer({ date, sessionId, traceId })
+    explorer.value = res.data
+    histDate.value = date
+    histSessionId.value = res.data.session_id || ''
+    histTraceId.value = res.data.selected_trace_id || ''
+  } catch (e) {
+    explorerError.value = e.response?.data?.detail || '加载上下文构成失败'
+  } finally {
+    explorerLoading.value = false
+  }
+}
+
+function switchCtxMode(mode) {
+  ctxMode.value = mode
+  if (mode === 'latest') loadExplorer()
+  else if (mode === 'history' && !explorer.value) loadExplorer()
+}
+
+function reloadExplorer() {
+  if (ctxMode.value === 'history') loadExplorer({ date: histDate.value, sessionId: histSessionId.value, traceId: histTraceId.value })
+  else loadExplorer()
+}
+
+function onHistDateChange() {
+  // 日期筛选：重载该日期会话列表，后端缺省选中该日期最新会话
+  loadExplorer({ date: histDate.value })
+}
+
+function onHistSessionChange() {
+  // 切换会话：trace 默认取该会话最新一次
+  loadExplorer({ date: histDate.value, sessionId: histSessionId.value })
+}
+
+function onHistTraceChange() {
+  loadExplorer({ date: histDate.value, sessionId: histSessionId.value, traceId: histTraceId.value })
+}
+
+// 对比变化：相对基准（上次/平均）的 Δ 百分比
+function deltaText(cur, base) {
+  if (!base) return '—'
+  const pct = ((cur - base) / base) * 100
+  const sign = pct > 0 ? '+' : ''
+  return `${sign}${pct.toFixed(0)}%`
+}
+function deltaClass(cur, base) {
+  if (!base || cur === base) return 'flat'
+  return cur > base ? 'up' : 'down'
+}
+
+onMounted(() => {
+  load()
+  loadExplorer()
+})
 </script>
 
 <style scoped>
@@ -344,6 +489,25 @@ onMounted(load)
 .token-note.warn { color: #c62828; }
 
 /* 段构成 */
+.ctx-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+.ctx-head .card-title { margin-bottom: 0; }
+.ctx-modes { display: flex; gap: 6px; }
+.ctx-mode { border: 1px solid var(--color-border); background: #fff; border-radius: 8px; padding: 4px 12px; font-size: 12px; color: var(--color-text-secondary); cursor: pointer; }
+.ctx-mode:hover { border-color: var(--color-primary); color: var(--color-primary); }
+.ctx-mode.active { background: var(--color-primary); border-color: var(--color-primary); color: #fff; font-weight: 600; }
+.ctx-selectors { display: flex; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+.ctx-session { min-width: 280px; max-width: 460px; }
+.ctx-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; color: var(--color-text-secondary); margin: 0 0 10px; }
+.ctx-meta strong { color: var(--color-text); }
+.ctx-compare { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0 0 12px; }
+.cmp-chip { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; padding: 4px 10px; border-radius: 14px; background: #f6f2ea; border: 1px solid #ece4d6; color: var(--color-text-secondary); }
+.cmp-chip b { color: var(--color-text); font-weight: 700; }
+.cmp-chip.cur { background: var(--color-primary-light); border-color: var(--color-primary); }
+.cmp-chip.first { font-style: italic; }
+.cmp-chip em { font-style: normal; font-weight: 700; }
+.cmp-chip em.up { color: #c62828; }
+.cmp-chip em.down { color: #2e7d32; }
+.cmp-chip em.flat { color: var(--color-text-secondary); }
 .seg-table .seg-row { cursor: pointer; }
 .seg-table .seg-row:hover { background: var(--color-primary-light); }
 .seg-caret { display: inline-block; color: var(--color-primary); font-size: 11px; margin-right: 5px; transition: transform 0.15s ease; }

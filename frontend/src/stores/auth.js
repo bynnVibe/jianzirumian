@@ -46,6 +46,7 @@ export const useAuthStore = defineStore('auth', () => {
     if (savedToken) {
       verifyToken()
     }
+    startHeartbeat()
   }
 
   async function verifyToken() {
@@ -56,15 +57,35 @@ export const useAuthStore = defineStore('auth', () => {
         user.value = res.data.user
         localStorage.setItem('auth_user', JSON.stringify(res.data.user))
       }
-    } catch {
-      // token 无效，清除缓存
-      token.value = ''
-      user.value = null
-      localStorage.removeItem('auth_token')
-      localStorage.removeItem('auth_user')
+    } catch (err) {
+      // 仅 401（登录态真实过期）才清除；网络抖动/5xx 等瞬态失败不误登出
+      if (err?.response?.status === 401) {
+        token.value = ''
+        user.value = null
+        localStorage.removeItem('auth_token')
+        localStorage.removeItem('auth_user')
+      }
     } finally {
       verifying.value = false
     }
+  }
+
+  // ---- 登录态滑动续期：用户有操作时周期心跳调 /auth/me（后端鉴权即续期），
+  // 窗口内无任何操作则不续期，会话自然过期退出 ----
+  const HEARTBEAT_MS = 5 * 60 * 1000
+  let lastActivityAt = Date.now()
+  let heartbeatTimer = null
+  function markActivity() { lastActivityAt = Date.now() }
+  function startHeartbeat() {
+    if (heartbeatTimer) return
+    ;['pointerdown', 'keydown', 'scroll', 'touchstart'].forEach((e) => {
+      window.addEventListener(e, markActivity, { passive: true, capture: true })
+    })
+    heartbeatTimer = setInterval(async () => {
+      if (!token.value || !user.value) return
+      if (Date.now() - lastActivityAt > HEARTBEAT_MS) return // 闲置不续期
+      try { await getCurrentUser() } catch { /* 401 由响应拦截器统一处理 */ }
+    }, HEARTBEAT_MS)
   }
 
   // ---- 方法 ----

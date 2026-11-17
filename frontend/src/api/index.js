@@ -677,15 +677,17 @@ export function getKbGraphSourceContent(kbId, { title = '', path = '' } = {}) {
   })
 }
 
-export function listKbEvalCases(kbId) {
-  return api.get(`/knowledge/bases/${kbId}/eval/cases`)
+export function listKbEvalCases(kbId, groupId = '') {
+  return api.get(`/knowledge/bases/${kbId}/eval/cases`, { params: { group_id: groupId } })
 }
 
-export function addKbEvalCase(kbId, { question, referenceAnswer = '', expectedKeywords = [] }) {
+export function addKbEvalCase(kbId, { question, referenceAnswer = '', expectedKeywords = [], expectedSource = '', groupId = '' }) {
   return api.post(`/knowledge/bases/${kbId}/eval/cases`, {
     question,
     reference_answer: referenceAnswer,
     expected_keywords: expectedKeywords,
+    expected_source: expectedSource,
+    group_id: groupId,
   })
 }
 
@@ -693,12 +695,31 @@ export function deleteKbEvalCase(kbId, caseId) {
   return api.delete(`/knowledge/bases/${kbId}/eval/cases/${caseId}`)
 }
 
-export function generateKbEvalCases(kbId) {
-  return api.post(`/knowledge/bases/${kbId}/eval/cases/generate`)
+export function generateKbEvalCases(kbId, { count = 5, groupName = '', groupNote = '' } = {}) {
+  return api.post(`/knowledge/bases/${kbId}/eval/cases/generate`, {
+    count, group_name: groupName, group_note: groupNote,
+  })
 }
 
-export function startKbEvalRun(kbId) {
-  return api.post(`/knowledge/bases/${kbId}/eval/runs`)
+// 用例组 CRUD（自动生成成组、自命名备注、选组评估）
+export function listKbEvalGroups(kbId) {
+  return api.get(`/knowledge/bases/${kbId}/eval/groups`)
+}
+
+export function createKbEvalGroup(kbId, { name, note = '' }) {
+  return api.post(`/knowledge/bases/${kbId}/eval/groups`, { name, note })
+}
+
+export function updateKbEvalGroup(kbId, groupId, { name = null, note = null } = {}) {
+  return api.patch(`/knowledge/bases/${kbId}/eval/groups/${groupId}`, { name, note })
+}
+
+export function deleteKbEvalGroup(kbId, groupId) {
+  return api.delete(`/knowledge/bases/${kbId}/eval/groups/${groupId}`)
+}
+
+export function startKbEvalRun(kbId, groupId = '') {
+  return api.post(`/knowledge/bases/${kbId}/eval/runs`, { group_id: groupId })
 }
 
 export function listKbEvalRuns(kbId) {
@@ -707,6 +728,23 @@ export function listKbEvalRuns(kbId) {
 
 export function getKbEvalRun(kbId, runId) {
   return api.get(`/knowledge/bases/${kbId}/eval/runs/${runId}`)
+}
+
+// 知识总结（book-to-skill 融合内置技能）
+export function listKbSummaries(kbId) {
+  return api.get(`/knowledge/bases/${kbId}/summaries`)
+}
+
+export function getKbSummary(kbId, summaryId) {
+  return api.get(`/knowledge/bases/${kbId}/summaries/${summaryId}`)
+}
+
+export function generateKbSummaries(kbId, { recordId = '', force = false } = {}) {
+  return api.post(`/knowledge/bases/${kbId}/summaries/generate`, { record_id: recordId, force })
+}
+
+export function getKbSummaryJobStatus(kbId) {
+  return api.get(`/knowledge/bases/${kbId}/summaries/job_status`)
 }
 
 // ============================================
@@ -1743,6 +1781,11 @@ export function getGatewayStats(days = 7) {
 /** Token 用量分析（两源合并）：网关日志/按密钥/配额水位 + Agent 段构成 */
 export function getGatewayTokenAnalysis(days = 7, range = 'days') {
   return api.get('/gateway/token-analysis', { params: { days, range } })
+}
+
+/** Agent 上下文构成 explorer：默认最新对话；历史对话按 date/session/trace 两级筛选查看 */
+export function getContextExplorer({ date = '', sessionId = '', traceId = '' } = {}) {
+  return api.get('/observability/context-explorer', { params: { date, session_id: sessionId, trace_id: traceId } })
 }
 
 // ---- 上游管理（协议 + Base URL + Key + 成本层级 + 模型清单 + 权重/健康/延迟）----

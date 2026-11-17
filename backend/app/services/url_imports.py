@@ -239,6 +239,12 @@ class UrlImportService:
                     visibility=target["visibility"], owner_id=row["owner_id"], source_type="url", title=title, source_metadata=provenance)
             except Exception:
                 result["wiki_warning"] = "知识已入库，百科编译调度失败，请在百科中核对"
+            # 知识总结（book-to-skill）：技能开启→后台结构化摘要；未开启仅登记等待
+            try:
+                from app.services import kb_summary
+                kb_summary.schedule_summary(row["kb_id"], record["id"], title, row["owner_id"])
+            except Exception:
+                logger.warning("知识总结登记失败（不影响入库）: url_import=%s", task_id)
             db.execute("UPDATE url_imports SET status='succeeded',result=?,error='',error_code='',updated_at=? WHERE id=? AND status='ingesting'",
                        (json.dumps(result, ensure_ascii=False), now(), task_id))
         except asyncio.CancelledError:

@@ -23,10 +23,11 @@ from app.services import skill_review
 
 logger = logging.getLogger("jianziruyang.skill")
 
-# 技能类别 → 允许的作用域：prompt 仅对话；playbook 可驱动链接抓取或正文清洗
+# 技能类别 → 允许的作用域：prompt 仅对话；playbook 可驱动链接抓取/正文清洗/知识总结
 SKILL_KINDS = ("prompt", "playbook")
-KIND_SCOPES = {"prompt": ("chat",), "playbook": ("url_import", "polish")}
-SCOPE_LABEL = {"chat": "对话", "url_import": "链接解析", "polish": "正文清洗"}
+KIND_SCOPES = {"prompt": ("chat",), "playbook": ("url_import", "polish", "kb_summary")}
+SCOPE_LABEL = {"chat": "对话", "url_import": "链接解析", "polish": "正文清洗",
+               "kb_summary": "知识总结"}
 
 _MAX_NAME = 60
 _MAX_DESC = 200
@@ -54,6 +55,21 @@ _BUILTIN_POLISH_POLICY = {
     "collapse_blank_lines": True,
     "extra_line_patterns": [],
 }
+
+# 内置知识总结规范（融合开源 book-to-skill 的结构化摘要设计，scope=kb_summary）
+_BUILTIN_KB_SUMMARY_SPEC = (
+    "你是结构化知识总结引擎（设计借鉴开源 book-to-skill："
+    "https://github.com/virgiliojr94/book-to-skill ，将书籍/文档转化为可复用的结构化知识）。\n"
+    "请对给定文档进行结构化摘要，只输出一个 JSON 对象，不要输出任何解释、不要用代码块包裹。格式：\n"
+    '{"overview": "全文核心概览（150-300 字，说明主题/核心心智模型/适用场景）",'
+    ' "chapters": [{"title": "章节/小节标题", "summary": "章节摘要（80-200 字）",'
+    ' "key_points": ["要点"]}],'
+    ' "glossary": [{"term": "术语", "definition": "文档中的定义（60 字内）"}],'
+    ' "patterns": ["从文档提炼的可复用方法/模式/方剂"],'
+    ' "cheatsheet": ["速查清单条目（可操作短句）"]}\n'
+    "要求：chapters 按文档实际结构（标题/分页/主题）划分，3-12 条；glossary 3-15 条；"
+    "patterns 与 cheatsheet 各 3-10 条；全部内容严格忠于原文，不得编造；用中文输出。"
+)
 
 BUILTIN_SKILLS = [
     {
@@ -88,6 +104,18 @@ BUILTIN_SKILLS = [
         "content": "在回答健康养生类问题时，请先用一句通俗易懂的话概括核心结论，再给出专业、有据可查的细节。",
         "enabled": False,
     },
+    {
+        "builtin_key": "book_to_skill_summary",
+        "doc_slug": "book-to-skill-summary",
+        "name": "知识总结（book-to-skill）",
+        "description": "融合开源 book-to-skill 的结构化摘要能力：文档入库后后台生成"
+                       "「核心概览/章节结构/术语表/关键模式/速查清单」五段式知识总结，"
+                       "在知识库「知识总结」模块在线查看。默认关闭，开启后自动执行。",
+        "kind": "playbook",
+        "scope": "kb_summary",
+        "content": _BUILTIN_KB_SUMMARY_SPEC,
+        "enabled": False,
+    },
 ]
 
 
@@ -118,9 +146,16 @@ def _row_to_dict(row: dict) -> dict:
 
 
 def _validate_playbook(content: str, scope: str = "url_import") -> Optional[str]:
-    """校验 playbook 内容；按作用域分流：url_import 为规则数组，polish 为清洗策略对象。"""
+    """校验 playbook 内容；按作用域分流：url_import 为规则数组，polish 为清洗策略对象，
+    kb_summary 为结构化摘要规范文本。"""
     if scope == "polish":
         return _validate_polish_policy(content)
+    if scope == "kb_summary":
+        if not (content or "").strip():
+            return "知识总结规范内容不能为空"
+        if len(content) > _MAX_PROMPT_CHARS:
+            return f"知识总结规范内容不超过 {_MAX_PROMPT_CHARS} 字"
+        return None
     try:
         rules = json.loads(content)
     except (ValueError, TypeError):
@@ -305,6 +340,13 @@ class SkillService:
                 return {"error": "内置技能仅支持开启/关闭，不可编辑内容"}
             db.execute("UPDATE user_skills SET enabled = ?, updated_at = ? WHERE id = ?",
                        (1 if enabled else 0, now, skill_id))
+            # 开启知识总结内置技能后，后台继续执行等待中的摘要任务
+            if enabled and skill_id == _builtin_id(owner_id, "book_to_skill_summary"):
+                try:
+                    from app.services import kb_summary
+                    kb_summary.resume_pending()
+                except Exception as e:
+                    logger.warning("知识总结技能开启后恢复等待任务失败: %s", e)
             return {"skill": self.get_skill(owner_id, skill_id)}
 
         sets, params = [], []
@@ -470,6 +512,24 @@ class SkillService:
                 if isinstance(p, str) and p.strip() and p not in policy["extra_line_patterns"]:
                     policy["extra_line_patterns"].append(p)
         return policy
+
+    def kb_summary_spec(self, owner_id: str) -> Optional[str]:
+        """已启用的知识总结规范文本（scope=kb_summary）；未开启返回 None。"""
+        if not owner_id:
+            return None
+        self.ensure_builtin(owner_id)
+        row = db.query_one(
+            "SELECT content FROM user_skills"
+            " WHERE owner_id = ? AND enabled = 1 AND scope = 'kb_summary' AND kind = 'playbook'"
+            " ORDER BY builtin DESC, created_at ASC LIMIT 1",
+            (owner_id,),
+        )
+        return row["content"] if row else None
+
+    def kb_summary_skill_id(self, owner_id: str) -> str:
+        """知识总结内置技能 id（幂等种子化后返回），供前端开启引导。"""
+        self.ensure_builtin(owner_id)
+        return _builtin_id(owner_id, "book_to_skill_summary")
 
 
 skill_service = SkillService()
