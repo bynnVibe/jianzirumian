@@ -12,6 +12,8 @@
 """
 import asyncio
 import sqlite3
+import subprocess
+import sys
 
 import pytest
 
@@ -64,6 +66,16 @@ def test_email_masked():
     out = redact_log_text("联系邮箱zhangsan@example.com谢谢")
     assert "z***@example.com" in out
     assert "zhangsan@example.com" not in out
+
+
+def test_long_non_email_does_not_quadratically_backtrack():
+    code = (
+        "from app.core.log_setup import redact_log_text; "
+        "raw='x'*220000; assert redact_log_text(raw)==raw; "
+        "assert redact_log_text('hello+test@example.com')=='h***@example.com'"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True, timeout=5,
+                   cwd=str(__import__('pathlib').Path(__file__).resolve().parents[1]))
 
 
 # ============================================

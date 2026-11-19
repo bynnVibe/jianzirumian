@@ -19,6 +19,7 @@ from app.core.llm import LLMFactory
 from app.core.vector_store import vector_store
 from app.models.schemas import SystemConfig
 from app.services.config_manager import effective_provider_config, runtime_config
+from app.services.gateway.semantic_cache import semantic_cache_enabled, effective_threshold as semantic_cache_threshold
 from app.services.web_search import WebSearchFactory
 
 logger = logging.getLogger("jianziruyang.config")
@@ -219,6 +220,10 @@ async def get_full_config():
             "connected": redis_connected,
             "ttl": settings.FILE_CACHE_TTL,
             "max_mb": settings.FILE_CACHE_MAX_MB,
+        },
+        "semantic_cache": {
+            "enabled": semantic_cache_enabled(),
+            "threshold": semantic_cache_threshold(),
         },
     }
 
@@ -435,6 +440,30 @@ async def save_redis_config(body: dict, _admin: dict = Depends(require_admin)):
         "message": "Redis 配置已保存",
         "url": effective_redis_url(),
         "enabled": effective_file_cache_enabled(),
+    }
+
+
+@router.post("/semantic-cache")
+async def save_semantic_cache_config(body: dict, _admin: dict = Depends(require_admin)):
+    """保存语义缓存配置（仅管理员，全局生效所有用户）：开关 + 命中阈值。"""
+    from app.services.gateway import semantic_cache as sc
+    if "enabled" in body:
+        runtime_config.semantic_cache_enabled = bool(body.get("enabled"))
+    if "threshold" in body:
+        try:
+            t = float(body.get("threshold"))
+        except (TypeError, ValueError):
+            return {"success": False, "message": "阈值需为 0.5-0.99 之间的数字"}
+        if not 0.5 <= t <= 0.99:
+            return {"success": False, "message": "阈值需为 0.5-0.99 之间的数字"}
+        runtime_config.semantic_cache_threshold = t
+    logger.info("语义缓存配置已保存: enabled=%s threshold=%s",
+                sc.semantic_cache_enabled(), sc.effective_threshold())
+    return {
+        "success": True,
+        "message": "语义缓存配置已保存，对所有用户生效",
+        "enabled": sc.semantic_cache_enabled(),
+        "threshold": sc.effective_threshold(),
     }
 
 

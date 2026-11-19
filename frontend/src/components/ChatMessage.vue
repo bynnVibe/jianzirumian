@@ -18,11 +18,11 @@
     <div class="content-area">
       <div class="sender-name">{{ role === 'user' ? '你' : '见字如面' }}
         <span v-if="role === 'assistant' && cacheHit" class="cache-hit-badge"
-              :title="'本回答命中语义缓存，直接回复你之前相似问题的答案（相似度 ' + Math.round((cacheScore || 0) * 100) + '%），未走知识检索'">
+              :title="cacheTitle">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="11" height="11">
             <path d="M13 2L3 14h7l-1 8 10-12h-7l1-8z"/>
           </svg>
-          语义缓存命中<span v-if="cacheScore"> · {{ Math.round(cacheScore * 100) }}%</span>
+          复用已验证答案
         </span>
       </div>
       <!-- 用户发送的附件（图片/文档）回显：点击在新页面预览 -->
@@ -53,6 +53,7 @@
           </span>
         </template>
       </div>
+      <slot name="process" />
       <div class="message-content markdown-content" v-html="renderedContent" @click="onContentClick"></div>
 
       <!-- 用户消息操作：复制 + 编辑重问 -->
@@ -178,28 +179,7 @@
       </div>
 
       <!-- 助手回答的操作：收藏 + 点赞/点踩反馈 -->
-      <div v-if="role === 'assistant' && content" class="message-actions">
-        <button class="btn-bookmark" @click="openBookmarkModal('answer', content, '', {})" title="收藏此回答">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
-            <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/>
-          </svg>
-          收藏回答
-        </button>
-        <template v-if="messageId && canFeedback">
-          <button
-            class="btn-feedback"
-            :class="{ active: localFeedback?.rating === 'like' }"
-            @click="handleLike"
-            title="回答有帮助"
-          >👍</button>
-          <button
-            class="btn-feedback"
-            :class="{ active: localFeedback?.rating === 'dislike' }"
-            @click="handleDislike"
-            title="回答需改进"
-          >👎</button>
-        </template>
-      </div>
+
 
       <!-- 点踩备注输入 -->
       <div v-if="showCommentBox" class="feedback-comment">
@@ -240,12 +220,37 @@
             </div>
             <!-- 展开详细内容 -->
             <div v-if="expandedSearch === idx" class="source-detail">
-              <a :href="result.url" target="_blank" class="search-title">{{ result.title }}</a>
+              <a v-if="safeExternalUrl(result.url)" :href="safeExternalUrl(result.url)" target="_blank" rel="noopener noreferrer" class="search-title">{{ result.title }}</a>
               <div class="source-full-text">{{ cleanSnippet(result.snippet) }}</div>
-              <a v-if="result.url" :href="result.url" target="_blank" class="view-image-link">访问原网页 ↗</a>
+              <a v-if="safeExternalUrl(result.url)" :href="safeExternalUrl(result.url)" target="_blank" rel="noopener noreferrer" class="view-image-link">访问原网页 ↗</a>
             </div>
           </div>
         </div>
+      </div>
+      <div v-if="toolSources.length" class="search-section">
+        <button type="button" class="sources-title sources-disclosure" :aria-expanded="toolSourcesOpen" @click="toolSourcesOpen = !toolSourcesOpen">
+          <span>工具数据来源 ({{ toolSources.length }})</span><span class="source-toggle">{{ toolSourcesOpen ? '收起 ▴' : '展开 ▾' }}</span>
+        </button>
+        <div v-if="toolSourcesOpen" class="sources-list">
+          <div v-for="source in toolSources" :key="source.index" class="source-item tool-source" :ref="el => setSourceRef('t-' + source.index, el)">
+            <span class="source-badge">工具来源 {{ source.index }}</span>
+            <a v-if="safeExternalUrl(source.url)" :href="safeExternalUrl(source.url)" target="_blank" rel="noopener noreferrer">{{ source.title }}</a>
+            <p v-if="source.entity">适用实体：{{ typeof source.entity === 'object' ? JSON.stringify(source.entity) : source.entity }}<span v-if="source.unit"> · 单位 {{ source.unit }}</span></p>
+            <p v-if="source.valid_at">数据适用时刻：{{ source.valid_at }}<span v-if="source.timezone"> · {{ source.timezone }}</span></p>
+            <p>观测时间：{{ source.observed_at || '未提供' }} · 发布时间：{{ source.published_at || '未提供' }}</p>
+            <p>获取时间：{{ source.fetched_at || '未知' }}（不代表观测时间）</p>
+          </div>
+        </div>
+      </div>
+      <slot name="cards" />
+      <div v-if="role === 'assistant' && content" class="message-actions">
+        <button class="btn-action" @click="copyText">{{ copied ? '已复制' : '复制回答' }}</button>
+        <button v-if="canRefresh" class="btn-action" :disabled="busy" @click="emit('refresh')" title="重新读取数据，不自动重放有副作用的操作">重新获取最新答案</button>
+        <button class="btn-bookmark" @click="openBookmarkModal('answer', content, '', {})">收藏回答</button>
+        <template v-if="messageId && canFeedback">
+          <button class="btn-feedback" :class="{ active: localFeedback?.rating === 'like' }" @click="handleLike" title="回答有帮助">👍</button>
+          <button class="btn-feedback" :class="{ active: localFeedback?.rating === 'dislike' }" @click="handleDislike" title="回答需改进">👎</button>
+        </template>
       </div>
     </div>
   </div>
@@ -358,7 +363,7 @@
 <script setup>
 import { ref, reactive, computed, watch, nextTick } from 'vue'
 import MarkdownIt from 'markdown-it'
-import { groupKnowledgeSources } from '@/utils/chatStream'
+import { groupKnowledgeSources, configureChatMarkdown } from '@/utils/chatStream'
 import { createBookmark, getImageUrl as buildImageUrl, getAttachmentFileUrl } from '@/api'
 import UrlSource from '@/components/UrlSource.vue'
 
@@ -367,15 +372,31 @@ const props = defineProps({
   content: { type: String, default: '' },
   sources: { type: Array, default: () => [] },
   searchResults: { type: Array, default: () => [] },
+  toolSources: { type: Array, default: () => [] },
   attachments: { type: Array, default: () => [] },
   messageId: { type: String, default: '' },
   feedback: { type: Object, default: null },
   canFeedback: { type: Boolean, default: false },
   cacheHit: { type: Boolean, default: false },
   cacheScore: { type: Number, default: 0 },
+  cacheInfo: { type: Object, default: () => ({}) },
+  canRefresh: { type: Boolean, default: false },
+  busy: { type: Boolean, default: false },
 })
 
-const emit = defineEmits(['reask', 'feedback'])
+const emit = defineEmits(['reask', 'feedback', 'refresh'])
+const toolSourcesOpen = ref(false)
+function safeExternalUrl(value) {
+  try {
+    const url = new URL(value)
+    return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password ? url.href : ''
+  } catch { return '' }
+}
+const cacheTitle = computed(() => {
+  const c = props.cacheInfo
+  const date = value => value ? new Date(value).toLocaleString() : '未知'
+  return `已核对上下文与证据；知识问答仍执行了检索。生成：${date(c.created_at)}；到期：${date(c.expires_at)}。相似度 ${Math.round((c.score || props.cacheScore || 0) * 100)}%，不代表正确率。`
+})
 
 // ---- 用户消息：复制 ----
 const copied = ref(false)
@@ -440,29 +461,13 @@ function setSourceRef(key, el) {
   else sourceEls.delete(key)
 }
 
-const md = new MarkdownIt({
+const md = configureChatMarkdown(new MarkdownIt({
   html: false,
   linkify: true,
   breaks: true,
-})
+}))
 
-const renderedContent = computed(() => {
-  // 先渲染 Markdown，再注入引用标记样式
-  // （md 配置了 html:false，若渲染前注入 <span> 会被转义成源码显示）
-  let html = md.render(props.content || '')
-  // 表格包裹横向滚动容器，窄屏不溢出（样式见 style.css .md-table-wrap）
-  html = html
-    .replace(/<table>/g, '<div class="md-table-wrap"><table>')
-    .replace(/<\/table>/g, '</table></div>')
-  html = html.replace(
-    /\[(网络来源|来源)\s*(\d+)\]/g,
-    (m, type, num) => {
-      const kind = type === '网络来源' ? 'web' : 'knowledge'
-      return `<span class="source-citation" data-cite-kind="${kind}" data-cite-num="${num}" title="点击查看对应来源">[${type} ${num}]</span>`
-    }
-  )
-  return html
-})
+const renderedContent = computed(() => md.render(props.content || ''))
 
 // 点击回答中的引用标记 → 展开并滚动定位到下方对应来源（事件委托，v-html 内容无法直接绑事件）
 function onContentClick(e) {
@@ -479,6 +484,10 @@ async function jumpToSource(kind, num) {
     searchOpen.value = true
     expandedSearch.value = idx
     key = 'w-' + idx
+  } else if (kind === 'tool') {
+    if (!props.toolSources.some(source => source.index === num)) return
+    toolSourcesOpen.value = true
+    key = 't-' + num
   } else {
     const doc = documentSources.value.find(source => source.citation_indices.includes(num))
     if (!doc) return
@@ -701,6 +710,10 @@ async function saveBookmark() {
 </script>
 
 <style scoped>
+.tool-source { padding: 10px; font-size: 12px; overflow-wrap: anywhere; }
+.tool-source p { margin: 5px 0; color: #746652; }
+.tool-source a { color: #765737; }
+
 .message {
   display: flex;
   gap: 12px;

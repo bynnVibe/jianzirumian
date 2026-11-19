@@ -22,8 +22,16 @@ _RATE_LIMIT_HINTS = (
 
 
 def is_rate_limit_error(e: BaseException) -> bool:
-    """判断异常是否为限流/配额类（429），此类错误退避重试或切换模型后通常可恢复。"""
+    """判断异常是否为限流/配额类（429），此类错误退避重试或切换模型后通常可恢复。
+
+    网关层 502/503/504（上游故障切换已耗尽，消息可能包裹上游 429 文本）不算
+    同模型限流：业务层再重试只会把请求放大到已熔断的主路由，故返回 False。
+    """
+    if getattr(e, "status_code", None) in (502, 503, 504):
+        return False
     low = str(e).lower()
+    if "所有上游" in low or "上游返回" in low:
+        return False
     return any(h in low for h in _RATE_LIMIT_HINTS)
 
 

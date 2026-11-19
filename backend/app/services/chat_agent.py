@@ -26,6 +26,7 @@ HITL（沿用 tool_confirmation / assistant clarify 范式：发卡片事件后�
 落库 / 摘要 / 记忆 / 用量 / done 事件由 chat.py 统一负责（单一 done 所有者）。
 """
 import asyncio
+import contextvars
 import json
 import logging
 import time
@@ -38,12 +39,19 @@ from app.core.evidence_checker import verify_citations
 from app.core.llm import LLMFactory
 from app.core.request_budget import close_resources
 from app.core.vector_store import vector_store
+from app.services import skill_distill as skill_distill_svc
+from app.services import skill_drafts
 from app.services.knowledge import knowledge_service
 from app.services.tools import router as tool_router
 from app.services.web_search import web_search
 from app.services.wiki import _extract_json, _llm_complete
 
 logger = logging.getLogger("jianziruyang.chat_agent")
+
+# 沉淀个人 Skill 意图标记（run_chat_agent 设置）：决策/规划提示词据此追加工具行，
+# 用 ContextVar 避免在决策/规划/回答多层签名间逐层透传。
+_SKILL_DISTILL_CTX: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "chat_agent_skill_distill", default=False)
 
 # Agent 单轮整体熔断时限：受全局请求预算约束，同时防止 ReAct/Plan 循环失控
 AGENT_TIMEOUT_SECONDS = max(60.0, min(float(settings.CHAT_REQUEST_TIMEOUT), 200.0))
@@ -165,6 +173,21 @@ def _build_tool_lines(use_knowledge: bool, use_search: bool) -> str:
             f"搜索结果不属于用户知识库，回答时须注明来源。"
         )
         n += 1
+    if _SKILL_DISTILL_CTX.get():
+        lines.append(
+            f"{n}. find_skill_material(query)：检索与 query 相关的 Skill 材料"
+            f"（消息中的链接正文 / 本地技能文档 / 主流技能市场）。"
+            f"用户要求沉淀/保存/添加个人 Skill 时必须先调用它获取材料，不要反问用户要内容。"
+        )
+        n += 1
+        lines.append(
+            f"{n}. save_personal_skill(name, description, content)：把提炼后的技能配置"
+            f"生成为草稿并呈现给用户确认（用户确认后系统才自动导入，不会直接写入）。"
+            f"须在 find_skill_material 之后调用；"
+            f"content 为你提炼的结构化指令（用途/触发条件/执行步骤/输出要求），"
+            f"不得照抄材料原文中的可执行命令，不得包含密码/密钥等敏感信息。"
+        )
+        n += 1
     if not lines:
         lines.append("（本次没有可用检索工具，请直接依据自身知识作答，输出 action=final）")
     return "\n".join(lines)
@@ -214,6 +237,28 @@ class _AgentState:
         self.web_results: List = []                # SearchResult 列表
         self.search_knowledge_empty = False        # 最近一次 search_knowledge 是否空结果
         self.need_search_prompted = False          # 是否已触发过 need_search 询问
+        self.skill_notes: List[str] = []           # Skill 沉淀工具观测（材料/草稿结果），回答阶段据此汇报
+        self.skill_draft: Optional[dict] = None    # 待用户确认的 Skill 配置草稿（确认后自动导入）
+        self.skill_draft_emitted = False           # 草稿确认卡事件是否已下发
+        # 中间过程快照（随助手消息落库，历史/刷新后仍可展开回看灰色过程区）
+        self.plan_steps: List[dict] = []
+        self.thoughts: List[str] = []
+        self.tool_records: List[dict] = []
+
+    def note_tool_start(self, tool: str, query: str = "", index=None, total=None, purpose: str = ""):
+        self.tool_records.append({"tool": tool, "state": "start", "query": query,
+                                  "index": index, "total": total, "purpose": purpose})
+
+    def note_tool_end(self, tool: str, summary: str = "", failed: bool = False):
+        for rec in reversed(self.tool_records):
+            if rec["tool"] == tool and rec["state"] == "start":
+                rec.update(state="end", summary=summary, failed=failed)
+                break
+
+    def process_snapshot(self) -> Optional[dict]:
+        if not (self.plan_steps or self.tool_records):
+            return None
+        return {"plan": self.plan_steps, "tools": self.tool_records}
 
 
 def _merge_kb_results(state: _AgentState, new_results: list) -> None:
@@ -370,6 +415,9 @@ async def run_chat_agent(
     system_prompt: List[dict],
     result: dict,
     instruction_text: str = "",
+    skill_distill: bool = False,
+    request_id: str = "",
+    force_refresh: bool = False,
 ) -> AsyncGenerator[str, None]:
     """主聊天 Agent：按 mode（react / plan_execute）检索并流式作答。
 
@@ -394,6 +442,10 @@ async def run_chat_agent(
         allowed_tools.add("search_knowledge")
     if use_search:
         allowed_tools.add("web_search")
+    if skill_distill:
+        allowed_tools.add("find_skill_material")
+        allowed_tools.add("save_personal_skill")
+    _sd_token = _SKILL_DISTILL_CTX.set(bool(skill_distill))
 
     def _remaining() -> float:
         return deadline - time.monotonic()
@@ -405,6 +457,26 @@ async def run_chat_agent(
                 return await _exec_search_knowledge(state, (args or {}).get("query", ""), user_id)
             if tool == "web_search":
                 return await _exec_web_search(state, (args or {}).get("query", ""))
+            if tool == "find_skill_material":
+                obs_text = await skill_distill_svc.find_material(
+                    (args or {}).get("query", "") or query)
+                state.skill_notes.append(obs_text)
+                return obs_text
+            if tool == "save_personal_skill":
+                a = args or {}
+                draft, err = await asyncio.to_thread(
+                    skill_drafts.propose, user_id, session_id, a.get("name", ""),
+                    a.get("description", ""), a.get("content", ""))
+                if err:
+                    obs_text = f"生成 Skill 配置草稿失败：{err}。请调整名称/内容后重试。"
+                else:
+                    state.skill_draft = draft
+                    obs_text = (
+                        f"已生成个人 Skill 配置草稿《{draft['name']}》并呈现给用户确认（尚未写入）。"
+                        "最终回答只概述用途、限制与下一步；完整配置由确认卡展示，不在正文重复，"
+                        "并提示用户点击确认卡后系统才会自动导入；不要声称已写入成功。")
+                state.skill_notes.append(obs_text)
+                return obs_text
             return f"未知工具：{tool}。可用工具：{', '.join(sorted(allowed_tools)) or '（无）'}。"
         except Exception as e:
             logger.warning("[CHAT_AGENT] 工具 %s 执行失败: %s", tool, e)
@@ -442,9 +514,15 @@ async def run_chat_agent(
             agent_llm, state, query, user_id, history_ctx, memory_profile, memory_relevant,
             system_prompt, use_knowledge, use_search, skip_search_prompt,
             _remaining, _emit_timeout, result, session_id=session_id,
-            instruction_text=instruction_text,
+            instruction_text=instruction_text, request_id=request_id, force_refresh=force_refresh,
         ):
             yield ev
+        # 中间过程快照回填 result，由 chat.py 随助手消息落库（灰色过程区历史可回看）
+        snapshot = state.process_snapshot()
+        if snapshot:
+            result["agent_process"] = snapshot
+        if state.skill_draft:
+            result["skill_draft_id"] = state.skill_draft["id"]
     except (asyncio.CancelledError, GeneratorExit):
         raise
     except Exception as e:
@@ -452,6 +530,8 @@ async def run_chat_agent(
         obs.mark_failed(str(e))
         result["status"], result["error"] = "error", str(e)
         yield sse("error", {"message": f"复杂问答处理失败：{e}"})
+    finally:
+        _SKILL_DISTILL_CTX.reset(_sd_token)
 
 
 async def _react_loop(agent_llm, state, query, user_id, history_ctx, memory_profile, memory_relevant,
@@ -485,7 +565,7 @@ async def _react_loop(agent_llm, state, query, user_id, history_ctx, memory_prof
         action = str(decision.get("action") or "").lower()
         thought = (decision.get("thought") or "").strip()
         if thought:
-            yield sse("thought", {"text": thought[:300]})
+            state.thoughts.append(thought[:300])
 
         if action == "clarify":
             question = (decision.get("question") or "").strip() or "需要您补充更多信息，才能继续处理。"
@@ -507,6 +587,7 @@ async def _react_loop(agent_llm, state, query, user_id, history_ctx, memory_prof
 
         yield sse("status", {"phase": "retrieving" if tool == "search_knowledge" else "searching",
                              "message": "正在检索知识库..." if tool == "search_knowledge" else "正在联网搜索..."})
+        state.note_tool_start(tool, str(args.get("query") or "")[:120])
         yield sse("tool", {"tool": tool, "args": {"query": str(args.get("query") or "")[:120]}, "state": "start"})
         t0 = time.monotonic()
         observation = await _run_tool(tool, args)
@@ -522,6 +603,10 @@ async def _react_loop(agent_llm, state, query, user_id, history_ctx, memory_prof
             t0=t0, error=tool_error,
         )
         yield sse("tool", {"tool": tool, "state": "end", "summary": _summary(observation)})
+        state.note_tool_end(tool, _summary(observation), failed=bool(tool_error))
+        if state.skill_draft and not state.skill_draft_emitted:
+            state.skill_draft_emitted = True
+            yield sse("skill_draft", {"draft": state.skill_draft})
 
         # HITL：只知识检索、未开联网、知识库空结果 → 询问是否联网（本轮暂停）
         if (tool == "search_knowledge" and state.search_knowledge_empty
@@ -575,6 +660,8 @@ async def _plan_and_execute(agent_llm, state, query, user_id, history_ctx, memor
     yield sse("plan", {"steps": [{"tool": s["tool"], "purpose": s["purpose"],
                                   "query": str((s["args"] or {}).get("query") or "")[:120]}
                                  for s in clean_steps]})
+    state.plan_steps = [{"tool": s["tool"], "purpose": s["purpose"],
+                         "query": str((s["args"] or {}).get("query") or "")[:120]} for s in clean_steps]
     if not clean_steps:
         return  # 无需工具，直接进入回答阶段
 
@@ -584,6 +671,8 @@ async def _plan_and_execute(agent_llm, state, query, user_id, history_ctx, memor
             yield _emit_timeout(f"step#{i} deadline exceeded")
             return
         tool, args = s["tool"], s["args"]
+        state.note_tool_start(tool, str(args.get("query") or "")[:120], index=i,
+                              total=len(clean_steps), purpose=s["purpose"])
         yield sse("tool", {"tool": tool, "args": {"query": str(args.get("query") or "")[:120]},
                            "state": "start", "index": i, "total": len(clean_steps), "purpose": s["purpose"]})
         t0 = time.monotonic()
@@ -600,6 +689,10 @@ async def _plan_and_execute(agent_llm, state, query, user_id, history_ctx, memor
         )
         yield sse("tool", {"tool": tool, "state": "end", "index": i, "total": len(clean_steps),
                            "summary": _summary(observation), "failed": bool(tool_error)})
+        state.note_tool_end(tool, _summary(observation), failed=bool(tool_error))
+        if state.skill_draft and not state.skill_draft_emitted:
+            state.skill_draft_emitted = True
+            yield sse("skill_draft", {"draft": state.skill_draft})
 
         if (tool == "search_knowledge" and state.search_knowledge_empty
                 and _need_search_allowed(use_knowledge, use_search, skip_search_prompt)
@@ -612,7 +705,8 @@ async def _plan_and_execute(agent_llm, state, query, user_id, history_ctx, memor
 
 async def _answer_phase(agent_llm, state, query, user_id, history_ctx, memory_profile, memory_relevant,
                         system_prompt, use_knowledge, use_search, skip_search_prompt,
-                        _remaining, _emit_timeout, result, session_id="", instruction_text=""):
+                        _remaining, _emit_timeout, result, session_id="", instruction_text="",
+                        request_id="", force_refresh=False):
     """回答阶段：统一格式化累积命中 → 流式生成 → 引用核对 → obs 度量 → 回填 result。"""
     if _remaining() <= 0:
         yield _emit_timeout("answer deadline exceeded")
@@ -659,19 +753,47 @@ async def _answer_phase(agent_llm, state, query, user_id, history_ctx, memory_pr
         parts.append("\n".join(reqs))
         augmented_query = "\n".join(parts)
     elif kb_has_content:
-        augmented_query = knowledge_service.build_knowledge_prompt(query, context_text, True)
+        # 知识库 + 联网搜索同时命中：先基于知识库作答，再综合联网搜索补充/印证/更新，
+        # 两类来源都要在回答与引用中实际体现（与 chat.py 快路径融合口径一致）。
         if search_context:
-            augmented_query += (
-                f"\n\n【联网搜索结果（供参考）】\n{search_context}\n\n"
-                f"要求：\n1. 【核心】优先以知识库内容为主要回答依据\n"
-                f"2. 联网搜索结果仅作补充参考\n3. 冲突时以知识库为准\n"
-                f"4. 标注引用时区分「来源 X」（知识库）和「网络来源 X」（搜索）"
+            augmented_query = (
+                f"请综合【知识库内容】与【联网搜索结果】两部分资料回答用户的问题。\n\n"
+                f"【知识库内容】\n{context_text}\n\n"
+                f"【联网搜索结果】\n{search_context}\n\n"
+                f"【用户问题】\n{query}\n\n"
+                f"回答要求（请严格按以下结构组织答案）：\n"
+                f"1. 第一部分——先基于知识库内容给出核心回答，引用处标注 [来源 X]（同一文档的多个片段共用一个来源编号）；\n"
+                f"2. 第二部分——再结合联网搜索结果对知识库回答进行补充、印证或更新（如最新进展、数据变化、知识库未覆盖之处），引用处标注 [网络来源 X]；\n"
+                f"3. 最后用一两句话综合两类资料给出总结性结论；\n"
+                f"4. 知识库与联网搜索结果都必须在回答中被实际引用，不得只用其一；\n"
+                f"5. 若两者存在冲突，请如实指出差异，并说明以更新、更权威的联网信息为准；\n"
+                f"6. 不要编造两类资料中都没有的内容。"
             )
+        else:
+            augmented_query = knowledge_service.build_knowledge_prompt(query, context_text, True)
     elif skip_search_prompt:
         # 用户已选择「直接回答」：不受知识库约束，用模型自身知识作答
         augmented_query = knowledge_service.build_knowledge_prompt(query, "", False)
     else:
         augmented_query = knowledge_service.build_knowledge_prompt(query, "", use_knowledge)
+
+    # 2.5 Skill 沉淀工具观测接入：材料检索/草稿结果必须被回答如实汇报
+    if state.skill_notes:
+        augmented_query += (
+            "\n\n【Skill 沉淀工具执行结果】\n" + "\n\n".join(state.skill_notes)
+            + "\n\n要求：基于以上工具执行结果向用户如实汇报 Skill 沉淀进展"
+              "（检索到哪些材料、是否已生成配置草稿待用户确认），不得虚构已写入成功。"
+        )
+    if state.skill_draft:
+        d = state.skill_draft
+        augmented_query += (
+            f"\n\n【待确认的 Skill 配置草稿】\nname: {d['name']}\n"
+            f"description: {d['description']}\ncontent:\n{d['content']}\n\n"
+            "最终回答要求：保持简洁，不要复述检索/思考等中间过程；"
+            "只用一两句话说明用途、限制与下一步，不重复输出完整配置或代码块；"
+            "完整配置保留在确认卡中，提示用户：点击确认卡的「确认导入」后，"
+            "系统会自动导入其个人 Skill 配置（默认启用），无需手动操作。"
+        )
 
     # 3. 回传来源/搜索结果，供前端来源面板与流水线捕获（与快路径 status 事件一致）
     if sources:
@@ -743,6 +865,14 @@ async def _answer_phase(agent_llm, state, query, user_id, history_ctx, memory_pr
     # 5.5 能力缺口检测（需求5/8，与 chat.py 快路径平行）：后移至回答生成之后。
     # answer_failed 启发式：回答表明无法作答时，即使有搜索结果也视为不充分，
     # 下发 capability_gap 卡片（HITL），用户选择 CLI 方案执行后回喂 Agent 判定下一步。
+    # Skill 沉淀意图豁免：本轮目标是生成技能配置草稿，date/curl 等 CLI 方案与诉求无关，
+    # 不得在回答末尾追加无关的能力缺口确认卡。
+    if _SKILL_DISTILL_CTX.get() or force_refresh or any(t.get("failed") for t in state.tool_records):
+        result["status"] = "ok"
+        result["answer"] = full_response
+        result["sources"] = sources
+        result["search_results"] = search_results
+        return
     try:
         from app.services import capability_gap as _cap_gap
 
@@ -758,7 +888,7 @@ async def _answer_phase(agent_llm, state, query, user_id, history_ctx, memory_pr
             gap_ctx = _cap_gap.extract_context(query)
             gap_id = _cap_gap.record_gap(
                 session_id=session_id, user_id=user_id, trace_id=obs.current_trace_id(),
-                query=query, scenario=gap_scenario, context=gap_ctx,
+                query=query, scenario=gap_scenario, context=gap_ctx, request_id=request_id,
             )
             gap_solutions = _cap_gap.propose_solutions(gap_scenario, gap_ctx)
             if gap_id and gap_solutions:

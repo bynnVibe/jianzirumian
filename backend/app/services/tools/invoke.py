@@ -14,6 +14,8 @@ invoke_tool()，使所有工具调用（检索 / 附件 / CLI）都经过同一�
 invoke_tool 绝不抛出业务异常（除取消/生成器退出），所有失败都收敛为 ToolResult，
 与既有 chat_agent「异常转观测，静默降级」的约定一致。
 """
+import hashlib
+import json
 import logging
 import time
 from typing import Any, Dict, Optional
@@ -73,9 +75,17 @@ async def invoke_tool(
     Returns:
         ToolResult：成功/失败/被拦截都收敛为 ToolResult，绝不抛业务异常。
     """
+    if args is not None and not isinstance(args, dict):
+        return ToolResult(name, False, error="schema_invalid", summary="工具参数必须为 JSON 对象")
     args = dict(args or {})
     t0 = time.monotonic()
     tool = get_tool(name)
+    if isinstance(name, str) and name.startswith("pt_"):
+        try:
+            from app.services.personal_tools import resolve
+            tool = resolve(ctx.user_id, name, ctx.tool_test_id)
+        except Exception:
+            tool = None
 
     # 1. 未知工具：直接拒绝并记录
     if tool is None:
@@ -88,6 +98,9 @@ async def invoke_tool(
         return result
 
     schema_tokens = schema_token_estimate([name]) if record_obs else 0
+    if tool.namespace == "personal" and record_obs:
+        from app.services.personal_tool_specs import canonical
+        schema_tokens = len(canonical(tool.to_function_schema())) // 3 + 1
 
     # 2. 调用前约束钩子链（req3）
     opts: Dict[str, Any] = {"confirmed": confirmed, "allow_high_risk": allow_high_risk}
@@ -141,7 +154,9 @@ def _record(name: str, namespace: str, ctx: ToolContext, args: dict,
             session_id=ctx.session_id,
             trace_id=ctx.trace_id,
             routed_by=routed_by,
-            args=args,
+            args=({"input_hash": hashlib.sha256(json.dumps(
+                args, sort_keys=True, ensure_ascii=False, default=str).encode()).hexdigest()}
+                if name.startswith("pt_") else args),
             risk_level=(get_tool(name).risk_level if get_tool(name) else "low"),
             schema_valid=(pre.schema_valid if pre else True),
             permission_ok=(pre.permission_ok if pre else True),

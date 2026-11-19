@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Uplo
 from fastapi.responses import FileResponse, JSONResponse
 from app.core.request_budget import ClosingStreamingResponse as StreamingResponse
 
-from app.api.deps import get_current_user, get_optional_user
+from app.api.deps import get_current_user, get_optional_user, require_admin
 from app.config import settings
 from app.core import db
 from app.core import observability as obs
@@ -28,6 +28,8 @@ from app.models.schemas import (
 )
 from app.services.chat import chat_service, Message
 from app.services import chat_actions
+from app.services import skill_drafts
+from app.services.chat_commands import parse_command
 from app.services.guest_limiter import guest_limiter
 from app.services.tool_orchestrator import DOC_EXTS, IMAGE_EXTS, detect_kind
 
@@ -98,6 +100,12 @@ async def send_message(
 
     user_id = user["id"] if user else "guest"
 
+    try:
+        parsed_command = parse_command(body.query, body.command)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    if parsed_command.name and user_id == "guest":
+        raise HTTPException(403, "请登录后添加个人能力")
     session_id = body.session_id
 
     # 如果未指定 session_id, 自动创建新会话；若指定则由 ChatService 按需加载校验
@@ -110,7 +118,9 @@ async def send_message(
             session_id=session_id, query=body.query, use_knowledge=body.use_knowledge,
             use_search=body.use_search, llm_provider=body.llm_provider, user_id=user_id,
             rule_id=body.rule_id or "", model=body.model or "",
-            skip_search_prompt=body.skip_search_prompt,
+            skip_search_prompt=body.skip_search_prompt, force_refresh=body.force_refresh,
+            command=parsed_command.name,
+            resume_checkpoint_id=body.resume_checkpoint_id or "",
         )) as stream:
             async for event in stream:
                 yield f"{event}\n"
@@ -144,6 +154,8 @@ async def send_message_with_files(
     rule_id: str = Form(""),
     model: str = Form(""),
     skip_search_prompt: bool = Form(False),
+    force_refresh: bool = Form(False),
+    command: str = Form(""),
     files: list[UploadFile] = File(default=[]),
     user: dict | None = Depends(get_optional_user),
 ):
@@ -168,6 +180,14 @@ async def send_message_with_files(
             )
 
     user_id = user["id"] if user else "guest"
+    try:
+        parsed_command = parse_command(message, command)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    if parsed_command.name and user_id == "guest":
+        raise HTTPException(403, "请登录后添加个人能力")
+    if parsed_command.name and any(f.filename for f in files):
+        raise HTTPException(422, "能力添加请使用功能描述或来源链接，附件请单独发送")
 
     if not session_id:
         session = chat_service.create_session(user_id=user_id)
@@ -184,7 +204,8 @@ async def send_message_with_files(
             session_id=session_id, query=message, use_knowledge=use_knowledge,
             use_search=use_search, llm_provider=llm_provider or None,
             user_id=user_id, attachments=attachments, kb_id=kb_id, rule_id=rule_id,
-            model=model, skip_search_prompt=skip_search_prompt,
+            model=model, skip_search_prompt=skip_search_prompt, force_refresh=force_refresh,
+            command=parsed_command.name,
         )) as stream:
             async for event in stream:
                 yield f"{event}\n"
@@ -244,11 +265,16 @@ async def get_chat_history(session_id: str, user: dict = Depends(get_current_use
                     for r in feedback_rows}
 
     actions = chat_actions.history(session_id, user["id"])
+    drafts = skill_drafts.history(session_id, user["id"])
+    from app.services import personal_tools
+    tool_drafts = personal_tools.history(user["id"], session_id)
     messages = []
     for m in session.messages:
         d = m.to_dict()
         d["feedback"] = feedback_map.get(m.message_id)
         d["actions"] = [a for a in actions if a["message_id"] == m.message_id]
+        d["skill_drafts"] = [draft for draft in drafts if draft.get("message_id") == m.message_id]
+        d["tool_drafts"] = [draft for draft in tool_drafts if draft.get("message_id") == m.message_id]
         messages.append(d)
 
     return ChatHistoryResponse(
@@ -256,6 +282,22 @@ async def get_chat_history(session_id: str, user: dict = Depends(get_current_use
         title=session.title,
         messages=messages,
     )
+
+
+@router.post("/stop/{session_id}")
+async def stop_chat_generation(session_id: str, user: Optional[dict] = Depends(get_optional_user)):
+    """停止生成：把取消传播到后端生成任务。
+
+    前端 abort 仅断开 SSE，后端可能仍在上游重试/故障切换中；
+    显式取消会话注册任务才能真正中断（含后台发现等子任务）。
+    """
+    session = chat_service.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    if session.user_id and (not user or session.user_id != user["id"]):
+        raise HTTPException(status_code=404, detail="会话不存在或无权访问")
+    chat_service.cancel_generation(session_id)
+    return {"ok": True}
 
 
 @router.delete("/history/{session_id}")
@@ -266,6 +308,9 @@ async def clear_chat_history(session_id: str, user: dict = Depends(get_current_u
         raise HTTPException(status_code=404, detail="会话不存在或无权访问")
     chat_service.cancel_generation(session_id)
     chat_actions.invalidate_session(session_id)
+    skill_drafts.invalidate_session(session_id)
+    from app.services import personal_tools
+    personal_tools.invalidate_session(session_id)
     session.messages = []
     db.execute("DELETE FROM chat_messages WHERE session_id = ?", (session_id,))
     db.execute("DELETE FROM chat_session_summaries WHERE session_id = ?", (session_id,))
@@ -450,8 +495,8 @@ async def get_semantic_cache(limit: int = 50, scope: str = "all",
 
 
 @router.post("/cache/toggle")
-async def toggle_semantic_cache(request: Request, user: dict = Depends(get_current_user)):
-    """开/关语义缓存（运行时覆盖，写入 runtime_config）。"""
+async def toggle_semantic_cache(request: Request, user: dict = Depends(require_admin)):
+    """开/关语义缓存（整改1：统一收口管理员，全局生效所有用户；系统设置页为主入口）。"""
     from app.services.gateway import semantic_cache
     from app.services.config_manager import runtime_config
     try:
@@ -478,3 +523,20 @@ async def delete_semantic_cache_entry(entry_id: str, user: dict = Depends(get_cu
     if not semantic_cache.delete_entry(user["id"], entry_id):
         raise HTTPException(status_code=404, detail="缓存条目不存在或无权删除")
     return {"success": True, "message": "缓存条目已删除"}
+
+
+# ---- 整改4：中途停止任务 checkpoint（是否继续 / 软删除 48h） ----
+@router.get("/checkpoints")
+async def list_checkpoints(session_id: str, user: dict = Depends(get_current_user)):
+    """当前会话待处理的 checkpoint（界面「是否继续」条数据源）。"""
+    from app.services import chat_checkpoint
+    return {"success": True, "checkpoints": chat_checkpoint.list_pending(session_id, user["id"])}
+
+
+@router.post("/checkpoints/{checkpoint_id}/abandon")
+async def abandon_checkpoint(checkpoint_id: str, user: dict = Depends(get_current_user)):
+    """不继续：软删除 checkpoint（缓存保留 48h，记录写记忆与日志）。"""
+    from app.services import chat_checkpoint
+    if not chat_checkpoint.abandon(checkpoint_id, user["id"]):
+        raise HTTPException(status_code=404, detail="checkpoint 不存在或已处理")
+    return {"success": True, "message": "已放弃该任务，记录保留 48 小时"}

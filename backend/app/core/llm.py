@@ -18,6 +18,7 @@ from openai import AsyncOpenAI
 from app.config import settings
 from app.core import observability as agent_obs
 from app.core.request_budget import close_resources
+from app.core.tool_stream import ToolCallAccumulator, ToolModelUnavailable, ToolProtocolError
 from app.services.config_manager import effective_provider_config, runtime_config
 
 logger = logging.getLogger("jianziruyang.llm")
@@ -94,10 +95,10 @@ def _get_openai_client(base_url: str, api_key: str, model: str) -> AsyncOpenAI:
     if client is None:
         if len(_OPENAI_CLIENT_CACHE) >= 16:
             _OPENAI_CLIENT_CACHE.clear()
-        # max_retries=1：限流场景下 SDK 内置重试只会放大请求量，
-        # 业务层已有降级（非流式兜底 / OpenRouter 免费模型切换）
+        # max_retries=0：重试统一由业务层 _retry_on_rate_limit 与网关故障切换治理；
+        # SDK 内置重试只会在主备切换/熔断期间放大请求量（重试风暴历史教训）
         client = AsyncOpenAI(
-            base_url=base_url, api_key=api_key, timeout=_LLM_TIMEOUT, max_retries=1,
+            base_url=base_url, api_key=api_key, timeout=_LLM_TIMEOUT, max_retries=0,
         )
         _OPENAI_CLIENT_CACHE[key] = client
     return client
@@ -156,6 +157,12 @@ async def _retry_on_rate_limit(factory, max_attempts: int = 3):
 
 class BaseLLM(ABC):
     """LLM 基类"""
+
+    supports_tools = False
+
+    async def chat_tools(self, messages, tools, *, tool_choice="auto", stream=True):
+        raise ToolModelUnavailable("当前模型未配置原生 Function Calling 能力")
+        yield  # 保持异步生成器协议
 
     @abstractmethod
     async def chat(
@@ -229,12 +236,14 @@ class OpenAICompatibleLLM(BaseLLM):
     """OpenAI 兼容 API（DeepSeek / 通义千问 / OpenAI 等）"""
 
     def __init__(self, base_url: str = None, api_key: str = None, model: str = None,
-                 extra_body: dict = None):
+                 extra_body: dict = None, supports_tools: bool = False):
+        self.supports_tools = supports_tools
         self.base_url = (base_url or settings.API_BASE_URL).rstrip("/")
         self.api_key = api_key or settings.API_KEY
         self.model = model or settings.API_MODEL
         # extra_body：附加到请求体的字段（网关选路提示 _gw_role/_gw_channel_id/_gw_user_id）
         self.extra_body = extra_body or None
+        self.cache_info = {}
 
     async def chat(
         self,
@@ -242,6 +251,7 @@ class OpenAICompatibleLLM(BaseLLM):
         stream: bool = False,
     ) -> AsyncGenerator[str, None]:
         client = _get_openai_client(self.base_url, self.api_key, self.model)
+        self.cache_info = {}
 
         if stream:
             finished = False
@@ -259,6 +269,9 @@ class OpenAICompatibleLLM(BaseLLM):
                 ))
                 async for chunk in response:
                     _report_openai_usage(chunk)
+                    cache_info = (getattr(chunk, "model_extra", None) or {}).get("_gw_cache_info")
+                    if isinstance(cache_info, dict):
+                        self.cache_info = cache_info
                     if not chunk.choices:
                         continue
                     choice = chunk.choices[0]
@@ -299,16 +312,73 @@ class OpenAICompatibleLLM(BaseLLM):
                 extra_body=self.extra_body,
             ))
             _report_openai_usage(response)
+            self.cache_info = (getattr(response, "model_extra", None) or {}).get("_gw_cache_info") or {}
             if not response.choices:
                 raise ValueError("LLM 返回无 choices")
             yield AnswerTextFilter().feed(response.choices[0].message.content or "")
+
+    async def chat_tools(self, messages, tools, *, tool_choice="auto", stream=True):
+        """结构化通道，与既有文本 chat 兼容；仅 done 事件携带可执行的完整调用。"""
+        from app.core.json_schema import checked_schema
+        if not self.supports_tools:
+            raise ToolModelUnavailable("当前模型未配置原生 Function Calling 能力")
+        if not isinstance(tools, list) or not 1 <= len(tools) <= 64:
+            raise ToolProtocolError("工具目录必须为 1 到 64 个已授权函数")
+        names = set()
+        for tool in tools:
+            fn = tool.get("function") or {}
+            if tool.get("type") != "function" or not fn.get("name") or fn["name"] in names:
+                raise ToolProtocolError("工具目录包含无效或重复函数")
+            names.add(fn["name"])
+            checked_schema(fn.get("parameters", {}))
+        self.cache_info = {}
+        extra = {k: v for k, v in (self.extra_body or {}).items() if not k.startswith("_gw_cache_")}
+        client = _get_openai_client(self.base_url, self.api_key, self.model)
+        payload = dict(model=self.model, messages=messages, tools=tools, tool_choice=tool_choice,
+                       stream=stream, extra_body=extra or None)
+        response = None
+        accumulator, answer_filter = ToolCallAccumulator(), AnswerTextFilter()
+        try:
+            response = await _retry_on_rate_limit(lambda: client.chat.completions.create(**payload))
+            if stream:
+                async for chunk in response:
+                    _report_openai_usage(chunk)
+                    if not chunk.choices:
+                        continue
+                    choice = chunk.choices[0]
+                    delta = choice.delta.model_dump(exclude_none=True)
+                    accumulator.add(delta)
+                    content = answer_filter.feed(delta.get("content") or "")
+                    if content:
+                        yield {"type": "text", "text": content}
+                    for part in delta.get("tool_calls") or []:
+                        yield {"type": "tool_call_delta", "delta": part}
+                    if choice.finish_reason:
+                        accumulator.finish(choice.finish_reason)
+            else:
+                _report_openai_usage(response)
+                if not response.choices:
+                    raise ToolProtocolError("模型返回空响应")
+                choice = response.choices[0]
+                message = choice.message.model_dump(exclude_none=True)
+                delta = {"content": message.get("content") or "", "tool_calls": [
+                    {**call, "index": i} for i, call in enumerate(message.get("tool_calls") or [])]}
+                accumulator.add(delta)
+                accumulator.finish(choice.finish_reason)
+                content = answer_filter.feed(delta["content"])
+                if content:
+                    yield {"type": "text", "text": content}
+            yield {"type": "done", "tool_calls": accumulator.completed(),
+                   "finish_reason": accumulator.finish_reason}
+        finally:
+            await close_resources(getattr(response, "response", None))
 
 
 class LLMFactory:
     """LLM 工厂 - 根据配置创建对应的 LLM 实例"""
 
     @staticmethod
-    def _build(provider: str, cfg: dict, extra_body: dict = None) -> "BaseLLM":
+    def _build(provider: str, cfg: dict, extra_body: dict = None, *, supports_tools=False) -> "BaseLLM":
         """按提供商类型与生效参数构造 LLM 实例。"""
         if provider == "ollama":
             return OllamaLLM(base_url=cfg.get("base_url"), model=cfg.get("model"))
@@ -319,6 +389,7 @@ class LLMFactory:
                 api_key=cfg.get("api_key"),
                 model=cfg.get("model"),
                 extra_body=extra_body,
+                supports_tools=supports_tools,
             )
         elif provider in ("openai", "custom"):
             return OpenAICompatibleLLM(
@@ -326,6 +397,7 @@ class LLMFactory:
                 api_key=cfg.get("api_key"),
                 model=cfg.get("model"),
                 extra_body=extra_body,
+                supports_tools=supports_tools,
             )
         else:
             raise ValueError(f"不支持的 LLM 提供商: {provider}")
@@ -362,7 +434,7 @@ class LLMFactory:
 
     @staticmethod
     def create_for_role(role: str, user_id: str = None, rule_id: str = None,
-                        model: str = None) -> BaseLLM:
+                        model: str = None, *, require_tools: bool = False) -> BaseLLM:
         """业务模块统一经模型网关出网：role → 业务路由（规则+模型）→ 代理 /v1。
 
         - 模型解析优先级：调用方显式 model（如聊天页用户选模型）> 业务路由绑定模型
@@ -377,6 +449,8 @@ class LLMFactory:
           保证新部署未配置网关时仍可用。
         """
         if not _gateway_configured():
+            if require_tools:
+                raise ToolModelUnavailable("请先在网关配置支持原生 Function Calling 的模型和业务路由")
             logger.warning("[业务路由] 网关未初始化（无启用上游/规则），role=%s 降级直连旧提供商", role)
             return (LLMFactory.create_assistant_llm() if role == "assistant"
                     else LLMFactory.create())
@@ -420,9 +494,32 @@ class LLMFactory:
                 elif not model_name:
                     model_name = random.choice(rule_models)
         except Exception as e:
+            if require_tools:
+                raise ToolModelUnavailable("原生工具业务路由解析失败，请检查路由配置") from e
             logger.warning("role 路由解析失败（回退网关默认模型）: role=%s err=%s", role, e)
         if not model_name:
             model_name = settings.API_MODEL
+        if require_tools:
+            from app.services.gateway.upstreams import supports_tools as has_tools
+
+            def compatible(candidate_model):
+                chosen_rule, candidates = rule_svc.select_upstreams(
+                    candidate_model, role=role, rule_id=resolved_rule or None, user_id=user_id)
+                return (bool(chosen_rule) and (not resolved_rule or chosen_rule["id"] == resolved_rule)
+                        and any(has_tools(up, candidate_model) for up in candidates))
+
+            try:
+                if not compatible(model_name):
+                    choices = [] if explicit_model or (route.get("model_name") or "").strip() else [
+                        candidate for candidate in rule_models if compatible(candidate)]
+                    if not choices:
+                        raise ToolModelUnavailable(
+                            f"角色 {role} 的模型 {model_name} 未配置原生工具能力，请绑定兼容模型")
+                    model_name = random.choice(choices)
+            except ToolModelUnavailable:
+                raise
+            except Exception as e:
+                raise ToolModelUnavailable("原生工具模型校验失败，请检查业务路由和授权") from e
         # 显性化日志：业务角色 → 路由规则 → 出网模型（代理选路后还会记录命中上游）
         logger.info("[业务路由] role=%s 路由规则=%s 模型=%s",
                     role, f"「{rule_pattern}」" if rule_pattern else "（默认规则/模式匹配）",
@@ -446,6 +543,8 @@ class LLMFactory:
             "api_key": outbound_key,
             "model": model_name,
         }
+        if require_tools:
+            return LLMFactory._build("gateway", cfg, extra_body=extra, supports_tools=True)
         return LLMFactory._build("gateway", cfg, extra_body=extra)
 
 

@@ -10,7 +10,7 @@
       </button>
       <div class="header-title">
         <h1>Skill 配置</h1>
-        <p class="subtitle">管理你自己的技能，并决定是否应用。技能分两类：<b>对话提示</b>（注入回答风格/领域约束）与<b>策略 (playbook)</b>（链接解析抓取规则、正文清洗策略）。新建/导入时会先做安全预审。</p>
+        <p class="subtitle">管理个人技能与工具。对话提示约束回答风格，playbook 提供处理策略，agent_skill 按需加载工作流与资源。工具经确认、配置和样例测试后才能调用。</p>
       </div>
       <button class="btn btn-primary new-btn" @click="openCreate">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
@@ -20,6 +20,67 @@
       </button>
     </header>
 
+    <PersonalToolsPanel />
+    <section class="skill-group suggestion-group" aria-labelledby="suggestion-title">
+      <div class="suggestion-head">
+        <h2 id="suggestion-title" class="group-title">个人能力建议</h2>
+        <button class="btn btn-outline" :disabled="suggestionsLoading || !!suggestionBusy" @click="loadSuggestions">刷新建议与草稿</button>
+      </div>
+      <p class="suggestion-hint">近 30 天至少 3 条独立请求的同类未满足能力，仅本人可见。同类建议展示后 7 天内不重复提示。</p>
+      <p class="suggestion-hint">接受建议将联网查找资料并生成待确认草稿，不改变普通聊天的联网开关，也不会自动安装或标记能力已实现。</p>
+      <p v-if="suggestionError" class="suggestion-error" role="alert">{{ suggestionError }}</p>
+      <p v-if="suggestionsLoading" role="status">正在加载个人建议…</p>
+      <p v-else-if="!suggestions.length && !suggestionDrafts.length && !acceptances.length" class="suggestion-hint">暂无新建议、待确认草稿或待验收能力。也可在对话中主动使用 @skills 或 @tool。</p>
+      <article v-for="item in suggestions" :key="item.id" class="suggestion-item">
+        <h3>{{ item.label }} · {{ item.count }} 条独立请求</h3>
+        <p>{{ item.message }}</p>
+        <p class="suggestion-example">我的请求示例：{{ item.sample_query }}</p>
+        <div class="suggestion-actions">
+          <button class="btn btn-primary" :disabled="!!suggestionBusy" @click="acceptSuggestion(item)">{{ suggestionBusy === item.id ? '正在查找资料…' : '查找资料并生成草稿' }}</button>
+          <button class="btn btn-outline" :disabled="!!suggestionBusy" @click="dismissSuggestion(item)">忽略 7 天</button>
+          <button v-if="suggestionBusy === item.id && discoveryController" class="btn btn-outline" @click="discoveryController.abort()">取消发现</button>
+        </div>
+      </article>
+      <SkillDraftCard v-for="draft in suggestionDrafts" :key="draft.id" :draft="draft" @update="updateSuggestionDraft" />
+      <article v-for="item in acceptances" :key="item.group_key" class="suggestion-item acceptance-item">
+        <h3>待业务验收 · {{ item.name }}</h3>
+        <p class="suggestion-example">原能力需求示例：{{ item.sample_query }}</p>
+        <p v-if="item.previous_decision" class="suggestion-hint">上次未满足原因：{{ item.previous_decision.note }}</p>
+        <p class="suggestion-hint">安装和样例通过不代表需求已解决。请用已启用的 Skill 完成同类真实业务请求，核对实体、时间、单位、输入输出和来源后再确认。</p>
+        <p v-if="!item.evidence.length" class="suggestion-hint">暂无当前版本的有效业务证据。请先完成依赖配置，再返回聊天使用；失败、中断、缓存结果、旧版本和仅样例执行均不能验收。完成后刷新此页。</p>
+        <router-link to="/chat" class="acceptance-link">返回聊天完成业务请求 →</router-link>
+        <details v-for="evidence in item.evidence" :key="evidence.id" class="acceptance-evidence">
+          <summary>{{ evidence.query }} · {{ new Date(evidence.created_at).toLocaleString() }}</summary>
+          <p class="suggestion-hint">当前 Skill 版本：<code>{{ evidence.version }}</code></p>
+          <p>本次完整回答</p>
+          <pre class="acceptance-answer">{{ evidence.answer }}</pre>
+          <ul class="acceptance-executions">
+            <li v-for="(execution, index) in evidence.executions" :key="index">
+              <code>{{ execution.tool_id }} · {{ execution.version.slice(0, 12) }}</code>
+              <span>真实执行完成 · 数据结构验证通过 · {{ execution.requirement_status === 'satisfied' ? '连接器业务约束通过，仍需本人核对' : '需求满足尚未验证，须本人逐项核对' }}</span>
+            </li>
+          </ul>
+          <label class="acceptance-note">
+            具体验收结论（请勿填写密码或密钥）
+            <textarea v-model="acceptanceNotes[evidence.id]" rows="3" maxlength="1000" :disabled="!!suggestionBusy" placeholder="说明原需求的哪些输入、结果及限制已满足，或仍有什么差距（至少 4 字）"></textarea>
+          </label>
+          <label class="acceptance-check"><input v-model="acceptanceChecks[evidence.id]" type="checkbox" :disabled="!!suggestionBusy">我已核对上述真实结果满足原能力需求，不以安装成功或模型自述代替验收。</label>
+          <div class="suggestion-actions">
+            <button class="btn btn-primary" :disabled="!!suggestionBusy || !acceptanceChecks[evidence.id] || (acceptanceNotes[evidence.id] || '').trim().length < 4" @click="submitAcceptance(item, evidence, true)">确认验收，标记已解决</button>
+            <button class="btn btn-outline" :disabled="!!suggestionBusy || (acceptanceNotes[evidence.id] || '').trim().length < 4" @click="submitAcceptance(item, evidence, false)">仍未满足，保留建议</button>
+          </div>
+        </details>
+      </article>
+      <details v-if="acceptanceHistory.length" class="acceptance-evidence">
+        <summary>最近已验收记录 · {{ acceptanceHistory.length }} 项</summary>
+        <p class="suggestion-hint">以下是本人确认的历史结论，不代表后续变更或撤权后的能力仍然可用。</p>
+        <article v-for="entry in acceptanceHistory" :key="entry.id" class="suggestion-item">
+          <h3>{{ entry.name }} · 已解决</h3>
+          <p>{{ entry.note }}</p>
+          <small>{{ new Date(entry.confirmed_at).toLocaleString() }}</small>
+        </article>
+      </details>
+    </section>
     <div v-if="loading" class="loading-box">加载技能中…</div>
     <div v-else-if="loadError" class="error-box">{{ loadError }}</div>
 
@@ -41,7 +102,7 @@
           <div class="card-inner">
             <div class="card-main">
               <div class="card-head">
-                <span class="kind-badge" :class="s.kind">{{ s.kind === 'prompt' ? '对话提示' : '策略' }}</span>
+                <span class="kind-badge" :class="s.kind">{{ kindLabel(s.kind) }}</span>
                 <span class="scope-badge">{{ scopeLabel(s.scope) }}</span>
                 <span class="builtin-badge">内置</span>
                 <span class="card-name">{{ s.name }}</span>
@@ -87,7 +148,7 @@
           <div class="card-inner">
             <div class="card-main">
               <div class="card-head">
-                <span class="kind-badge" :class="s.kind">{{ s.kind === 'prompt' ? '对话提示' : '策略' }}</span>
+                <span class="kind-badge" :class="s.kind">{{ kindLabel(s.kind) }}</span>
                 <span class="scope-badge">{{ scopeLabel(s.scope) }}</span>
                 <span class="vis-badge" :class="s.visibility === 'public' ? 'public' : 'personal'">{{ s.visibility === 'public' ? '公共' : '个人' }}</span>
                 <span class="card-name">{{ s.name }}</span>
@@ -135,7 +196,7 @@
           <div class="card-inner">
             <div class="card-main">
               <div class="card-head">
-                <span class="kind-badge" :class="s.kind">{{ s.kind === 'prompt' ? '对话提示' : '策略' }}</span>
+                <span class="kind-badge" :class="s.kind">{{ kindLabel(s.kind) }}</span>
                 <span class="scope-badge">{{ scopeLabel(s.scope) }}</span>
                 <span class="vis-badge public">公共</span>
                 <span class="card-name">{{ s.name }}</span>
@@ -249,7 +310,7 @@
           <div>
             <h3 class="modal-title">{{ doc?.title || '技能文档' }}</h3>
             <div class="doc-meta">
-              <span v-if="doc?.kind" class="kind-badge" :class="doc.kind">{{ doc.kind === 'prompt' ? '对话提示' : '策略' }}</span>
+              <span v-if="doc?.kind" class="kind-badge" :class="doc.kind">{{ kindLabel(doc.kind) }}</span>
               <span v-if="doc?.scope" class="scope-badge">{{ scopeLabel(doc.scope) }}</span>
               <span v-if="doc?.version" class="doc-version">v{{ doc.version }}</span>
               <span v-if="doc?.source === 'synthesized'" class="doc-src">即时合成</span>
@@ -262,6 +323,8 @@
         <div v-else-if="docError" class="error-box">{{ docError }}</div>
         <template v-else-if="doc">
           <p v-if="doc.description" class="doc-desc">{{ doc.description }}</p>
+          <SkillDraftCard v-if="doc.dependency_draft?.dependency_links?.length" :draft="doc.dependency_draft"
+            @update="value => { doc.dependency_draft = value; doc.review = value.review }" />
           <!-- L2：SKILL.md 主体 -->
           <div class="markdown-body" v-html="renderedDoc"></div>
 
@@ -296,17 +359,134 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import MarkdownIt from 'markdown-it'
-import { listSkills, createSkill, updateSkill, deleteSkill, getSkillDoc, getSkillDocRef } from '@/api'
+import PersonalToolsPanel from '@/components/PersonalToolsPanel.vue'
+import SkillDraftCard from '@/components/SkillDraftCard.vue'
+import { listSkills, createSkill, updateSkill, deleteSkill, getSkillDoc, getSkillDocRef,
+  listPersonalSuggestions, markPersonalSuggestionsSeen, acceptPersonalSuggestion, dismissPersonalSuggestion,
+  confirmBusinessAcceptance } from '@/api'
 
 const router = useRouter()
+const kindLabel = kind => ({ prompt: '对话提示', playbook: '策略', agent_skill: '按需工作流' }[kind] || kind)
 const md = new MarkdownIt({ html: false, linkify: true, breaks: true })
 
 const skills = ref([])
 const loading = ref(true)
 const loadError = ref('')
+const suggestions = ref([])
+const suggestionDrafts = ref([])
+const acceptances = ref([])
+const acceptanceHistory = ref([])
+const acceptanceNotes = reactive({})
+const acceptanceChecks = reactive({})
+const suggestionsLoading = ref(false)
+const suggestionBusy = ref('')
+const suggestionError = ref('')
+const discoveryController = ref(null)
+const suggestionRequests = new Set()
+let disposed = false
+
+async function loadSuggestions() {
+  if (suggestionsLoading.value || suggestionBusy.value || disposed) return
+  const controller = new AbortController()
+  suggestionRequests.add(controller)
+  suggestionsLoading.value = true
+  suggestionError.value = ''
+  try {
+    const { data } = await listPersonalSuggestions(controller.signal)
+    if (disposed) return
+    suggestionDrafts.value = data.drafts || []
+    acceptances.value = data.acceptances || []
+    acceptanceHistory.value = data.acceptance_history || []
+    const candidates = data.suggestions || []
+    const seen = candidates.length ? await markPersonalSuggestionsSeen(candidates.map(s => s.id), controller.signal) : { data: { ids: [] } }
+    if (!disposed) suggestions.value = candidates.filter(s => seen.data.ids.includes(s.id))
+  } catch (err) {
+    if (!disposed && !controller.signal.aborted) suggestionError.value = '个人建议加载失败，请稍后刷新重试。'
+  } finally {
+    suggestionRequests.delete(controller)
+    if (!disposed) suggestionsLoading.value = false
+  }
+}
+
+async function acceptSuggestion(item) {
+  if (suggestionBusy.value || disposed) return
+  const controller = new AbortController()
+  discoveryController.value = controller
+  suggestionRequests.add(controller)
+  suggestionBusy.value = item.id
+  suggestionError.value = ''
+  try {
+    const { data } = await acceptPersonalSuggestion(item.id, controller.signal)
+    if (disposed || controller.signal.aborted) return
+    updateSuggestionDraft(data.draft)
+    suggestions.value = suggestions.value.filter(s => s.id !== item.id)
+  } catch (err) {
+    if (!disposed) suggestionError.value = controller.signal.aborted
+      ? '已停止等待，未自动安装；可刷新核对草稿状态。'
+      : (err.response?.data?.detail || '资料发现失败，未安装能力，请重试。')
+  } finally {
+    suggestionRequests.delete(controller)
+    if (!disposed) { suggestionBusy.value = ''; discoveryController.value = null }
+  }
+}
+
+async function dismissSuggestion(item) {
+  if (suggestionBusy.value || disposed) return
+  const controller = new AbortController()
+  suggestionRequests.add(controller)
+  suggestionBusy.value = item.id
+  suggestionError.value = ''
+  try {
+    await dismissPersonalSuggestion(item.id, controller.signal)
+    if (!disposed) suggestions.value = suggestions.value.filter(s => s.id !== item.id)
+  } catch (err) {
+    if (!disposed) suggestionError.value = err.response?.data?.detail || '忽略失败，请重试。'
+  } finally {
+    suggestionRequests.delete(controller)
+    if (!disposed) suggestionBusy.value = ''
+  }
+}
+
+function updateSuggestionDraft(draft) {
+  if (disposed || !draft?.id) return
+  const index = suggestionDrafts.value.findIndex(d => d.id === draft.id)
+  const previousStatus = suggestionDrafts.value[index]?.status
+  if (index < 0) suggestionDrafts.value.push(draft)
+  else suggestionDrafts.value[index] = draft
+  if (draft.status === 'imported') {
+    load()
+    if (previousStatus !== 'imported') loadSuggestions()
+  }
+}
+
+async function submitAcceptance(item, evidence, accepted) {
+  const note = (acceptanceNotes[evidence.id] || '').trim()
+  if (disposed || suggestionBusy.value || note.length < 4 || (accepted && !acceptanceChecks[evidence.id])) return
+  const controller = new AbortController()
+  suggestionRequests.add(controller)
+  suggestionBusy.value = evidence.id
+  suggestionError.value = ''
+  let refresh = false
+  try {
+    await confirmBusinessAcceptance(item.group_key, {
+      evidence_id: evidence.id, expected_hash: evidence.expected_hash, accepted, note,
+    }, controller.signal)
+    if (disposed) return
+    delete acceptanceNotes[evidence.id]
+    delete acceptanceChecks[evidence.id]
+    showToast(accepted ? '已记录本人业务验收，同类建议已解决。' : '已记录未满足原因，建议继续保留。')
+    refresh = true
+  } catch (err) {
+    if (!disposed && !controller.signal.aborted) suggestionError.value = err.response?.data?.detail || '验收确认未完成，请刷新核对状态后重试。'
+  } finally {
+    suggestionRequests.delete(controller)
+    if (!disposed) suggestionBusy.value = ''
+  }
+  if (!disposed && refresh) await loadSuggestions()
+}
 
 const showEditor = ref(false)
 const saving = ref(false)
@@ -568,10 +748,27 @@ function closeDoc() {
   activeRef.value = null
 }
 
-onMounted(load)
+onMounted(() => Promise.all([load(), loadSuggestions()]))
+onUnmounted(() => {
+  disposed = true
+  for (const controller of suggestionRequests) controller.abort()
+  suggestionRequests.clear()
+  if (toastTimer) clearTimeout(toastTimer)
+})
 </script>
 
 <style scoped>
+.acceptance-item { border-left: 3px solid #b59a76; padding-left: 14px; }
+.acceptance-link { color: #80613e; }
+.acceptance-evidence { margin-top: 14px; border-top: 1px dashed #d8c6a8; padding-top: 10px; }
+.acceptance-evidence summary { cursor: pointer; overflow-wrap: anywhere; color: #6b5031; }
+.acceptance-evidence code { overflow-wrap: anywhere; font-size: 11px; }
+.acceptance-answer { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; overflow: auto; padding: 12px; background: #fffaf1; border-radius: 8px; font: inherit; line-height: 1.7; }
+.acceptance-executions { padding-left: 18px; }
+.acceptance-executions span { display: block; font-size: 12px; color: #806d56; }
+.acceptance-note { display: flex; flex-direction: column; gap: 6px; margin: 12px 0; font-size: 13px; }
+.acceptance-note textarea { width: 100%; box-sizing: border-box; resize: vertical; padding: 8px; border: 1px solid #d8c6a8; border-radius: 8px; background: #fffdf9; color: inherit; font: inherit; }
+.acceptance-check { display: flex; align-items: flex-start; gap: 7px; margin: 12px 0; font-size: 13px; line-height: 1.6; }
 .skills-view {
   max-width: 900px;
   margin: 0 auto;
@@ -612,6 +809,16 @@ onMounted(load)
 .error-box { color: #b4553d; border-color: #e6c3b6; background: #fdf3ef; }
 
 .skill-group { margin-bottom: 28px; }
+.suggestion-group { padding: 16px; border: 1px solid var(--color-border); border-radius: 12px; }
+.suggestion-head, .suggestion-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.suggestion-head { justify-content: space-between; }
+.suggestion-head .group-title { margin: 0; }
+.suggestion-hint { font-size: 13px; color: var(--color-text-secondary); line-height: 1.7; margin: 10px 0; }
+.suggestion-item { padding: 14px 0; border-top: 1px solid var(--color-border); overflow-wrap: anywhere; }
+.suggestion-item p { margin: 8px 0; font-size: 14px; line-height: 1.7; }
+.suggestion-example { color: var(--color-text-secondary); }
+.suggestion-error { color: #a6422b; margin: 10px 0; }
+.suggestion-actions .btn { white-space: normal; }
 .group-title {
   font-size: 15px; font-weight: 700; margin-bottom: 12px;
   display: flex; align-items: center; gap: 8px;

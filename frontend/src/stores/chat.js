@@ -10,6 +10,9 @@ import {
   switchSession,
   getChatHistory,
   clearChatHistory,
+  stopChatGeneration,
+  listCheckpoints,
+  abandonCheckpoint,
 } from '@/api'
 
 export const useChatStore = defineStore('chat', () => {
@@ -21,6 +24,8 @@ export const useChatStore = defineStore('chat', () => {
   const currentResponse = ref('')
   const sources = ref([])
   const searchResults = ref([])
+  const toolSources = ref([])
+  const toolDraft = ref(null)
   const generationPhase = ref('') // tool_start | ocr_retrieval | rewriting | retrieving | reranking | gap_checking | rechecking | retrieved | not_found | searching | searched | generating | citations_checked
   const phaseHistory = ref([]) // 本次对话经历过的阶段序列（供流水线进度条标记已完成步骤）
   const toolCalls = ref([]) // 本次对话附件工具调用结果 [{tool_name, filename, success, chunk_count}, ...]
@@ -30,6 +35,8 @@ export const useChatStore = defineStore('chat', () => {
   const pendingDone = ref(null) // 最近一次 done 事件数据（含 message_id）
   const cacheHitInfo = ref(null) // 本轮是否命中语义缓存 { score }（命中则绕过检索路由直回）
   const capabilityGap = ref(null) // 本轮能力缺口（需求5）：候选 CLI 方案随回答附带，由用户 HITL 选择执行
+  const skillDraft = ref(null) // 本轮 Skill 沉淀配置草稿：随回答呈现确认卡，确认后系统自动导入
+  const pendingCheckpoint = ref(null) // 中途停止任务的 checkpoint：界面呈现「是否继续」，继续则在前序基础上续答
 
   // ---- Agent（复杂度分流）过程状态 ----
   const agentPlan = ref([]) // Plan&Execute 步骤清单 [{tool, purpose, query}]
@@ -72,6 +79,7 @@ export const useChatStore = defineStore('chat', () => {
       sessions.value.unshift(session)
       currentSessionId.value = session.session_id
       messages.value = []
+      pendingCheckpoint.value = null
       return session
     } catch (err) {
       console.error('创建会话失败:', err)
@@ -90,6 +98,7 @@ export const useChatStore = defineStore('chat', () => {
       const res = await getChatHistory(sessionId)
       if (epoch !== generationId) return
       messages.value = (res.data.messages || []).map(normalizeMessage)
+      await refreshCheckpoints()
     } catch (err) {
       console.error('切换会话失败:', err)
     }
@@ -99,6 +108,8 @@ export const useChatStore = defineStore('chat', () => {
   function normalizeMessage(m) {
     return {
       ...m,
+      cache_hit: !!m.cache_info?.hit,
+      cache_score: m.cache_info?.score || 0,
       attachments: (m.attachments || []).map((a) => ({
         name: a.filename || a.name || '',
         file_id: a.file_id || '',
@@ -141,6 +152,9 @@ export const useChatStore = defineStore('chat', () => {
     agentTools.value = []
     cacheHitInfo.value = null
     capabilityGap.value = null
+    skillDraft.value = null
+    toolDraft.value = null
+    toolSources.value = []
     resolveHitl() // 清除上一轮遗留的 HITL 卡片
     const skipSearchPrompt = !!(options && options.skipSearchPrompt)
 
@@ -177,6 +191,9 @@ export const useChatStore = defineStore('chat', () => {
               llm_provider: llmProvider.value,
               model: selectedModel.value,
               skip_search_prompt: skipSearchPrompt,
+              force_refresh: !!options.forceRefresh,
+              command: options.command || '',
+              resume_checkpoint_id: options.resumeCheckpointId || '',
             },
             files,
             requestController.signal,
@@ -189,6 +206,9 @@ export const useChatStore = defineStore('chat', () => {
             llm_provider: llmProvider.value,
             model: selectedModel.value,
             skip_search_prompt: skipSearchPrompt,
+            force_refresh: !!options.forceRefresh,
+            command: options.command || '',
+            resume_checkpoint_id: options.resumeCheckpointId || '',
           }, requestController.signal)
 
       await consumeChatStream(response, data => {
@@ -228,12 +248,21 @@ export const useChatStore = defineStore('chat', () => {
           interrupted: !streamDoneReceived,
           sources: sources.value,
           search_results: searchResults.value,
+          tool_sources: toolSources.value,
           use_knowledge: useKnowledge.value,
           use_search: useSearch.value,
           feedback: null,
-          cache_hit: !!cacheHitInfo.value,
+          cache_hit: !!cacheHitInfo.value?.hit,
           cache_score: cacheHitInfo.value?.score || 0,
+          cache_info: cacheHitInfo.value || pendingDone.value?.message?.cache_info || {},
           capability_gap: capabilityGap.value || null,
+          skill_drafts: skillDraft.value ? [skillDraft.value] : [],
+          tool_drafts: toolDraft.value ? [toolDraft.value] : [],
+          // Agent 中间过程快照：随答案保留为灰色可折叠区（默认收缩，可展开回看）
+          agent_process: pendingDone.value?.message?.agent_process || ((agentPlan.value.length || agentTools.value.length)
+            ? { plan: [...agentPlan.value], tools: [...agentTools.value] }
+            : null),
+          process_collapsed: true,
         })
       }
 
@@ -246,13 +275,16 @@ export const useChatStore = defineStore('chat', () => {
     const { event } = data
 
     switch (event) {
+      case 'cache_hit':
+        cacheHitInfo.value = data.cache_info || { hit: true, score: data.score || 0 }
+        break
       case 'tool_confirmation':
         mergeChatAction(messages.value, data.action)
         break
       case 'status':
         generationPhase.value = data.phase || ''
         if (data.phase === 'cache_hit') {
-          cacheHitInfo.value = { score: data.score || 0 }
+          cacheHitInfo.value = { hit: true, score: data.score || 0 }
         }
         if (data.phase && phaseHistory.value[phaseHistory.value.length - 1] !== data.phase) {
           phaseHistory.value.push(data.phase)
@@ -266,6 +298,7 @@ export const useChatStore = defineStore('chat', () => {
         if (data.tool_calls) {
           toolCalls.value = data.tool_calls
         }
+        if (Array.isArray(data.tool_sources)) toolSources.value = data.tool_sources
         if (data.attachments) {
           // 后端保存附件后回传 file_id 等信息，回填到当前用户消息，使 chip 可点击预览
           const lastUser = [...messages.value].reverse().find((m) => m.role === 'user')
@@ -285,8 +318,7 @@ export const useChatStore = defineStore('chat', () => {
         break
 
       case 'thought':
-        // ReAct 思考链：累积展示 Agent 的推理过程
-        if (data.text) agentThoughts.value.push(data.text)
+        // 原始内部推理不进入界面或历史快照。
         break
 
       case 'plan':
@@ -330,7 +362,17 @@ export const useChatStore = defineStore('chat', () => {
         }
         break
 
+      case 'skill_draft':
+        // Skill 沉淀草稿：不直接写库，随回答呈现配置确认卡，用户确认后系统自动导入
+        skillDraft.value = data.draft || null
+        break
+
+      case 'tool_draft':
+        toolDraft.value = data.draft || null
+        break
+
       case 'error':
+        toolSources.value = []
         // LLM 错误 — 显示错误消息并立即结束；
         // 同时清理知识来源/搜索结果：生成失败时展示检索来源没有意义
         sources.value = []
@@ -376,6 +418,7 @@ export const useChatStore = defineStore('chat', () => {
     if (data.state === 'start') {
       agentTools.value.push({
         tool: data.tool,
+        call_id: data.call_id || '',
         state: 'start',
         query: (data.args && data.args.query) || '',
         index: data.index,
@@ -383,12 +426,11 @@ export const useChatStore = defineStore('chat', () => {
         purpose: data.purpose || '',
       })
     } else {
-      const last = [...agentTools.value].reverse().find((x) => x.tool === data.tool && x.state === 'start')
-      if (last) {
-        last.state = 'end'
-        last.summary = data.summary || ''
-        last.failed = !!data.failed
-      }
+      const last = [...agentTools.value].reverse().find((x) => (data.call_id ? x.call_id === data.call_id : x.tool === data.tool) && x.state === 'start')
+      const terminal = { tool: data.tool, call_id: data.call_id || '', state: 'end', summary: data.summary || '', failed: !!data.failed,
+        elapsed_ms: data.elapsed_ms, execution_status: data.execution_status, validation_status: data.validation_status, requirement_status: data.requirement_status }
+      if (last) Object.assign(last, terminal)
+      else agentTools.value.push(terminal)
     }
   }
 
@@ -418,19 +460,84 @@ export const useChatStore = defineStore('chat', () => {
 
   function stopGeneration() {
     generationId++
+    // 通知后端取消会话生成任务：前端 abort 仅断开 SSE，
+    // 缺这一步后端会在上游重试/故障切换中继续运行（页面中断≠后端停止）
+    if (currentSessionId.value) stopChatGeneration(currentSessionId.value).catch(() => {})
     if (!controller) return
     controller.abort()
     controller = null
     if (currentResponse.value || messages.value.at(-1)?.role === 'user') {
-      messages.value.push({ role: 'assistant', content: `${currentResponse.value}\n\n[生成已中断，内容不完整]`, interrupted: true, sources: [], search_results: [] })
+      messages.value.push({ role: 'assistant', content: `${currentResponse.value}\n\n[生成已中断，内容不完整]`, interrupted: true, sources: [...sources.value], search_results: [...searchResults.value],
+        skill_drafts: skillDraft.value ? [skillDraft.value] : [], tool_drafts: toolDraft.value ? [toolDraft.value] : [],
+        agent_process: { plan: [...agentPlan.value], tools: agentTools.value.map(t => t.state === 'start'
+          ? { ...t, state: 'end', failed: true, execution_status: 'cancellation_requested', summary: '已请求停止；历史记录可核验终态' } : { ...t }) } })
     }
     currentResponse.value = ''
     generationPhase.value = ''
     isGenerating.value = false
+    // 后端在取消后才打包 checkpoint，稍延迟拉取「是否继续」
+    setTimeout(() => { refreshCheckpoints() }, 800)
+  }
+
+  /** 拉取当前会话待处理的中断任务 checkpoint（停止/切换会话后调用） */
+  async function refreshCheckpoints() {
+    if (!currentSessionId.value) {
+      pendingCheckpoint.value = null
+      return
+    }
+    const epoch = generationId
+    try {
+      const res = await listCheckpoints(currentSessionId.value)
+      if (epoch !== generationId) return
+      const list = res.data.checkpoints || []
+      pendingCheckpoint.value = list[0] || null
+    } catch (err) {
+      // 静默降级：checkpoint 提示失败不影响问答主链路
+    }
+  }
+
+  /** 「继续」：在前序 checkpoint 基础上续答（后端 claim + 注入前序上下文） */
+  async function resumeCheckpoint() {
+    const cp = pendingCheckpoint.value
+    if (!cp || isGenerating.value) return
+    pendingCheckpoint.value = null
+    await sendMessage(cp.query, [], { resumeCheckpointId: cp.id })
+  }
+
+  /** 「不继续」：软删除 checkpoint（后端缓存保留 48h，记忆/日志留痕可检索） */
+  async function abandonPendingCheckpoint() {
+    const cp = pendingCheckpoint.value
+    if (!cp) return
+    pendingCheckpoint.value = null
+    try {
+      await abandonCheckpoint(cp.id)
+    } catch (err) {
+      console.error('放弃 checkpoint 失败:', err)
+    }
   }
 
   function updateAction(action) {
     mergeChatAction(messages.value, action)
+  }
+
+  /** 更新 Skill 草稿状态（确认导入/取消/过期后同步卡片与本轮引用） */
+  function updateSkillDraft(draft) {
+    if (!draft || !draft.id) return
+    if (skillDraft.value && skillDraft.value.id === draft.id) skillDraft.value = draft
+    for (const m of messages.value) {
+      const list = m.skill_drafts || []
+      const idx = list.findIndex((d) => d.id === draft.id)
+      if (idx >= 0) list.splice(idx, 1, draft)
+    }
+  }
+
+  function updateToolDraft(draft) {
+    if (!draft?.id) return
+    if (toolDraft.value?.id === draft.id) toolDraft.value = draft
+    for (const m of messages.value) {
+      const idx = (m.tool_drafts || []).findIndex(d => d.id === draft.id)
+      if (idx >= 0) m.tool_drafts.splice(idx, 1, draft)
+    }
   }
 
   function clearMessages() {
@@ -453,6 +560,12 @@ export const useChatStore = defineStore('chat', () => {
     generationPhase.value = ''
     phaseHistory.value = []
     toolCalls.value = []
+    toolSources.value = []
+    toolDraft.value = null
+    skillDraft.value = null
+    agentTools.value = []
+    agentPlan.value = []
+    pendingCheckpoint.value = null
   }
 
   return {
@@ -469,6 +582,11 @@ export const useChatStore = defineStore('chat', () => {
     toolCalls,
     editingDraft,
     cacheHitInfo,
+    skillDraft,
+    toolDraft,
+    toolSources,
+    pendingCheckpoint,
+    updateToolDraft,
     agentPlan,
     agentThoughts,
     agentTools,
@@ -487,6 +605,7 @@ export const useChatStore = defineStore('chat', () => {
     sendMessage,
     stopGeneration,
     updateAction,
+    updateSkillDraft,
     startReask,
     resendWithSearch,
     answerWithoutSearch,
@@ -494,5 +613,8 @@ export const useChatStore = defineStore('chat', () => {
     resolveHitl,
     clearMessages,
     clearAllSessionData,
+    refreshCheckpoints,
+    resumeCheckpoint,
+    abandonPendingCheckpoint,
   }
 })

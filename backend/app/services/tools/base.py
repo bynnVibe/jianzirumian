@@ -48,6 +48,9 @@ class ToolContext:
     role: str = ""
     # 本次调用的追踪标识（供 Tool Routing 可观测性串联调用链）
     trace_id: str = ""
+    # 仅由服务端确认／测试流程填入，浏览器和模型不得自报。
+    tool_test_id: str = ""
+    force_refresh: bool = False
 
 
 @dataclass

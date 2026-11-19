@@ -49,6 +49,7 @@
           v-if="tab === 'documents'"
           :kb-id="kbId" :is-guest="auth.isGuest" :focus-source="focusSource"
           @upload="openUpload" @changed="refreshStats"
+          @snapshot="onDocsSnapshot" @previewed="onDocPreviewed"
         />
         <KbRetrievalPanel v-else-if="tab === 'retrieval'" :kb-id="kbId" />
         <KbMindmapPanel v-else-if="tab === 'mindmap'" :kb-id="kbId" @jump-doc="onJumpDoc" />
@@ -99,9 +100,10 @@
 </template>
 
 <script setup>
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
+import { useAssistantStore } from '@/stores/assistant'
 import { listKnowledgeBases } from '@/api'
 import KbDocumentsPanel from '@/components/kb/KbDocumentsPanel.vue'
 import KbRetrievalPanel from '@/components/kb/KbRetrievalPanel.vue'
@@ -117,6 +119,7 @@ import IngestDetailView from '@/views/IngestDetailView.vue'
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
+const assistant = useAssistantStore()
 
 const ALL_TABS = [
   { key: 'documents', label: '文档' },
@@ -167,7 +170,53 @@ function goOverview() {
 function setTab(key) {
   tab.value = key
   router.replace({ query: { ...route.query, tab: key } })
+  const label = (ALL_TABS.find((t) => t.key === key) || {}).label || key
+  if (kb.value) assistant.pushAction(`切换知识库「${kb.value.name}」到${label}标签`)
 }
+
+// ---- 当前界面快照 → 知识助手上下文（记住用户近期操作与屏幕上打开的内容） ----
+// 文档清单由 KbDocumentsPanel 加载后上报；百科/收藏标签由内嵌视图自行写入快照，此处不接管
+const docsSnapshot = ref({ documents: [], query: '' })
+
+function onDocsSnapshot(payload) {
+  docsSnapshot.value = {
+    documents: Array.isArray(payload?.documents) ? payload.documents : [],
+    query: payload?.query || '',
+  }
+}
+
+function onDocPreviewed(title) {
+  if (title) assistant.pushAction(`打开文档《${title}》预览（新窗口跳转预览页）`)
+}
+
+const detailPageState = computed(() => {
+  if (!kb.value || tab.value === 'wiki' || tab.value === 'bookmarks') return null
+  const label = (ALL_TABS.find((t) => t.key === tab.value) || {}).label || tab.value
+  const docs = docsSnapshot.value.documents.slice(0, 20).map((d) => ({
+    title: d.title || d.filename || '未命名',
+    kb_name: kb.value.name,
+    chunk_count: d.chunk_count || 0,
+    created_at: String(d.updated_at || '').replace('T', ' ').slice(0, 16),
+  }))
+  const state = {
+    view: `知识库《${kb.value.name}》· ${label}标签（${kb.value.visibility === 'public' ? '公共' : '个人'}库）`,
+    kb_filter: kb.value.name,
+    stats: { source_count: kb.value.doc_count || 0, total_chunks: kb.value.entry_count || 0 },
+    documents: docs,
+    documents_truncated: docsSnapshot.value.documents.length > docs.length,
+  }
+  if (docsSnapshot.value.query) state.search = { mode: 'title_filter', query: docsSnapshot.value.query }
+  return state
+})
+
+// flush:'post'：等内嵌视图（百科/收藏）卸载清理后再写入，避免互相覆盖
+watch(detailPageState, (state) => {
+  if (state) assistant.setPageState(state)
+}, { immediate: true, flush: 'post' })
+
+onUnmounted(() => {
+  assistant.clearPageState()
+})
 
 async function loadKb() {
   loading.value = true

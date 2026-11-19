@@ -131,7 +131,7 @@ def route_tools(
         secondary = ["web_search"] if can_web else []
         return RouteDecision(
             primary_tool="search_knowledge", secondary_tools=secondary,
-            is_realtime=False, search_primary=False, scenario="health",
+            is_realtime=is_realtime, search_primary=False, scenario="health",
             reason="检测到健康养生域信号，主来源指向知识库检索",
         )
     # 3. 仅知识库可用（或默认）→ 知识库为主，联网为补充

@@ -23,6 +23,7 @@ def bootstrap_registry() -> List[str]:
     from app.services.tools import knowledge_summarize  # noqa: F401
     # 检索类工具：web_search / search_knowledge
     from app.services.tools import retrieval  # noqa: F401
+    from app.services import skill_runtime  # noqa: F401
     # CLI 封装工具：内置规格 + cli_specs/*.json 规格目录
     from app.services.tools.cli_spec import register_all_cli_tools
     register_all_cli_tools()

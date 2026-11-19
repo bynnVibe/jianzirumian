@@ -46,6 +46,10 @@ class ChatRequest(BaseModel):
     model: Optional[str] = None
     # HITL：用户在「知识库无结果」卡片上点击「直接回答」时置真，避免再次询问是否联网
     skip_search_prompt: bool = False
+    force_refresh: bool = False
+    command: str = Field(default="", max_length=16)
+    # 整改4：继续中途停止的任务（checkpoint id，空=普通新提问）
+    resume_checkpoint_id: Optional[str] = None
 
 
 class ConfirmChatActionRequest(BaseModel):
@@ -111,9 +115,14 @@ class MessageResponse(BaseModel):
     use_knowledge: bool = False
     use_search: bool = False
     actions: List[dict] = Field(default_factory=list)
+    skill_drafts: List[dict] = Field(default_factory=list)  # Skill 沉淀草稿确认卡（挂在会话末条助手消息）
+    tool_drafts: List[dict] = Field(default_factory=list)
+    tool_sources: List[dict] = Field(default_factory=list)
     interrupted: bool = False
     feedback: Optional[dict] = None  # {rating, comment} 当前用户的反馈
     attachments: List[dict] = []  # 用户消息附件元数据 [{file_id, filename, kind}]
+    agent_process: Optional[dict] = None  # Agent 中间过程快照 {plan, thoughts, tools}（灰色过程区历史回看）
+    cache_info: dict = Field(default_factory=dict)
 
 
 class FeedbackRequest(BaseModel):

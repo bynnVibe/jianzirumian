@@ -1,4 +1,7 @@
 """Agent 回归评测模块单元测试（纯函数为主；内置评测集种子为幂等 DB 操作，需在隔离环境运行）"""
+import sqlite3
+import pytest
+from app.core import db
 from app.services.evaluation import (
     _compute_retrieval_hit,
     _compute_summary,
@@ -175,8 +178,17 @@ def test_split_sentences():
 # ============================================
 # 内置评测集种子（幂等 DB 操作，隔离环境）
 # ============================================
-def test_seed_builtin_datasets_creates_and_idempotent():
-    from app.core import db
+@pytest.fixture
+def seed_database(monkeypatch):
+    conn = sqlite3.connect(":memory:", check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    db.init_db(conn)
+    monkeypatch.setattr(db, "_conn", conn)
+    yield conn
+    conn.close()
+
+
+def test_seed_builtin_datasets_creates_and_idempotent(seed_database):
     from app.services import evaluation as ev
     # 首次：创建两个内置评测集（问答回归基准 + Prompt/Skill A/B 行为对比）
     assert ev.seed_builtin_datasets() == 2

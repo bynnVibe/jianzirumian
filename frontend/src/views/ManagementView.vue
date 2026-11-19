@@ -408,6 +408,56 @@
           </div>
         </details>
 
+        <!-- 语义缓存（开关统一在此，开启后对所有用户生效） -->
+        <details class="config-section">
+          <summary class="section-header">
+            <h2 class="section-title">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="20" height="20">
+                <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
+              </svg>
+              语义缓存
+            </h2>
+            <span class="section-badge" :class="scForm.enabled ? 'ok' : ''">{{ scForm.enabled ? '全局开启' : '已关闭' }}</span>
+          </summary>
+          <p class="section-desc">
+            高相似问题命中后直接复用已有回答，跳过检索与模型调用，避免重复消耗相同资源。开关在此统一管理，开启后对所有用户生效（不再按用户单独开关）。本页保存立即生效。
+          </p>
+
+          <div class="toggle-row">
+            <div class="toggle-info">
+              <span class="toggle-label">{{ scForm.enabled ? '语义缓存已开启（所有用户）' : '语义缓存已关闭' }}</span>
+              <span class="toggle-hint">{{ scForm.enabled ? '所有用户的相似问题命中直回，跳过检索与答复' : '所有问题均走检索与答复' }}</span>
+            </div>
+            <button class="toggle-switch" :class="{ active: scForm.enabled }" @click="scForm.enabled = !scForm.enabled">
+              <span class="toggle-knob"></span>
+            </button>
+          </div>
+
+          <div class="param-panel">
+            <div class="param-row">
+              <label class="param-label">相似阈值</label>
+              <input
+                class="param-input"
+                type="number"
+                v-model.number="scForm.threshold"
+                min="0.5"
+                max="0.99"
+                step="0.01"
+              />
+              <span class="toggle-hint">0.5 ~ 0.99，越低越容易命中（默认 0.90）</span>
+            </div>
+          </div>
+
+          <div class="section-actions">
+            <button class="btn btn-primary" @click="saveSemanticCache" :disabled="scSaving">
+              {{ scSaving ? '保存中...' : '保存配置' }}
+            </button>
+            <span v-if="scSaveResult" class="test-result" :class="scSaveResult.success ? 'success' : 'error'">
+              {{ scSaveResult.message }}
+            </span>
+          </div>
+        </details>
+
         <!-- llm-wiki 知识编译 -->
         <details class="config-section">
           <summary class="section-header">
@@ -1226,6 +1276,7 @@ import {
   testRerankConnection,
   saveRedisConfig,
   testRedisConnection,
+  saveSemanticCacheConfig,
   getWikiConfig,
   saveWikiConfig,
   getWikiPages,
@@ -1487,6 +1538,11 @@ const redisBadgeText = computed(() => {
   return config.value.redis_config?.connected ? '已连接' : '未连接'
 })
 
+// ---- 语义缓存全局配置（开关统一在此，开启后对所有用户生效） ----
+const scForm = reactive({ enabled: false, threshold: 0.9 })
+const scSaving = ref(false)
+const scSaveResult = ref(null)
+
 // ---- llm-wiki 知识编译 ----
 const wikiMd = new MarkdownIt({ html: false, linkify: true, breaks: true })
 const wikiForm = reactive({ compile_enabled: true, priority_enabled: true })
@@ -1657,6 +1713,11 @@ async function loadConfig() {
     // 回填 Redis 配置（页面保存过的覆盖值优先，否则显示 .env 默认）
     redisForm.url = res.data.redis_config?.url || ''
     redisForm.enabled = res.data.redis_config?.enabled !== false
+    // 回填语义缓存全局配置
+    if (res.data.semantic_cache) {
+      scForm.enabled = !!res.data.semantic_cache.enabled
+      scForm.threshold = res.data.semantic_cache.threshold ?? 0.9
+    }
     fillAllParamForms()
     refreshSettingsSnapshot()
   } catch (err) {
@@ -1704,6 +1765,32 @@ async function testRedis() {
     redisTestResult.value = { success: false, message: '请求失败: ' + (err.response?.data?.detail || err.message) }
   } finally {
     redisTesting.value = false
+  }
+}
+
+async function saveSemanticCache() {
+  scSaving.value = true
+  scSaveResult.value = null
+  try {
+    const res = await saveSemanticCacheConfig({
+      enabled: scForm.enabled,
+      threshold: Number(scForm.threshold),
+    })
+    if (res.data.success) {
+      scForm.enabled = res.data.enabled
+      scForm.threshold = res.data.threshold
+      refreshSettingsSnapshot()
+      scSaveResult.value = {
+        success: true,
+        message: scForm.enabled ? '已保存并立即生效，所有用户均开启语义缓存' : '已保存并立即生效，语义缓存已全局关闭',
+      }
+    } else {
+      scSaveResult.value = { success: false, message: res.data.message || '保存失败' }
+    }
+  } catch (err) {
+    scSaveResult.value = { success: false, message: '请求失败: ' + (err.response?.data?.detail || err.message) }
+  } finally {
+    scSaving.value = false
   }
 }
 

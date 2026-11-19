@@ -85,6 +85,22 @@ def init_db(conn: sqlite3.Connection):
         );
         CREATE INDEX IF NOT EXISTS idx_chat_actions_session
             ON chat_pending_actions(session_id, message_id);
+        CREATE TABLE IF NOT EXISTS skill_drafts (
+            id TEXT PRIMARY KEY,
+            owner_id TEXT NOT NULL,
+            session_id TEXT NOT NULL DEFAULT '',
+            name TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            content TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            skill_id TEXT NOT NULL DEFAULT '',
+            error TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_skill_drafts_session
+            ON skill_drafts(session_id, owner_id);
         CREATE TABLE IF NOT EXISTS users (
             id            TEXT PRIMARY KEY,
             username      TEXT UNIQUE NOT NULL,
@@ -296,6 +312,22 @@ def init_db(conn: sqlite3.Connection):
             created_at               TEXT NOT NULL,
             updated_at               TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS chat_checkpoints (
+            id              TEXT PRIMARY KEY,
+            session_id      TEXT NOT NULL,
+            user_id         TEXT NOT NULL,
+            query           TEXT NOT NULL DEFAULT '',
+            partial_answer  TEXT NOT NULL DEFAULT '',
+            sources         TEXT NOT NULL DEFAULT '[]',
+            search_results  TEXT NOT NULL DEFAULT '[]',
+            user_message_id TEXT NOT NULL DEFAULT '',
+            status          TEXT NOT NULL DEFAULT 'pending',
+            created_at      TEXT NOT NULL,
+            updated_at      TEXT NOT NULL,
+            expires_at      TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_chat_checkpoints_session ON chat_checkpoints(session_id, status);
 
         CREATE TABLE IF NOT EXISTS tool_calls (
             id          TEXT PRIMARY KEY,
@@ -1364,6 +1396,15 @@ def init_db(conn: sqlite3.Connection):
             logger.info("user_skills 补加列: visibility")
         conn.execute("INSERT INTO schema_migrations VALUES ('skill_visibility_v1',?)",
                      (datetime.now().isoformat(),))
+    if not conn.execute("SELECT 1 FROM schema_migrations WHERE version='agent_process_v1'").fetchone():
+        # Agent 过程快照（plan/thoughts/tools）随助手消息落库，刷新后灰色过程区可回看。
+        # 独立版本门控：production_ab_v1 早已应用，_migrate 不再对存量库执行，故须单独补列。
+        msg_cols = {r[1] for r in conn.execute("PRAGMA table_info(chat_messages)")}
+        if "agent_process" not in msg_cols:
+            conn.execute("ALTER TABLE chat_messages ADD COLUMN agent_process TEXT NOT NULL DEFAULT ''")
+            logger.info("chat_messages 补加列: agent_process")
+        conn.execute("INSERT INTO schema_migrations VALUES ('agent_process_v1',?)",
+                     (datetime.now().isoformat(),))
     if not conn.execute("SELECT 1 FROM schema_migrations WHERE version='prefix_cache_v1'").fetchone():
         # 前缀缓存可观测：agent_spans / gateway_logs 补 cached_tokens（上游命中前缀缓存的
         # prompt token 数，OpenAI prompt_tokens_details.cached_tokens / Anthropic cache_read_input_tokens），
@@ -1764,6 +1805,23 @@ def init_db(conn: sqlite3.Connection):
         conn.execute("CREATE INDEX IF NOT EXISTS idx_kb_doc_summaries_kb ON kb_doc_summaries(kb_id)")
         conn.execute("INSERT INTO schema_migrations VALUES ('kb_summary_v1',?)",
                      (datetime.now().isoformat(),))
+    if not conn.execute("SELECT 1 FROM schema_migrations WHERE version='semcache_isolation_v1'").fetchone():
+        # 语义缓存按用户隔离修复：隔离前的公共域条目可能包含他人个人知识库的答案
+        # （跨用户信息泄露），无法回溯甄别属主，一次性清空公共池；修复后公共域仅接收
+        # 未触碰个人知识库的回答，个人域按 user_id 隔离且命中优先本人。
+        conn.execute("DELETE FROM semantic_cache WHERE user_id = '__public__'")
+        conn.execute("INSERT INTO schema_migrations VALUES ('semcache_isolation_v1',?)",
+                     (datetime.now().isoformat(),))
+    from app.core.cache_schema import migrate as migrate_cache
+    migrate_cache(conn)
+    from app.core.cache_schema import migrate_profile as migrate_cache_profile
+    migrate_cache_profile(conn)
+    from app.core.skill_schema import migrate as migrate_skills
+    migrate_skills(conn)
+    from app.core.gateway_tool_schema import migrate as migrate_gateway_tools
+    migrate_gateway_tools(conn)
+    from app.core.personal_tool_schema import migrate as migrate_personal_tools
+    migrate_personal_tools(conn)
     conn.commit()
 
 
@@ -1784,6 +1842,11 @@ def _migrate(conn: sqlite3.Connection):
             "ALTER TABLE chat_messages ADD COLUMN attachments TEXT NOT NULL DEFAULT '[]'"
         )
         logger.info("chat_messages 补加列: attachments")
+    if "agent_process" not in msg_cols:
+        conn.execute(
+            "ALTER TABLE chat_messages ADD COLUMN agent_process TEXT NOT NULL DEFAULT ''"
+        )
+        logger.info("chat_messages 补加列: agent_process")
 
     # 上传记录自定义标题（用于知识库管理搜索与展示）
     upload_cols = {r[1] for r in conn.execute("PRAGMA table_info(upload_records)")}

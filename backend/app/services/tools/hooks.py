@@ -116,6 +116,15 @@ def validate_schema(schema: Optional[dict], args: Dict[str, Any]) -> Tuple[bool,
         enum = spec.get("enum")
         if enum and val not in enum:
             return False, f"参数「{key}」取值 {val!r} 不在允许范围 {enum}"
+    try:
+        from app.core.json_schema import validate
+        supplied = dict(args)
+        for req in required:
+            if req not in supplied and "default" in props.get(req, {}):
+                supplied[req] = props[req]["default"]
+        validate(schema, supplied)
+    except ValueError as exc:
+        return False, str(exc)
     return True, ""
 
 
@@ -160,7 +169,15 @@ def status_gate(tool: BaseTool, args: dict, ctx: ToolContext, opts: dict) -> Hoo
 
 def schema_validate(tool: BaseTool, args: dict, ctx: ToolContext, opts: dict) -> HookVerdict:
     """参数合法性闸：按工具 JSON Schema 校验必填/类型/枚举。"""
-    valid, reason = validate_schema(tool.parameters, args or {})
+    if getattr(tool, "strict_schema", False):
+        from app.core.json_schema import validate
+        try:
+            validate(tool.parameters, args)
+            valid, reason = True, ""
+        except ValueError as exc:
+            valid, reason = False, str(exc)
+    else:
+        valid, reason = validate_schema(tool.parameters, args or {})
     if not valid:
         return HookVerdict(False, "schema_validate", "schema_invalid", reason)
     return HookVerdict(True, "schema_validate")

@@ -78,7 +78,7 @@ _PAGE_BYTES = 500000
 _PII_ID_CARD = re.compile(r"(?<!\d)\d{17}[\dXx](?!\d)")
 _PII_BANK_CARD = re.compile(r"(?<!\d)\d{16,19}(?!\d)")
 _PII_PHONE = re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")
-_PII_EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+_PII_EMAIL = re.compile(r"(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 
 
 def _mask_id_card(m: "re.Match") -> str:

@@ -45,6 +45,7 @@
             <tr :class="{ 'row-disabled': !u.enabled }">
               <td>
                 <div class="up-name">{{ u.name }}</div>
+                <div v-if="u.tool_models?.length" class="up-url">原生工具：{{ u.tool_models.join('、') }}</div>
                 <div class="up-url mono">{{ u.base_url || (u.tier === 'free' ? '系统 OpenRouter 回退' : '—') }}</div>
                 <div v-if="u.last_error" class="up-err" :title="u.last_error">最近错误：{{ u.last_error }}</div>
               </td>
@@ -147,6 +148,12 @@
             <textarea v-model="form.modelsText" class="field-input" rows="3"
                       placeholder="glm4:9b, qwen2.5:7b"></textarea>
           </div>
+          <label v-if="form.category === 'llm'" class="field span-2">
+            <span class="field-label">支持原生 Function Calling 的模型（精确名称，逗号分隔）</span>
+            <textarea v-model="form.toolModelsText" class="field-input" rows="2"
+                      placeholder="仅填写已确认支持 tools 的上述模型；留空表示未配置"></textarea>
+            <span class="field-label">普通连通性测试不等于工具调用验收。未列出的模型不会接收工具请求。</span>
+          </label>
           <label class="field span-2">
             <span class="field-label">备注</span>
             <input v-model.trim="form.remark" class="field-input" placeholder="可选" />
@@ -228,7 +235,7 @@ const saving = ref(false)
 const formError = ref('')
 const form = reactive({
   name: '', protocol: 'openai', base_url: '', api_key: '', tier: 'paid', category: 'llm',
-  modelsText: '', weight: 100, enabled: true, remark: '',
+  modelsText: '', toolModelsText: '', weight: 100, enabled: true, remark: '',
   has_api_key: false, api_key_masked: '',
 })
 
@@ -262,7 +269,7 @@ async function load() {
 function resetForm() {
   Object.assign(form, {
     name: '', protocol: 'openai', base_url: '', api_key: '', tier: 'paid', category: 'llm',
-    modelsText: '', weight: 100, enabled: true, remark: '',
+    modelsText: '', toolModelsText: '', weight: 100, enabled: true, remark: '',
     has_api_key: false, api_key_masked: '',
   })
 }
@@ -276,6 +283,7 @@ function openEdit(u) {
     name: u.name, protocol: u.protocol || 'openai', base_url: u.base_url || '',
     api_key: '', tier: u.tier || 'paid', category: u.category || 'llm',
     modelsText: (u.models || []).join(', '),
+    toolModelsText: (u.tool_models || []).join(', '),
     weight: u.weight || 100, enabled: !!u.enabled, remark: u.remark || '',
     has_api_key: !!u.has_api_key, api_key_masked: u.api_key_masked || '',
   })
@@ -288,6 +296,7 @@ function buildPayload() {
   return {
     name: form.name, protocol: form.protocol, base_url: form.base_url,
     api_key: form.api_key, tier: form.tier, category: form.category || 'llm', models,
+    tool_models: form.category === 'llm' ? form.toolModelsText.split(/[,，]/).map(s => s.trim()).filter(Boolean) : [],
     weight: Math.max(1, Number(form.weight) || 100), enabled: form.enabled, remark: form.remark,
   }
 }

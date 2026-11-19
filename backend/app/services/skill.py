@@ -24,8 +24,8 @@ from app.services import skill_review
 logger = logging.getLogger("jianziruyang.skill")
 
 # 技能类别 → 允许的作用域：prompt 仅对话；playbook 可驱动链接抓取/正文清洗/知识总结
-SKILL_KINDS = ("prompt", "playbook")
-KIND_SCOPES = {"prompt": ("chat",), "playbook": ("url_import", "polish", "kb_summary")}
+SKILL_KINDS = ("prompt", "playbook", "agent_skill")
+KIND_SCOPES = {"prompt": ("chat",), "playbook": ("url_import", "polish", "kb_summary"), "agent_skill": ("chat",)}
 SCOPE_LABEL = {"chat": "对话", "url_import": "链接解析", "polish": "正文清洗",
                "kb_summary": "知识总结"}
 
@@ -277,6 +277,8 @@ class SkillService:
                      scope: Optional[str] = None, actor_name: str = "",
                      visibility: str = "personal") -> dict:
         """创建自定义技能；先做安全/能力预审，通过后落库。返回 {'error': ...} 表示失败。"""
+        if kind == "agent_skill":
+            return {"error": "agent_skill 必须通过完整包预审与草稿确认添加"}
         name = (name or "").strip()
         description = (description or "").strip()
         content = content or ""
@@ -333,6 +335,21 @@ class SkillService:
         if not existing:
             return {"error": "not_found"}
         now = _now()
+        if existing["kind"] == "agent_skill":
+            if any(v is not None for v in (name, description, content)):
+                return {"error": "包内容不可原地修改，请创建新版本草稿并重新确认"}
+            if enabled:
+                from app.services import skill_dependencies
+                try:
+                    assessment = skill_dependencies.installed_review(owner_id, skill_id)
+                except ValueError as exc:
+                    return {"error": str(exc)}
+                if assessment["status"] != "ready":
+                    return {"error": "依赖或权限尚未就绪，不能启用", "review": assessment}
+            if enabled is not None:
+                db.execute("UPDATE user_skills SET enabled=?,updated_at=? WHERE id=? AND owner_id=?",
+                           (int(enabled), now, skill_id, owner_id))
+            return {"skill": self.get_skill(owner_id, skill_id)}
         if existing["builtin"]:
             # 内置技能仅允许切换 enabled；显式传入名称/描述/内容一律明确拒绝，
             # 不再静默忽略，避免误导 API 调用方以为内容已修改。

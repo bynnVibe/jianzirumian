@@ -10,13 +10,15 @@
 """
 import asyncio
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+import time
 from types import SimpleNamespace
 
 import pytest
 
 from app.core import db
 from app.services.gateway import semantic_cache as sc
+from app.services import cache_policy
 
 
 @pytest.fixture()
@@ -25,6 +27,8 @@ def mem_db(monkeypatch):
     conn.row_factory = sqlite3.Row
     db.init_db(conn)
     monkeypatch.setattr(db, "_conn", conn)
+    monkeypatch.setattr(sc.settings, "ANSWER_CACHE_SIGNING_KEY", "isolated-monitor-signing-key-32-chars")
+    monkeypatch.setattr(sc, "semantic_cache_enabled", lambda: True)
     yield conn
     conn.close()
 
@@ -42,11 +46,12 @@ def _cache_entry(entry_id, user_id, question="黄芪功效", answer="补气固�
                  expires_at="", hit_count=1):
     now = datetime.now().isoformat()
     db.execute(
-        "INSERT INTO semantic_cache (id, user_id, question, question_norm, answer,"
-        " sources, embedding, hit_count, scope, expires_at, created_at, last_used_at)"
-        " VALUES (?,?,?,?,?,'[]','[0.1]',?,?,?,?,?)",
+        "INSERT INTO semantic_cache_v2 (id, user_id, question, question_norm, answer,"
+        " sources, embedding, hit_count, scope, expires_at, created_at, last_used_at,"
+        " cache_kind,fingerprint,evidence_hash,revisions,model,upstream_id)"
+        " VALUES (?,?,?,?,?,'[]','[0.1]',?,'personal',?,?,?,'model_exact',?,'evidence','{}','model','up')",
         (entry_id, user_id, question, question, answer, hit_count,
-         "public" if user_id == sc.PUBLIC_USER else "personal", expires_at, now, now))
+         expires_at or (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat(), now, now, entry_id))
 
 
 # ============================================
@@ -114,17 +119,24 @@ def test_monitor_stats_aggregation(mem_db):
     assert cmp_["hit_tokens"] == 0
     assert len(stats["daily"]) == 1
     assert stats["daily"][0]["hits"] == 2 and stats["daily"][0]["hit_rate"] == 0.5
+    sc.record_event(hit=False, outcome="bypass", reason="force_refresh")
+    sc.record_event(hit=False, outcome="invalidated", reason="expired")
+    revised = sc.monitor_stats(7)
+    assert revised["overview"]["requests"] == 4
+    assert revised["overview"]["hit_rate"] == 0.5
+    assert revised["overview"]["bypass_rate"] == 0.2
+    assert revised["overview"]["savings_are_estimates"] is True
 
 
 def test_monitor_stats_space_and_entries(mem_db):
-    past = (datetime.now() - timedelta(hours=1)).isoformat()
-    _cache_entry("e1", sc.PUBLIC_USER)
+    past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    _cache_entry("e1", "u2")
     _cache_entry("e2", "u1")
     _cache_entry("e3", "u1", question="过期条目问题", expires_at=past)  # 已过期
     stats = sc.monitor_stats(7)
     space = stats["space"]
     assert space["entries"] == 3
-    assert space["public_entries"] == 1 and space["personal_entries"] == 2
+    assert space["public_entries"] == 0 and space["personal_entries"] == 3
     assert space["expired_entries"] == 1
     assert space["bytes"] > 0 and space["mb"] == round(space["bytes"] / 1048576, 3)
     assert len(stats["entries"]) == 3
@@ -149,7 +161,7 @@ def test_monitor_stats_entries_redacted(mem_db):
     entry = stats["entries"][0]
     assert "13812345678" not in entry["question"]
     assert "13812345678" not in entry["answer"]
-    raw = db.query_one("SELECT question FROM semantic_cache WHERE id = 'e1'")
+    raw = db.query_one("SELECT question FROM semantic_cache_v2 WHERE id = 'e1'")
     assert "13812345678" in raw["question"]  # 原始落库不改写
 
 
@@ -157,9 +169,18 @@ def test_monitor_stats_entries_redacted(mem_db):
 # C5 proxy._cache_lookup 埋点接线
 # ============================================
 def _ctx(enabled=True):
+    db.execute("INSERT INTO users(id,username,password_hash,salt,created_at,updated_at,is_active) "
+               "VALUES ('u1','monitor','unused','salt',0,0,1)")
+    messages = [{"role": "user", "content": "黄芪有什么功效"}]
+    body = {"messages": messages, "model": "model"}
+    body["_gw_cache_contract"] = cache_policy.sign_contract(
+        user_id="u1", query=messages[0]["content"], messages=messages, model="model",
+        decision=cache_policy.decide(messages[0]["content"], freshness="static"),
+        sources=[], revision=cache_policy.revisions())
     return SimpleNamespace(
-        cache_enabled=enabled, user_id="u1", cache_query="黄芪有什么功效",
-        cache_scope="personal", cache_realtime=False, cache_event_id="",
+        cache_enabled=enabled, user_id="u1", cache_query=messages[0]["content"],
+        forward_body=body, model_req="model", upstream={}, rule={}, deadline=time.monotonic() + 20,
+        cache_bypass_recorded=False, cache_scope="personal", cache_realtime=False, cache_event_id="",
         tracer=SimpleNamespace(add=lambda *a, **k: None))
 
 
@@ -168,10 +189,11 @@ def test_cache_lookup_hit_records_saved_tokens(mem_db, monkeypatch):
 
     async def fake_lookup(user_id, question, **kw):
         return {"id": "e1", "answer": "黄芪补气固表，适合气虚人群日常调理。",
-                "scope": "public", "score": 0.95, "ttl_label": "常温 7d"}
+                "scope": "personal", "score": 0.95, "ttl_label": "硬期限 24 小时（命中不续期）"}
     monkeypatch.setattr(sc, "lookup", fake_lookup)
     ctx = _ctx()
     answer = asyncio.run(proxy._cache_lookup(ctx))
+    assert answer, getattr(ctx, "cache_info", {})
     assert answer.startswith("黄芪补气固表")
     row = db.query_one("SELECT * FROM semantic_cache_events")
     assert row["hit"] == 1 and row["entry_id"] == "e1" and row["score"] == 0.95
@@ -189,6 +211,7 @@ def test_cache_lookup_miss_records_event_id(mem_db, monkeypatch):
     assert asyncio.run(proxy._cache_lookup(ctx)) is None
     row = db.query_one("SELECT * FROM semantic_cache_events")
     assert row["hit"] == 0 and row["saved_tokens"] == 0
+    assert row["outcome"] == "miss"
     assert ctx.cache_event_id == row["id"]  # 供上游成功后补记 usage
     sc.update_event_tokens(ctx.cache_event_id, 666)
     assert db.query_one("SELECT est_tokens FROM semantic_cache_events")["est_tokens"] == 666

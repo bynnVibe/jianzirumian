@@ -109,6 +109,8 @@ export function sendChatMessageWithFiles(params, files, signal) {
   form.append('rule_id', params.rule_id || '')
   form.append('model', params.model || '')
   form.append('skip_search_prompt', String(!!params.skip_search_prompt))
+  form.append('force_refresh', String(!!params.force_refresh))
+  form.append('command', params.command || '')
   for (const file of files || []) {
     form.append('files', file)
   }
@@ -127,6 +129,40 @@ export const getChatAction = (id, signal) => api.get(`/chat/actions/${id}`, { si
 export const confirmChatAction = (id, kbId) => api.post(`/chat/actions/${id}/confirm`, { kb_id: kbId })
 export const cancelChatAction = (id) => api.post(`/chat/actions/${id}/cancel`)
 
+// 聊天沉淀 Skill 草稿确认（确认后系统自动导入个人 Skill 配置）
+export const getSkillDraft = (id, signal) => api.get(`/skills/drafts/${id}`, { signal })
+export const confirmSkillDraft = (id, expectedHash, allowSameName = false, dependencyHash = '') => api.post(`/skills/drafts/${id}/confirm`, {
+  expected_hash: expectedHash, allow_same_name: allowSameName, expected_dependency_hash: dependencyHash,
+})
+export const bindSkillDependency = (id, body) => api.put(`/skills/drafts/${encodeURIComponent(id)}/dependencies`, body)
+export const discoverSkillDependency = (id, body, signal) => api.post(`/skills/drafts/${encodeURIComponent(id)}/dependencies/discover`, body, { signal, timeout: 90000 })
+export const cancelSkillDraft = (id) => api.post(`/skills/drafts/${id}/cancel`)
+export const downloadSkillDraft = (id, expectedHash) => api.get(`/skills/drafts/${id}/download`, {
+  params: { expected_hash: expectedHash }, responseType: 'blob',
+})
+export const getSkillDraftResource = (id, path, expectedHash, signal) => api.get(`/skills/drafts/${id}/resource`, {
+  params: { path, expected_hash: expectedHash }, signal,
+})
+
+// 个人工具：凭据仅走独立表单；确认包含只读样例测试。
+export const listPersonalTools = () => api.get('/personal-tools')
+export const getPersonalTool = (id) => api.get(`/personal-tools/${encodeURIComponent(id)}`)
+export const getToolDraft = (id) => api.get(`/personal-tools/drafts/${encodeURIComponent(id)}`)
+export const confirmToolDraft = (id, expectedHash, acceptTerms = false, allowSameName = false) => api.post(
+  `/personal-tools/drafts/${encodeURIComponent(id)}/confirm`,
+  { expected_hash: expectedHash, accept_terms: acceptTerms, allow_same_name: allowSameName }, { timeout: 130000 }
+)
+export const cancelToolDraft = (id) => api.post(`/personal-tools/drafts/${encodeURIComponent(id)}/cancel`)
+export const configurePersonalTool = (id, body) => api.patch(`/personal-tools/${encodeURIComponent(id)}`, body)
+export const setPersonalToolCredential = (id, value) => api.put(`/personal-tools/${encodeURIComponent(id)}/credential`, { value })
+export const testPersonalTool = (id) => api.post(`/personal-tools/${encodeURIComponent(id)}/test`, {}, { timeout: 130000 })
+export const listPersonalToolExecutions = (id) => api.get(`/personal-tools/${encodeURIComponent(id)}/executions`)
+export const cancelPersonalToolExecution = (id) => api.post(`/personal-tools/executions/${encodeURIComponent(id)}/cancel`, {}, { timeout: 40000 })
+export const listPersonalToolReviews = () => api.get('/personal-tools/reviews')
+export const approvePersonalTool = (id, ownerId, expectedHash, profileHash = '') => api.post(`/personal-tools/${encodeURIComponent(id)}/approve`, {
+  owner_id: ownerId, expected_hash: expectedHash, expected_profile_hash: profileHash, verified_read_only: true,
+})
+
 export function getChatHistory(sessionId) {
   return api.get(`/chat/history/${sessionId}`)
 }
@@ -143,6 +179,13 @@ export function getSessionContextUsage(sessionId) {
  */
 export function clearChatHistory(sessionId) {
   return api.delete(`/chat/history/${sessionId}`)
+}
+
+/**
+ * 停止生成：通知后端取消会话生成任务（前端 abort 仅断开 SSE，后端重试需显式取消）
+ */
+export function stopChatGeneration(sessionId) {
+  return api.post(`/chat/stop/${encodeURIComponent(sessionId)}`)
 }
 
 /**
@@ -255,6 +298,12 @@ export function getModuleRecall(days = 30) {
 export function listSkills() {
   return api.get('/skills')
 }
+
+export const listPersonalSuggestions = (signal) => api.get('/skills/suggestions', { signal })
+export const markPersonalSuggestionsSeen = (ids, signal) => api.post('/skills/suggestions/seen', { ids }, { signal })
+export const acceptPersonalSuggestion = (id, signal) => api.post(`/skills/suggestions/${encodeURIComponent(id)}/accept`, {}, { signal, timeout: 200000 })
+export const dismissPersonalSuggestion = (id, signal) => api.post(`/skills/suggestions/${encodeURIComponent(id)}/dismiss`, {}, { signal })
+export const confirmBusinessAcceptance = (id, body, signal) => api.post(`/skills/suggestions/${encodeURIComponent(id)}/acceptance`, body, { signal })
 
 export function createSkill({ name, kind = 'prompt', content = '', description = '', enabled = true, scope = null, visibility = 'personal' }) {
   return api.post('/skills', { name, kind, content, description, enabled, scope, visibility })
@@ -1065,7 +1114,7 @@ export function compileConversationTopics() {
 }
 
 // ============================================
-// 主问答语义缓存 API（当前用户专属：相似问题命中直回、绕过检索路由）
+// 主问答语义缓存 API（开关由系统设置统一管理，开启后对所有用户生效）
 // ============================================
 
 /**
@@ -1096,6 +1145,27 @@ export function clearSemanticCache() {
  */
 export function deleteSemanticCacheEntry(entryId) {
   return api.delete(`/chat/cache/${entryId}`)
+}
+
+/**
+ * 系统设置：保存语义缓存全局配置（管理员；enabled 开启后对所有用户生效，threshold 0.5~0.99）
+ */
+export function saveSemanticCacheConfig(payload) {
+  return api.post('/config/semantic-cache', payload)
+}
+
+/**
+ * 中断任务 checkpoint：查询会话待处理的「是否继续」任务
+ */
+export function listCheckpoints(sessionId) {
+  return api.get('/chat/checkpoints', { params: { session_id: sessionId } })
+}
+
+/**
+ * 中断任务 checkpoint：不继续 → 软删除（缓存保留 48h，记忆/日志留痕可检索）
+ */
+export function abandonCheckpoint(checkpointId) {
+  return api.post(`/chat/checkpoints/${checkpointId}/abandon`)
 }
 
 // ============================================

@@ -26,6 +26,17 @@ export const useAssistantStore = defineStore('assistant', () => {
   const statusText = ref('')
   const messages = ref([]) // [{role, content, thoughts[], tools[], clarify, edit, error, stopped, streaming}]
 
+  // 侧边面板宽度（用户可拖拽左边缘调整，localStorage 持久化；告警铃铛据此避让）
+  const PANEL_WIDTH_KEY = 'jzrm.assistantPanelWidth'
+  const _savedWidth = parseInt(localStorage.getItem(PANEL_WIDTH_KEY) || '', 10)
+  const panelWidth = ref(Number.isFinite(_savedWidth) && _savedWidth >= 320 ? Math.min(_savedWidth, 760) : 384)
+
+  function setPanelWidth(w) {
+    const v = Math.round(Math.max(320, Math.min(w, 760)))
+    panelWidth.value = v
+    try { localStorage.setItem(PANEL_WIDTH_KEY, String(v)) } catch (e) { /* 隐私模式忽略 */ }
+  }
+
   // ---- 历史会话 ----
   const sessions = ref([]) // [{id, title, created_at, updated_at}]
   const currentSessionId = ref('') // 当前活动会话 id（空=待后端首轮回传）
@@ -398,6 +409,7 @@ export const useAssistantStore = defineStore('assistant', () => {
     messages,
     context,
     actionTrail,
+    panelWidth,
     sessions,
     currentSessionId,
     isViewingHistory,
@@ -410,6 +422,7 @@ export const useAssistantStore = defineStore('assistant', () => {
     clearPageContext,
     setPageState,
     clearPageState,
+    setPanelWidth,
     pushAction,
     setOpenDoc,
     clearOpenDoc,

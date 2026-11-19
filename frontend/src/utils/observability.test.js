@@ -5,6 +5,7 @@ import { runInNewContext } from 'node:vm'
 import { parse, compileScript } from '@vue/compiler-sfc'
 import * as Vue from 'vue'
 import { renderToString } from '@vue/server-renderer'
+import MarkdownIt from 'markdown-it'
 
 const read = (path) => readFileSync(new URL(path, import.meta.url), 'utf8')
 const observation = read('../views/ObservabilityView.vue')
@@ -47,6 +48,7 @@ async function observationHarness(canOps = false, fail = false) {
   const component = new Function('modules', `${code}\nreturn __component;`)({
     vue: { ...Vue, onMounted: (fn) => { mounted = fn } },
     '@/stores/auth': { useAuthStore: () => ({ canOps }) }, '@/api': api,
+    'vue-router': { useRoute: () => Vue.reactive({ query: {} }), useRouter: () => ({ push() {} }) },
     '@/components/observability/ObsDashboard.vue': { default: { name: 'ObsDashboard', props: ['metrics', 'monitor', 'loading', 'rangeLabel'], render: () => null } },
     '@/components/observability/ObsLogs.vue': { default: { name: 'ObsLogs', render: () => null } },
   })
@@ -58,6 +60,110 @@ async function observationHarness(canOps = false, fail = false) {
     nodes: () => render({}, []),
   }
 }
+
+async function suggestionsHarness(overrides = {}) {
+  let mounted, unmounted
+  const calls = []
+  const draft = { id: 'draft-1', name: '待确认天气能力', status: 'pending', session_id: 's1', message_id: 'm1' }
+  const defaults = {
+    listSkills: async () => ({ data: { skills: [] } }),
+    listPersonalSuggestions: async () => ({ data: { suggestions: [{ id: 'mine', count: 3, label: '当前天气查询', sample_query: '<script>我的天气</script>' }], drafts: [] } }),
+    markPersonalSuggestionsSeen: async () => ({ data: { ids: ['mine'] } }),
+    acceptPersonalSuggestion: async () => ({ data: { draft } }),
+    dismissPersonalSuggestion: async () => ({ data: {} }),
+    ...overrides,
+  }
+  const api = Object.fromEntries(Object.entries(defaults).map(([name, fn]) => [name, async (...args) => {
+    calls.push([name, ...args])
+    return fn(...args)
+  }]))
+  const { descriptor, errors } = parse(read('../views/SkillsView.vue'))
+  assert.deepEqual(errors, [])
+  const compiled = compileScript(descriptor, { id: 'suggestions-test', inlineTemplate: true, genDefaultAs: '__component' })
+  const code = compiled.content.replace(/import\s+\{([^}]+)\}\s+from\s+['"]([^'"]+)['"];?/g, (_, names, source) =>
+    `const { ${names.replace(/\bas\b/g, ':')} } = modules[${JSON.stringify(source)}];`
+  ).replace(/import\s+([A-Za-z_$][\w$]*)\s+from\s+['"]([^'"]+)['"];?/g, (_, name, source) =>
+    `const ${name} = modules[${JSON.stringify(source)}].default;`
+  )
+  const component = new Function('modules', `${code}\nreturn __component;`)({
+    vue: { ...Vue, onMounted: fn => { mounted = fn }, onUnmounted: fn => { unmounted = fn } },
+    'vue-router': { useRouter: () => ({ push() {} }) }, 'markdown-it': { default: MarkdownIt }, '@/api': api,
+    '@/components/PersonalToolsPanel.vue': { default: { render: () => null } },
+    '@/components/SkillDraftCard.vue': { default: { props: ['draft'], render() { return Vue.h('p', `${this.draft.name}:${this.draft.status}`) } } },
+  })
+  const render = component.setup({}, { expose() {} })
+  await mounted()
+  return { calls, draft, unmount: () => unmounted(),
+    html: () => renderToString(Vue.createSSRApp({ render })),
+    button: text => findNode(render({}, []), node => node.type === 'button' && typeof node.children === 'string' && node.children.trim() === text),
+  }
+}
+
+test('个人建议只领展示窗口，接受后仅呈现草稿并转义问题', async () => {
+  const view = await suggestionsHarness()
+  assert.deepEqual(view.calls.map(([name]) => name), ['listSkills', 'listPersonalSuggestions', 'markPersonalSuggestionsSeen'])
+  let html = await view.html()
+  assert.match(html, /仅本人可见|7 天内不重复/)
+  assert.match(html, /&lt;script&gt;我的天气&lt;\/script&gt;/)
+  await view.button('查找资料并生成草稿').props.onClick()
+  html = await view.html()
+  assert.match(html, /待确认天气能力:pending/)
+  assert.equal(view.button('查找资料并生成草稿'), undefined)
+  assert.deepEqual(view.calls.map(([name]) => name), ['listSkills', 'listPersonalSuggestions', 'markPersonalSuggestionsSeen', 'acceptPersonalSuggestion'])
+  view.unmount()
+})
+
+test('个人建议刷新恢复草稿但不重放发现，忽略后移除提示', async () => {
+  const view = await suggestionsHarness()
+  await view.button('忽略 7 天').props.onClick()
+  assert.equal(view.button('忽略 7 天'), undefined)
+  assert.equal(view.calls.at(-1)[0], 'dismissPersonalSuggestion')
+  view.unmount()
+  const restored = await suggestionsHarness({ listPersonalSuggestions: async () => ({ data: { suggestions: [], drafts: [{ id: 'old', name: '原轮次草稿', status: 'pending' }] } }) })
+  assert.match(await restored.html(), /原轮次草稿:pending/)
+  assert.deepEqual(restored.calls.map(([name]) => name), ['listSkills', 'listPersonalSuggestions'])
+  restored.unmount()
+})
+
+test('切换页面取消建议发现且忽略迟到响应', async () => {
+  let complete, signal
+  const view = await suggestionsHarness({ acceptPersonalSuggestion: (id, s) => { signal = s; return new Promise(resolve => { complete = resolve }) } })
+  const pending = view.button('查找资料并生成草稿').props.onClick()
+  view.unmount()
+  assert.equal(signal.aborted, true)
+  complete({ data: { draft: view.draft } })
+  await pending
+  assert.doesNotMatch(await view.html(), /待确认天气能力:pending/)
+})
+
+test('取消发现可用，加载失败不泄露内部错误', async () => {
+  const view = await suggestionsHarness({ acceptPersonalSuggestion: (id, signal) => new Promise((resolve, reject) => {
+    signal.addEventListener('abort', () => reject(new Error('internal-discovery-error')), { once: true })
+  }) })
+  const pending = view.button('查找资料并生成草稿').props.onClick()
+  view.button('取消发现').props.onClick()
+  await pending
+  assert.match(await view.html(), /已停止等待，未自动安装/)
+  view.unmount()
+  const failed = await suggestionsHarness({ listPersonalSuggestions: async () => { throw new Error('internal-discovery-error') } })
+  assert.match(await failed.html(), /个人建议加载失败/)
+  assert.doesNotMatch(await failed.html(), /internal-discovery-error/)
+  failed.unmount()
+})
+
+test('建议 API 只对发现放宽超时且传递取消信号', async () => {
+  const source = read('../api/index.js')
+  const declaration = source.match(/export const acceptPersonalSuggestion = [^\n]+/)[0].replace('export ', '')
+  const calls = []
+  const accept = new Function('api', `${declaration}; return acceptPersonalSuggestion;`)({ post: (...args) => calls.push(args) })
+  const signal = new AbortController().signal
+  accept('a/b', signal)
+  assert.equal(calls[0][0], '/skills/suggestions/a%2Fb/accept')
+  assert.equal(calls[0][2].timeout, 200000)
+  assert.equal(calls[0][2].signal, signal)
+  assert.match(source, /timeout: 30000/)
+  assert.doesNotMatch(observation, /s\.sample_query|openSedimentDialog|submitSediment/)
+})
 
 function findNode(node, predicate) {
   if (!node || typeof node !== 'object') return undefined
@@ -159,7 +265,7 @@ test('两份静态样例一致，网关导航和可观测性角色切换脚本�
   function node(id) {
     if (!nodes.has(id)) {
       const classes = new Set()
-      nodes.set(id, { classList: { add: (c) => classes.add(c), remove: (c) => classes.delete(c), contains: (c) => classes.has(c) } })
+      nodes.set(id, { querySelector: () => null, classList: { add: (c) => classes.add(c), remove: (c) => classes.delete(c), contains: (c) => classes.has(c) } })
     }
     return nodes.get(id)
   }
@@ -168,6 +274,7 @@ test('两份静态样例一致，网关导航和可观测性角色切换脚本�
   const buttons = ['business', 'technical'].map((mode) => ({ dataset: { obsMode: mode }, setAttribute(name, value) { this[name] = value } }))
   const context = {
     document: {
+      addEventListener() {},
       getElementById: (id) => nodes.get(id),
       querySelector: () => null,
       querySelectorAll: (selector) => selector === '.view' ? views : selector === '[data-obs-mode]' ? buttons : [],

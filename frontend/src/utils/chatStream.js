@@ -135,6 +135,25 @@ export function groupKnowledgeSources(sources = []) {
   }))
 }
 
+/** 引用只处理文本 token，不修改链接属性、代码或转义后的 HTML。 */
+export function configureChatMarkdown(md) {
+  md.renderer.rules.text = (tokens, index) => md.utils.escapeHtml(tokens[index].content).replace(
+    /\[(工具来源|网络来源|来源)\s*(\d{1,6})\]/g,
+    (_, type, num) => {
+      const kind = type === '工具来源' ? 'tool' : type === '网络来源' ? 'web' : 'knowledge'
+      return `<span class="source-citation" data-cite-kind="${kind}" data-cite-num="${num}" title="点击查看对应来源">[${type} ${num}]</span>`
+    },
+  )
+  md.renderer.rules.table_open = () => '<div class="md-table-wrap"><table>\n'
+  md.renderer.rules.table_close = () => '</table></div>\n'
+  const linkOpen = md.renderer.rules.link_open || ((tokens, idx, options, env, self) => self.renderToken(tokens, idx, options))
+  md.renderer.rules.link_open = (tokens, idx, options, env, self) => {
+    tokens[idx].attrSet('rel', 'noopener noreferrer')
+    return linkOpen(tokens, idx, options, env, self)
+  }
+  return md
+}
+
 export function mergeChatAction(messages, action) {
   const message = messages.find(m => m.message_id === action.message_id) ||
     [...messages].reverse().find(m => m.role === 'user' && (m.attachments || []).some(a => a.file_id === action.file_id))

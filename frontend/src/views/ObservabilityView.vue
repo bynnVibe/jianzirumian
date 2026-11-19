@@ -202,19 +202,17 @@
       <!-- ============ 能力缺口沉淀建议（需求6：系统可进化性） ============ -->
       <section class="panel" v-if="sediment && sediment.suggestions && sediment.suggestions.length">
         <div class="panel-head">
-          <span class="panel-title">技能沉淀建议（频繁能力缺口 → 进化为 Skill/工具）</span>
+          <span class="panel-title">未满足能力趋势（脱敏汇总）</span>
+          <button class="sediment-btn" @click="router.push('/skills')">查看我的能力建议</button>
         </div>
-        <div v-for="s in sediment.suggestions" :key="s.scenario" class="sediment-item">
+        <div v-for="s in sediment.suggestions" :key="`${s.scenario}:${s.missing_capability}`" class="sediment-item">
           <div class="sediment-body">
             <p class="sediment-msg">💡 {{ s.message }}</p>
             <p class="sediment-meta">
-              建议名称：<code>{{ s.suggested_name }}</code> · 类型：{{ s.suggested_kind === 'skill' ? 'Skill' : '工具' }}
-              · 最近出现：{{ formatTime(s.last_at) }} · 示例问题：{{ s.sample_query || '-' }}
+              {{ s.label }} · {{ s.owners }} 位用户 · {{ s.count }} 条独立请求
+              · 最近出现：{{ formatTime(s.last_at) }}
             </p>
-            <p class="sediment-sols">候选方案：{{ (s.solutions || []).map((x) => x.label).join('；') }}</p>
           </div>
-          <button class="sediment-btn" title="同意沉淀，编辑并创建为 Skill"
-                  @click="openSedimentDialog(s)">同意沉淀</button>
         </div>
       </section>
 
@@ -930,94 +928,6 @@
       </div>
     </div>
 
-    <!-- ============ 需求1：同意沉淀 → 编辑并创建为 Skill 弹窗 ============ -->
-    <div v-if="sedimentDialog" class="modal-overlay" @click.self="closeSedimentDialog">
-      <div class="modal-box sediment-box" role="dialog" aria-label="沉淀为 Skill">
-        <div class="trace-head">
-          <h3 class="modal-title">沉淀为 Skill</h3>
-          <button class="icon-btn" title="关闭" @click="closeSedimentDialog">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
-              <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
-            </svg>
-          </button>
-        </div>
-        <p class="sediment-dialog-hint">来源场景：<code>{{ sedimentDialog.scenario }}</code> · 近 {{ sediment.days }} 天出现 {{ sedimentDialog.count }} 次</p>
-        <div class="sediment-form">
-          <label class="form-row">
-            <span class="form-label">归属</span>
-            <span class="radio-group">
-              <label class="radio"><input type="radio" value="personal" v-model="sedimentDialog.visibility" /> 个人（仅自己可见可用）</label>
-              <label class="radio"><input type="radio" value="public" v-model="sedimentDialog.visibility" /> 公共（全员可见可用）</label>
-            </span>
-          </label>
-          <label class="form-row">
-            <span class="form-label">技能名称</span>
-            <input class="form-input" v-model="sedimentDialog.name" maxlength="60" placeholder="给这个沉淀技能取个名字" />
-          </label>
-          <label class="form-row">
-            <span class="form-label">描述</span>
-            <input class="form-input" v-model="sedimentDialog.description" maxlength="200" placeholder="一句话说明该技能用途" />
-          </label>
-          <label class="form-row">
-            <span class="form-label">指令内容</span>
-            <textarea class="form-textarea" v-model="sedimentDialog.content" rows="5"
-                      placeholder="当遇到此类场景时，希望 Agent 如何处理（注入对话系统提示）"></textarea>
-          </label>
-          <label class="form-row">
-            <span class="form-label">其他需求</span>
-            <textarea class="form-textarea" v-model="sedimentDialog.extra" rows="2"
-                      placeholder="可选：补充约束/语气/边界等，将合并到指令内容末尾"></textarea>
-          </label>
-          <label class="form-row checkbox-row">
-            <input type="checkbox" v-model="sedimentDialog.enabled" /> 创建后立即启用
-          </label>
-        </div>
-
-        <!-- 需求2：从主流技能市场搜寻类似 Skill，展示卡片并一键应用 -->
-        <div class="market-panel">
-          <div class="market-head">
-            <span class="market-title">🛒 从技能市场寻找类似 Skill</span>
-            <span class="market-sources">Skills.sh · ClawHub · SkillsMP 等</span>
-          </div>
-          <div class="market-searchrow">
-            <input class="form-input" v-model="sedimentDialog.marketQuery" maxlength="120"
-                   placeholder="搜索关键词，如 weather / 天气" @keyup.enter="runMarketSearch" />
-            <button class="btn btn-outline sm" :disabled="sedimentDialog.marketLoading" @click="runMarketSearch">
-              {{ sedimentDialog.marketLoading ? '搜索中…' : '搜索市场' }}
-            </button>
-          </div>
-          <div v-if="sedimentDialog.marketLoading" class="mini-loading">正在从主流市场搜寻类似 Skill…</div>
-          <div v-else-if="sedimentDialog.marketError" class="inline-error">{{ sedimentDialog.marketError }}</div>
-          <div v-else-if="sedimentDialog.marketResults.length" class="market-grid">
-            <div v-for="m in sedimentDialog.marketResults" :key="m.id" class="market-card"
-                 :class="{ applied: sedimentDialog.appliedMarketId === m.id }">
-              <div class="market-card-top">
-                <span class="market-name" :title="m.name">{{ m.name }}</span>
-                <span class="market-src">{{ m.source_name }}</span>
-              </div>
-              <p class="market-desc">{{ m.description || '（无描述，应用后将回源指令内容）' }}</p>
-              <div class="market-card-foot">
-                <span class="market-heat" v-if="m.heat" :title="'安装/下载量'">⬇ {{ formatNum(m.heat) }}</span>
-                <a class="market-link" :href="m.url" target="_blank" rel="noopener">查看</a>
-                <button class="btn btn-primary sm" @click="applyMarketSkill(m)">
-                  {{ sedimentDialog.appliedMarketId === m.id ? '已应用 ✓' : '应用' }}
-                </button>
-              </div>
-            </div>
-          </div>
-          <p v-else-if="sedimentDialog.marketSearched" class="empty-hint">未在主流市场找到类似 Skill，可直接编辑上方表单沉淀。</p>
-        </div>
-
-        <div v-if="sedimentDialog.error" class="inline-error">{{ sedimentDialog.error }}</div>
-        <div class="sediment-actions">
-          <button class="btn btn-ghost" :disabled="sedimentDialog.submitting" @click="closeSedimentDialog">取消</button>
-          <button class="btn btn-primary" :disabled="sedimentDialog.submitting" @click="submitSediment">
-            {{ sedimentDialog.submitting ? '提交中…' : '确认沉淀' }}
-          </button>
-        </div>
-      </div>
-    </div>
-
     <!-- 轻量 toast 反馈 -->
     <transition name="fade">
       <div v-if="toast" class="obs-toast" :class="{ error: toast.error }">{{ toast.message }}</div>
@@ -1070,7 +980,7 @@ import ObsDashboard from '@/components/observability/ObsDashboard.vue'
 import ObsLogs from '@/components/observability/ObsLogs.vue'
 import ObsAlerts from '@/components/observability/ObsAlerts.vue'
 import ObsCachePanel from '@/components/observability/ObsCachePanel.vue'
-import { getMyObservabilityMetrics, getMyContextOverview, getMyContextSessions, getObservabilityMetrics, getObservabilityTraces, getObservabilityTrace, getObservabilityTraceLogs, getSkillReviews, getToolRoutingMetrics, getToolRegistry, getSessionObservability, getSedimentSuggestions, getObsMonitor, getObsToolChains, getObsDrill, createSkill, searchSkillMarket, getMyMemoryDrill } from '@/api'
+import { getMyObservabilityMetrics, getMyContextOverview, getMyContextSessions, getObservabilityMetrics, getObservabilityTraces, getObservabilityTrace, getObservabilityTraceLogs, getSkillReviews, getToolRoutingMetrics, getToolRegistry, getSessionObservability, getSedimentSuggestions, getObsMonitor, getObsToolChains, getObsDrill, getMyMemoryDrill } from '@/api'
 
 const auth = useAuthStore()
 const route = useRoute()
@@ -1097,8 +1007,6 @@ const skillReviews = ref(null)
 const toolRouting = ref(null)
 const toolRegistry = ref(null)
 const sediment = ref(null)
-// 需求1：同意沉淀编辑弹窗（公共/个人归属 + 名称/描述/指令内容/其他需求）
-const sedimentDialog = ref(null)
 // 需求1：记忆概览钻取弹窗（点击记忆指标/类型条查看明细）
 const memDrill = ref(null)
 // 轻量 toast（与 Skill 配置页一致的反馈方式）
@@ -1269,76 +1177,6 @@ async function loadSediment() {
   }
 }
 
-// ---- 需求1：同意沉淀 → 编辑弹窗 → 创建为 Skill ----
-function openSedimentDialog(s) {
-  const sols = (s.solutions || []).map((x) => x.label).filter(Boolean)
-  const label = s.label || s.scenario
-  const defaultContent = `当识别到「${label}」类需求时，`
-    + (sols.length ? `按以下方案处理：${sols.join('；')}。` : '主动说明当前能力边界并给出可行的替代建议。')
-  sedimentDialog.value = {
-    scenario: s.scenario,
-    label,
-    count: s.count,
-    visibility: 'personal',
-    name: String(s.suggested_name || ('skill_' + s.scenario)).slice(0, 60),
-    description: String(s.message || '').slice(0, 200),
-    content: defaultContent,
-    extra: '',
-    enabled: true,
-    submitting: false,
-    error: '',
-    // 需求2：技能市场相似 Skill 搜寻
-    marketQuery: String(s.scenario || '').replace(/_/g, ' ').trim() || label,
-    marketLoading: false,
-    marketResults: [],
-    marketError: '',
-    marketSearched: false,
-    appliedMarketId: '',
-  }
-  // 打开即自动搜寻一次类似 Skill（best-effort，不阻塞编辑）
-  runMarketSearch()
-}
-
-async function runMarketSearch() {
-  const d = sedimentDialog.value
-  if (!d || d.marketLoading) return
-  const q = (d.marketQuery || '').trim()
-  if (!q) { d.marketError = '请输入搜索关键词'; return }
-  d.marketLoading = true
-  d.marketError = ''
-  try {
-    const res = await searchSkillMarket(q, 6)
-    d.marketResults = res.data.results || []
-    d.marketSearched = true
-  } catch {
-    d.marketResults = []
-    d.marketSearched = true
-    d.marketError = '市场搜索失败，请稍后重试'
-  } finally {
-    d.marketLoading = false
-  }
-}
-
-function applyMarketSkill(m) {
-  const d = sedimentDialog.value
-  if (!d) return
-  d.name = String(m.name || d.name).slice(0, 60)
-  if (m.description) d.description = String(m.description).slice(0, 200)
-  const body = (m.content || '').trim()
-  if (body) {
-    d.content = body
-  } else if (m.description) {
-    d.content = `当识别到「${m.name}」类需求时，参考以下能力说明处理：${m.description}`
-  }
-  d.appliedMarketId = m.id
-  showToast(`已应用市场 Skill「${m.name}」，可继续编辑后确认沉淀`)
-}
-
-function closeSedimentDialog() {
-  if (sedimentDialog.value && sedimentDialog.value.submitting) return
-  sedimentDialog.value = null
-}
-
 async function openMemoryDrill(kind, label) {
   memDrill.value = { kind, label, loading: true, error: '', items: [], total: 0, explanation: '' }
   try {
@@ -1352,32 +1190,6 @@ async function openMemoryDrill(kind, label) {
 
 function closeMemoryDrill() {
   memDrill.value = null
-}
-
-async function submitSediment() {
-  const d = sedimentDialog.value
-  if (!d || d.submitting) return
-  const name = (d.name || '').trim()
-  if (!name) { d.error = '技能名称必填'; return }
-  let content = (d.content || '').trim()
-  const extra = (d.extra || '').trim()
-  if (extra) content = content ? `${content}\n\n补充要求：${extra}` : `补充要求：${extra}`
-  if (!content) { d.error = '指令内容不能为空'; return }
-  d.error = ''
-  d.submitting = true
-  try {
-    await createSkill({
-      name, kind: 'prompt', scope: 'chat', content,
-      description: (d.description || '').trim(),
-      enabled: !!d.enabled, visibility: d.visibility,
-    })
-    sedimentDialog.value = null
-    showToast(d.visibility === 'public' ? '已沉淀为公共 Skill' : '已沉淀为个人 Skill')
-  } catch (e) {
-    d.error = e?.response?.data?.detail || e?.message || '沉淀失败'
-  } finally {
-    if (sedimentDialog.value) sedimentDialog.value.submitting = false
-  }
 }
 
 // ---- 对话维度统一视图（需求2：上下文构成 × 请求追踪 × 调用链 合并）----

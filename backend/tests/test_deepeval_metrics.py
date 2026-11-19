@@ -29,7 +29,7 @@ def mem_db(monkeypatch):
 
 def _case(answer="黄芪补气。", contexts=None):
     return dm.LLMTestCase(input="黄芪有什么功效？", actual_output=answer,
-                          expected_output="补气固表", retrieval_context=contexts or ["黄芪补气固表"])
+                          expected_output="补气固表", retrieval_context=["黄芪补气固表"] if contexts is None else contexts)
 
 
 # ============================================

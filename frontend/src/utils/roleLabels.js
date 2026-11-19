@@ -4,6 +4,7 @@ export const ROLE_LABELS = {
   assistant: '知识助手',
   intent_rewrite: '意图改写',
   evidence_check: '证据校验',
+  tool_decision: '原生工具决策',
   wiki_compile: '知识编译',
   embed: '向量化',
   rerank: '重排序',

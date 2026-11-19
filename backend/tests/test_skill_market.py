@@ -18,10 +18,9 @@ def test_parse_skill_md_block_scalar():
     assert body == "body"
 
 
-def test_parse_skill_md_no_frontmatter():
-    desc, body = sm._parse_skill_md("plain body")
-    assert desc == ""
-    assert body == "plain body"
+def test_parse_skill_md_no_frontmatter_is_not_an_installable_package():
+    assert sm._parse_skill_md("plain body") == ("", "")
+    assert sm._parse_skill_md('---\nname: x\ndescription: !!python/object/apply:os.system ["id"]\n---\nbody') == ("", "")
 
 
 def test_search_market_empty_query():

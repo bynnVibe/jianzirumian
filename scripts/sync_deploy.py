@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def files():
     mappings = {
         "docker-compose.yml": "docker-compose.yml",
+        "docker-compose.tools.yml": "docker-compose.tools.yml",
         "nginx.conf": "nginx.conf",
         "backend/.env.example": ".env.example",
         "scripts/deploy-aliyun.sh": "deploy-aliyun.sh",
@@ -19,6 +20,11 @@ def files():
         "renderer/Dockerfile": "renderer/Dockerfile",
         "renderer/requirements.txt": "renderer/requirements.txt",
     }
+    # 只同步明确列出的控制面源文件，不打包状态、凭据、虚拟环境或未经批准的脚本。
+    worker_files = ("worker.py", "runner.py", "Dockerfile", "seccomp.json", "requirements.txt",
+                    "worker.env.example", "jianzi-worker.service", "nginx.conf.example", "acceptance.py", "package.py")
+    for name in worker_files:
+        mappings["sandbox_worker/" + name] = "sandbox_worker/" + name
     for source in sorted((ROOT / "monitoring").rglob("*")):
         if source.is_file() and source.suffix in (".yml", ".yaml", ".json"):
             name = str(source.relative_to(ROOT))

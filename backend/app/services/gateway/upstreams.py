@@ -79,6 +79,23 @@ def _normalize_models(value) -> List[str]:
     return seen
 
 
+def supports_tools(up: dict, model: str, tool_choice="auto") -> bool:
+    """能力绑定具体上游和精确模型；Ollama 不伪造强制选工具协议。"""
+    declared = up.get("tool_models") or []
+    if isinstance(declared, str):
+        declared = _parse_json(declared, [])
+    return (up.get("category", "llm") == "llm" and model in declared
+            and up.get("protocol", "openai") in VALID_PROTOCOLS
+            and (up.get("protocol") != "ollama" or tool_choice in (None, "auto")))
+
+
+def _tool_models(value, models, category):
+    declared = _normalize_models(value)
+    if declared and (category != "llm" or any(m not in models for m in declared)):
+        raise ValueError("原生工具模型必须属于该 LLM 上游的模型列表")
+    return declared
+
+
 def _normalize_tier(value) -> str:
     s = (value or "").strip().lower()
     return s if s in TIERS else "paid"
@@ -168,6 +185,7 @@ def _row_to_dict(row: dict, with_secret: bool = False) -> dict:
         "tier": row.get("tier") or "paid",
         "category": row.get("category") or "llm",
         "models": models,
+        "tool_models": _parse_json(row.get("tool_models"), []),
         "model_count": len(models),
         "weight": int(row.get("weight") or 100),
         "enabled": bool(row.get("enabled")),
@@ -219,16 +237,17 @@ def create_upstream(payload: dict) -> dict:
         raise ValueError("付费/订阅上游需填写 Base URL")
     models = _normalize_models(payload.get("models"))
     category = _normalize_category(payload.get("category"))
+    tool_models = _tool_models(payload.get("tool_models"), models, category)
     uid = _new_id()
     db.execute(
         "INSERT INTO gateway_upstreams (id, name, protocol, base_url, api_key, remark,"
         " tier, category, models, weight, enabled, health, fail_count, success_count,"
-        " last_error, latency_ms, created_at, updated_at)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,?,'healthy',0,0,'',0,?,?)",
+        " last_error, latency_ms, created_at, updated_at, tool_models)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,'healthy',0,0,'',0,?,?,?)",
         (uid, name, protocol, base_url, (payload.get("api_key") or "").strip(),
          (payload.get("remark") or "").strip(), tier, category,
          json.dumps(models, ensure_ascii=False), max(1, int(payload.get("weight") or 100)),
-         1 if payload.get("enabled", True) else 0, _now(), _now()),
+         1 if payload.get("enabled", True) else 0, _now(), _now(), json.dumps(tool_models)),
     )
     return get_upstream(uid)
 
@@ -253,14 +272,16 @@ def update_upstream(upstream_id: str, patch: dict) -> Optional[dict]:
         api_key = str(patch["api_key"]).strip()
     models = _normalize_models(patch["models"]) if "models" in patch \
         else _parse_json(cur["models"], [])
+    previous_tools = [m for m in _parse_json(cur.get("tool_models"), []) if m in models] if category == "llm" else []
+    tool_models = _tool_models(patch.get("tool_models", previous_tools), models, category)
     weight = max(1, int(patch.get("weight", cur["weight"]) or 100))
     enabled = 1 if patch.get("enabled", bool(cur["enabled"])) else 0
     remark = (patch.get("remark", cur["remark"]) or "").strip()
     db.execute(
         "UPDATE gateway_upstreams SET name=?, protocol=?, base_url=?, api_key=?, remark=?,"
-        " tier=?, category=?, models=?, weight=?, enabled=?, updated_at=? WHERE id=?",
+        " tier=?, category=?, models=?, weight=?, enabled=?, updated_at=?, tool_models=? WHERE id=?",
         (name, protocol, base_url, api_key, remark, tier, category,
-         json.dumps(models, ensure_ascii=False), weight, enabled, _now(), upstream_id),
+         json.dumps(models, ensure_ascii=False), weight, enabled, _now(), json.dumps(tool_models), upstream_id),
     )
     return get_upstream(upstream_id)
 
@@ -274,12 +295,12 @@ def clone_upstream(upstream_id: str) -> Optional[dict]:
     db.execute(
         "INSERT INTO gateway_upstreams (id, name, protocol, base_url, api_key, remark,"
         " tier, category, models, weight, enabled, health, fail_count, success_count,"
-        " last_error, latency_ms, created_at, updated_at)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,?,'healthy',0,0,'',0,?,?)",
+        " last_error, latency_ms, created_at, updated_at, tool_models)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,'healthy',0,0,'',0,?,?,?)",
         (uid, f"{src['name']} 副本", src.get("protocol") or "openai",
          src.get("base_url") or "", src.get("api_key") or "", src.get("remark") or "",
          src.get("tier") or "paid", src.get("category") or "llm", src.get("models") or "[]",
-         int(src.get("weight") or 100), 1, _now(), _now()),
+         int(src.get("weight") or 100), 1, _now(), _now(), src.get("tool_models") or "[]"),
     )
     return get_upstream(uid)
 

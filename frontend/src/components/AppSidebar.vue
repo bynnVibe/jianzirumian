@@ -405,31 +405,31 @@
         <div class="cache-head">
           <div class="cache-head-text">
             <h3 class="modal-title">语义缓存（网关层）</h3>
-            <p class="cache-desc">经意图识别打上「公共/个人」与「实时/非实时」标签：公共缓存全体用户共享复用，个人缓存仅本人可见；按阶梯 TTL 自动过期（实时 {{ cacheStats.ttl?.realtime_hours || 2 }}h、非实时冷 {{ cacheStats.ttl?.cold_days || 3 }}天/常命中 {{ cacheStats.ttl?.warm_days || 7 }}天/热点 {{ cacheStats.ttl?.hot_days || 30 }}天）。</p>
+            <p class="cache-desc">仅个人域复用已验证的静态答案，硬期限最多 24 小时，命中不续期。知识问答每次仍检索并核对权限与证据；纯模型问答仅精确匹配。联网、动态问题、工具任务和强制刷新不复用最终答案。开关已统一到系统设置，开启后对所有用户生效。</p>
           </div>
-          <label class="sc-switch" :title="cacheStats.enabled ? '点击关闭语义缓存' : '点击开启语义缓存'">
-            <input type="checkbox" :checked="cacheStats.enabled" @change="onToggleCacheEnabled($event.target.checked)" />
-            <span class="sc-slider"></span>
-          </label>
+          <div class="sc-global-status">
+            <span class="sc-status-chip" :class="cacheStats.enabled ? 'on' : 'off'">{{ cacheStats.enabled ? '全局开启' : '已关闭' }}</span>
+            <button v-if="auth.isAdmin" class="sc-mini-btn" @click="goToCacheSettings">去系统设置</button>
+          </div>
         </div>
         <div class="sc-stats">
           <span class="sc-stat">相似度阈值 <b>{{ cacheStats.threshold }}</b></span>
           <span class="sc-stat">个人条目 <b>{{ cacheStats.count }}</b></span>
-          <span class="sc-stat">公共条目 <b>{{ cacheStats.public_count }}</b></span>
+          <span class="sc-stat">公共共享 <b>未开放</b></span>
           <span class="sc-stat">本人累计命中 <b>{{ cacheStats.total_hits }}</b></span>
           <span class="sc-spacer"></span>
           <button class="sc-mini-btn" :disabled="cacheLoading" @click="loadCache()">刷新</button>
           <button class="sc-mini-btn danger" :disabled="cacheLoading || !cacheStats.count" @click="onClearCache">清空个人</button>
         </div>
         <div class="sc-scope-tabs">
-          <button v-for="t in [{k:'all',l:'全部'},{k:'personal',l:'个人'},{k:'public',l:'公共'}]" :key="t.k"
+          <button v-for="t in [{k:'all',l:'全部个人条目'}]" :key="t.k"
                   class="sc-scope-tab" :class="{ active: cacheScopeFilter === t.k }"
                   :disabled="cacheLoading" @click="onScopeFilter(t.k)">{{ t.l }}</button>
         </div>
         <div v-if="cacheMessage" class="sc-message" :class="cacheMessageType">{{ cacheMessage }}</div>
         <div class="sc-list">
           <div v-if="cacheLoading" class="sc-empty">加载中…</div>
-          <div v-else-if="!cacheEntries.length" class="sc-empty">暂无缓存。正常作答后网关会自动沉淀问答，后续相似问题即可命中直回。</div>
+          <div v-else-if="!cacheEntries.length" class="sc-empty">暂无符合条件的缓存。只有静态性、上下文、证据及模型合同校验通过才会保存；未配置签名密钥时安全旁路。</div>
           <div v-for="e in cacheEntries" :key="e.id" class="sc-item">
             <div class="sc-item-main">
               <div class="sc-q">
@@ -440,7 +440,9 @@
               </div>
               <div class="sc-a">{{ e.answer }}</div>
               <div class="sc-meta">
-                <span class="sc-ttl" :title="'阶梯 TTL 档位'">{{ e.ttl_label || '—' }}</span>
+                <span class="sc-ttl">{{ e.cache_kind === 'knowledge_semantic' ? '知识证据校验' : '纯模型精确匹配' }}</span>
+                <span>生成于 {{ fmtExpiry(e.created_at) }}</span>
+                <span v-if="e.evidence_hash" :title="e.evidence_hash">证据 {{ e.evidence_hash.slice(0, 10) }}</span>
                 <span class="sc-exp" :title="'过期时间'">{{ e.expired ? '已过期' : '至 ' + fmtExpiry(e.expires_at) }}</span>
               </div>
             </div>
@@ -588,7 +590,7 @@ import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useChatStore } from '@/stores/chat'
 import { useAuthStore } from '@/stores/auth'
-import { healthCheck, updateProfile, getMyUsageStats, compactSession, listMyMemories, createMyMemory, updateMyMemory, deleteMyMemory, getModuleRecall, getSemanticCache, toggleSemanticCache, clearSemanticCache, deleteSemanticCacheEntry, getMyInstructions, saveMyInstructions, listMyAgentMemories, createMyAgentMemory, updateMyAgentMemory, deleteMyAgentMemory, getSessionNote, updateSessionNote } from '@/api'
+import { healthCheck, updateProfile, getMyUsageStats, compactSession, listMyMemories, createMyMemory, updateMyMemory, deleteMyMemory, getModuleRecall, getSemanticCache, clearSemanticCache, deleteSemanticCacheEntry, getMyInstructions, saveMyInstructions, listMyAgentMemories, createMyAgentMemory, updateMyAgentMemory, deleteMyAgentMemory, getSessionNote, updateSessionNote } from '@/api'
 
 const props = defineProps({
   open: { type: Boolean, default: false },
@@ -1028,7 +1030,7 @@ async function saveNote() {
 // ============================================
 const showCacheModal = ref(false)
 const cacheLoading = ref(false)
-const cacheStats = ref({ enabled: false, threshold: 0.9, count: 0, total_hits: 0, public_count: 0, public_hits: 0, ttl: null })
+const cacheStats = ref({ enabled: false, threshold: 0.95, count: 0, total_hits: 0, public_count: 0, public_hits: 0, ttl: null })
 const cacheEntries = ref([])
 const cacheScopeFilter = ref('all') // all|personal|public（公共域全体共享，个人域仅本人）
 const cacheMessage = ref('')
@@ -1042,7 +1044,7 @@ async function loadCache() {
     const d = res.data || {}
     cacheStats.value = {
       enabled: !!d.enabled,
-      threshold: d.threshold ?? 0.9,
+      threshold: Number(d.threshold) || 0.9,
       count: d.count ?? 0,
       total_hits: d.total_hits ?? 0,
       public_count: d.public_count ?? 0,
@@ -1083,17 +1085,10 @@ function openCacheModal() {
   loadCache()
 }
 
-async function onToggleCacheEnabled(enabled) {
-  try {
-    const res = await toggleSemanticCache(enabled)
-    cacheStats.value = { ...cacheStats.value, enabled: !!res.data?.enabled }
-    cacheMessage.value = res.data?.enabled ? '已开启语义缓存' : '已关闭语义缓存'
-    cacheMessageType.value = 'info'
-  } catch (e) {
-    cacheMessage.value = '切换失败：' + (e?.response?.data?.detail || e?.message)
-    cacheMessageType.value = 'error'
-    loadCache()
-  }
+// 开关已收拢到系统设置（管理员），此处只读展示 + 跳转
+function goToCacheSettings() {
+  showCacheModal.value = false
+  router.push('/admin/settings')
 }
 
 async function onClearCache() {
@@ -2009,12 +2004,10 @@ function chartTooltip(row) {
   margin: 0;
 }
 
-.sc-switch { position: relative; display: inline-block; width: 40px; height: 22px; flex-shrink: 0; cursor: pointer; margin-top: 2px; }
-.sc-switch input { opacity: 0; width: 0; height: 0; }
-.sc-slider { position: absolute; inset: 0; background: #d8cbb8; border-radius: 22px; transition: .2s; }
-.sc-slider::before { content: ''; position: absolute; height: 16px; width: 16px; left: 3px; top: 3px; background: #fff; border-radius: 50%; transition: .2s; }
-.sc-switch input:checked + .sc-slider { background: var(--color-primary, #c98a4b); }
-.sc-switch input:checked + .sc-slider::before { transform: translateX(18px); }
+.sc-global-status { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; flex-shrink: 0; margin-top: 2px; }
+.sc-status-chip { padding: 2px 10px; border-radius: 12px; font-size: 12px; font-weight: 600; }
+.sc-status-chip.on { background: #eaf6ec; color: #2e7d32; }
+.sc-status-chip.off { background: #f1ece4; color: var(--color-text-secondary); }
 .sc-stats { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 12px 0; font-size: 12px; color: var(--color-text-secondary); }
 .sc-stat b { color: var(--color-primary, #c56d23); font-weight: 700; }
 .sc-spacer { flex: 1; }

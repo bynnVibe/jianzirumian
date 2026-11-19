@@ -1,18 +1,9 @@
 """
-见字如面 - 网关层语义缓存引擎（需求：构建在网关层 + 公共/个人域 + 实时/非实时阶梯 TTL）
+见字如面 - 网关层受控答案缓存唯一引擎。
 
-本模块是语义缓存的唯一实现，由【模型网关代理】(services/gateway/proxy.py) 在
-chat_answer/assistant 角色出网前调用：命中则直接合成响应、跳过上游 LLM；未命中则
-上游成功返回后回写。业务层（chat.py）只负责在意图识别后计算「公共/个人 + 实时」
-标签，经 extra_body 的 _gw_cache_* 字段传入网关，不在业务层直接读写缓存。
-
-设计要点：
-- 公共/个人域：scope='public' 的条目以哨兵 user_id='__public__' 存储 → 所有用户
-  （含游客）均可复用；scope='personal' 按真实 user_id 隔离，仅本用户可见。
-- 实时/非实时阶梯 TTL：实时类固定短 TTL（默认 2h）；非实时类按命中热度分档
-  （冷 3 天 → 常命中 7 天 → 热点 30 天），命中即 bump 计数并刷新过期时间。
-- 安全默认：标签解析失败/异常一律回落 personal，绝不把可能的个性化答案公共共享。
-- 失败静默降级：embedding/存储任何异常都只记日志，绝不阻塞网关主链路。
+业务层签发时效、上下文与证据合同，网关验证并绑定实际模型和上游。
+只读写个人域 v2 表；旧条目、联网／工具／动态回答不参与复用。
+有效期从生成时计算，命中仅增加热度，不延长新鲜度。
 """
 import asyncio
 import json
@@ -20,11 +11,12 @@ import logging
 import math
 import re
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 from app.config import settings
 from app.core import db
+from app.services import cache_policy
 
 logger = logging.getLogger("jianziruyang.gateway.semantic_cache")
 
@@ -48,11 +40,24 @@ def semantic_cache_enabled() -> bool:
 enabled = semantic_cache_enabled
 
 
+def effective_threshold() -> float:
+    """生效的命中阈值：系统设置页运行时覆盖 > .env 默认；clamp 0.5-0.99。
+
+    整改：去除旧 0.95 硬下限——高相似改述提问（余弦约 0.90-0.95）应能命中。
+    """
+    from app.services.config_manager import runtime_config
+    value = runtime_config.get("semantic_cache_threshold")
+    raw = settings.SEMANTIC_CACHE_THRESHOLD if value is None else value
+    try:
+        t = float(raw)
+    except (TypeError, ValueError):
+        t = float(settings.SEMANTIC_CACHE_THRESHOLD)
+    return min(0.99, max(0.5, t))
+
+
 def normalize_question(text: str) -> str:
     """归一化提问文本，用于 UNIQUE(user_id, question_norm) 精确去重。"""
-    norm = re.sub(r"[\s\u3000]+", "", (text or "").strip().lower())
-    norm = re.sub(r"[，。！？、；：「」『』（）()【】\[\]<>《》,.!?;:\"'`~·…—\-_/\\|@#$%^&*+=]", "", norm)
-    return norm
+    return cache_policy.normalize_question(text)
 
 
 def _cosine(a: List[float], b: List[float]) -> float:
@@ -85,34 +90,22 @@ def match_best(query_vec: List[float], entries: List[dict], threshold: float) ->
 # 标签与阶梯 TTL
 # ---------------------------------------------------------------------------
 
-def resolve_scope(llm_scope: str, query: str, *, uses_relevant_memory: bool = False) -> str:
+def resolve_scope(llm_scope: str, query: str, *, uses_relevant_memory: bool = False,
+                  uses_personal_kb: bool = False) -> str:
     """综合判定缓存域（公共/个人）。
 
     判定优先级（安全优先，宁个人勿公共）：
-      1. 问题含个人数据信号（我的/根据我…）或本轮注入了用户相关记忆 → personal；
-      2. LLM 意图识别明确输出 public → public；
-      3. 其余一律 personal（含解析失败/缺省）。
+      1. 本轮回答引用了非公共知识库（个人库）内容 → personal（防跨用户泄露个人 KB 答案）；
+      2. 问题含个人数据信号（我的/根据我…）或本轮注入了用户相关记忆 → personal；
+      3. LLM 意图识别明确输出 public → public；
+      4. 其余一律 personal（含解析失败/缺省）。
     """
-    q = query or ""
-    if _PERSONAL_SIGNAL_RE.search(q) or uses_relevant_memory:
-        return "personal"
-    return "public" if (llm_scope or "").strip().lower() == "public" else "personal"
+    return "personal"
 
 
 def compute_ttl_seconds(is_realtime: bool, hit_count: int) -> int:
     """阶梯 TTL（秒）：实时固定短档；非实时按命中热度冷/常命中/热点三档升级。"""
-    if is_realtime:
-        return max(60, int(getattr(settings, "SEMANTIC_CACHE_TTL_REALTIME_HOURS", 2)) * 3600)
-    hits = int(hit_count or 0)
-    hot = int(getattr(settings, "SEMANTIC_CACHE_HOT_HITS", 10))
-    warm = int(getattr(settings, "SEMANTIC_CACHE_WARM_HITS", 3))
-    if hits >= hot:
-        days = getattr(settings, "SEMANTIC_CACHE_TTL_HOT_DAYS", 30)
-    elif hits >= warm:
-        days = getattr(settings, "SEMANTIC_CACHE_TTL_WARM_DAYS", 7)
-    else:
-        days = getattr(settings, "SEMANTIC_CACHE_TTL_COLD_DAYS", 3)
-    return max(60, int(days) * 86400)
+    return 0 if is_realtime else min(86400, max(1, settings.ANSWER_CACHE_TTL_SECONDS))
 
 
 def _expires_at(is_realtime: bool, hit_count: int) -> str:
@@ -124,25 +117,18 @@ def _expires_at(is_realtime: bool, hit_count: int) -> str:
 def _is_expired(expires_at: str) -> bool:
     """空串=旧数据不过期（向后兼容）；否则按 ISO 时间比较。"""
     if not expires_at:
-        return False
+        return True
     try:
-        return datetime.fromisoformat(expires_at) <= datetime.now()
-    except Exception:
-        return False
+        expiry = datetime.fromisoformat(expires_at)
+        now = datetime.now(expiry.tzinfo) if expiry.tzinfo else datetime.now()
+        return expiry <= now
+    except (ValueError, TypeError):
+        return True
 
 
 def ttl_label(is_realtime: bool, hit_count: int) -> str:
     """供面板展示的 TTL 档位中文标签。"""
-    if is_realtime:
-        return f"实时 {getattr(settings, 'SEMANTIC_CACHE_TTL_REALTIME_HOURS', 2)}h"
-    hits = int(hit_count or 0)
-    hot = int(getattr(settings, "SEMANTIC_CACHE_HOT_HITS", 10))
-    warm = int(getattr(settings, "SEMANTIC_CACHE_WARM_HITS", 3))
-    if hits >= hot:
-        return f"热点 {getattr(settings, 'SEMANTIC_CACHE_TTL_HOT_DAYS', 30)}天"
-    if hits >= warm:
-        return f"常命中 {getattr(settings, 'SEMANTIC_CACHE_TTL_WARM_DAYS', 7)}天"
-    return f"冷 {getattr(settings, 'SEMANTIC_CACHE_TTL_COLD_DAYS', 3)}天"
+    return "实时问题不缓存答案" if is_realtime else f"硬期限 {compute_ttl_seconds(False, 0) / 3600:g} 小时（命中不续期）"
 
 
 async def _embed(text: str) -> List[float]:
@@ -171,6 +157,10 @@ def _parse_row(row: dict) -> dict:
         srcs = json.loads(row.get("sources") or "[]")
     except Exception:
         srcs = []
+    try:
+        revs = json.loads(row.get("revisions") or "{}")
+    except Exception:
+        revs = {}
     return {
         "id": row.get("id"),
         "question": row.get("question"),
@@ -185,6 +175,11 @@ def _parse_row(row: dict) -> dict:
         "ttl_label": ttl_label(bool(row.get("is_realtime")), row.get("hit_count", 0)),
         "created_at": row.get("created_at"),
         "last_used_at": row.get("last_used_at"),
+        "cache_kind": row.get("cache_kind", ""),
+        "evidence_hash": row.get("evidence_hash", ""),
+        "revisions": revs,
+        "model": row.get("model", ""),
+        "profile_hash": row.get("profile_hash", ""),
     }
 
 
@@ -192,122 +187,148 @@ def _parse_row(row: dict) -> dict:
 # 命中查找 / 写入（网关代理调用）
 # ---------------------------------------------------------------------------
 
-async def lookup(user_id: str, question: str, threshold: Optional[float] = None,
-                 *, scope: str = "personal", is_realtime: bool = False) -> Optional[dict]:
-    """按语义相似度查找缓存；命中则 bump 计数、按热度刷新 TTL 并返回条目，否则 None。
+def _eligible(user_id: str, contract: dict, fingerprint: str) -> bool:
+    return bool(semantic_cache_enabled() and _valid_user(user_id) and user_id != PUBLIC_USER
+                and contract and contract.get("owner") == user_id and fingerprint
+                and contract.get("decision", {}).get("kind") in ("knowledge_semantic", "model_exact")
+                and contract.get("revisions") == cache_policy.revisions())
 
-    候选集：
-      - scope='public'：本人个人条目 + 公共条目（公共域所有用户/游客共享复用）；
-      - scope='personal'：仅本人个人条目（避免用通用公共答案回复个性化问题）。
+
+async def lookup(user_id: str, question: str, threshold: Optional[float] = None,
+                 *, scope: str = "personal", is_realtime: bool = False,
+                 contract: Optional[dict] = None, fingerprint: str = "") -> Optional[dict]:
+    """只有验证过的新版合同参与个人域查询；命中不续期。"""
+    if is_realtime or scope != "personal" or not _eligible(user_id, contract, fingerprint):
+        return None
+    if len(question.strip()) < settings.SEMANTIC_CACHE_MIN_QUESTION_CHARS:
+        return None
+    rows = db.query("SELECT * FROM semantic_cache_v2 WHERE user_id=? AND fingerprint=?",
+                    (user_id, fingerprint))
+    # 整改：条目有效性改由「知识库版本 revisions 相等 + 自身证据完整性」保证，
+    # 不再要求与本轮检索证据快照严格相等（检索排序差异不应使缓存失效）。
+    entries = [e for e in (_parse_row(r) for r in rows)
+               if not e["expired"] and e["revisions"] == contract["revisions"]
+               and cache_policy.digest(e["sources"]) == e["evidence_hash"]]
+    if rows and not entries:
+        record_event(user_id=user_id, hit=False, outcome="invalidated", reason="expired")
+    hit = next((dict(e, score=1.0) for e in entries
+                if normalize_question(e["question"]) == normalize_question(question)), None)
+    if not hit and contract["decision"]["kind"] == "knowledge_semantic" and entries:
+        vec = await _embed(question)
+        thr = float(threshold) if threshold is not None else effective_threshold()
+        hit = match_best(vec, entries, thr)
+        if hit and not await cache_policy.equivalent(question, hit["question"], user_id):
+            hit = None
+    if not hit or not _eligible(user_id, contract, fingerprint):
+        return None
+    now = datetime.now(timezone.utc).isoformat()
+    # 最后一次数据库内检查避免校验期间的并发过期／清除。
+    n = db.execute("UPDATE semantic_cache_v2 SET hit_count=hit_count+1,last_used_at=? "
+                   "WHERE id=? AND user_id=? AND expires_at>?", (now, hit["id"], user_id, now))
+    if not n:
+        return None
+    hit["hit_count"] += 1
+    hit["last_used_at"] = now
+    return hit
+
+
+async def probe(user_id: str, question: str, *, profile_hash: str = "") -> Optional[dict]:
+    """检索前探针（整改2 核心）：在检索/生成之前查个人域知识语义缓存。
+
+    命中则业务层直接复用缓存答案，跳过检索与上游 LLM，避免高相似重复提问
+    重复消耗检索/生成资源。不依赖合同指纹（跨轮历史/证据差异不影响命中）；
+    安全门禁：开关/合法用户/最小长度/个人化与指代信号/实时类一律旁路；
+    条目有效性 = 未过期 + revisions 与当前知识库版本相等 + 自身证据完整
+    + 常驻画像摘要一致（画像变更后旧条目不再命中）。
     """
-    if not semantic_cache_enabled():
+    if not semantic_cache_enabled() or not _valid_user(user_id):
         return None
     q = (question or "").strip()
-    if len(q) < int(getattr(settings, "SEMANTIC_CACHE_MIN_QUESTION_CHARS", 4)):
+    if len(q) < settings.SEMANTIC_CACHE_MIN_QUESTION_CHARS:
         return None
-    scope = "public" if scope == "public" else "personal"
-
-    cols = ("id, question, answer, sources, embedding, hit_count, scope, is_realtime,"
-            " expires_at, created_at, last_used_at")
-    if scope == "public":
-        rows = db.query(
-            f"SELECT {cols} FROM semantic_cache WHERE user_id IN (?, ?)",
-            (user_id or "", PUBLIC_USER),
-        )
-    else:
-        if not _valid_user(user_id):
-            return None
-        rows = db.query(
-            f"SELECT {cols} FROM semantic_cache WHERE user_id = ? AND scope = 'personal'",
-            (user_id,),
-        )
-
-    entries = [e for e in (_parse_row(r) for r in rows) if not e["expired"]]
+    if cache_policy._PERSONAL.search(q) or cache_policy._REFERENCE.search(q):
+        return None
+    if cache_policy.detect_realtime(q):
+        return None
+    try:
+        revs = cache_policy.revisions()
+    except Exception:
+        return None
+    rows = db.query("SELECT * FROM semantic_cache_v2 WHERE user_id=? AND cache_kind='knowledge_semantic'",
+                    (user_id,))
+    entries = [e for e in (_parse_row(r) for r in rows)
+               if not e["expired"] and e["revisions"] == revs
+               and cache_policy.digest(e["sources"]) == e["evidence_hash"]
+               and e.get("profile_hash", "") == profile_hash]
     if not entries:
         return None
-
-    query_vec = await _embed(q)
-    if not query_vec:
-        return None
-    thr = float(threshold if threshold is not None else settings.SEMANTIC_CACHE_THRESHOLD)
-    hit = match_best(query_vec, entries, thr)
+    hit = next((dict(e, score=1.0) for e in entries
+                if normalize_question(e["question"]) == normalize_question(q)), None)
+    if not hit:
+        vec = await _embed(q)
+        if not vec:
+            return None
+        hit = match_best(vec, entries, effective_threshold())
+        if hit and not await cache_policy.equivalent(q, hit["question"], user_id, score=hit.get("score")):
+            hit = None
     if not hit:
         return None
-
-    new_hits = int(hit.get("hit_count", 0)) + 1
-    now_iso = datetime.now().isoformat()
-    new_exp = _expires_at(bool(hit.get("is_realtime")), new_hits)
-    try:
-        db.execute(
-            "UPDATE semantic_cache SET hit_count = ?, last_used_at = ?, expires_at = ? WHERE id = ?",
-            (new_hits, now_iso, new_exp, hit["id"]),
-        )
-    except Exception as e:
-        logger.warning("[网关语义缓存] 更新命中计数失败: %s", e)
-    hit["hit_count"] = new_hits
-    hit["last_used_at"] = now_iso
-    hit["expires_at"] = new_exp
-    hit["ttl_label"] = ttl_label(bool(hit.get("is_realtime")), new_hits)
-    logger.info("[网关语义缓存] 命中 scope=%s user=%s score=%s q=%.30s",
-                hit.get("scope"), user_id or "-", hit.get("score"), q)
+    now = datetime.now(timezone.utc).isoformat()
+    n = db.execute("UPDATE semantic_cache_v2 SET hit_count=hit_count+1,last_used_at=? "
+                   "WHERE id=? AND user_id=? AND expires_at>?", (now, hit["id"], user_id, now))
+    if not n:
+        return None
+    hit["hit_count"] += 1
+    hit["last_used_at"] = now
+    record_event(user_id=user_id, hit=True, entry_id=hit["id"], score=hit.get("score"),
+                 question=q, outcome="hit")
+    logger.info("[网关语义缓存] 检索前探针命中: user=%s score=%s question=%s",
+                user_id, hit.get("score"), q[:60])
     return hit
 
 
 async def store(user_id: str, question: str, answer: str, sources: Optional[List[dict]] = None,
-                *, scope: str = "personal", is_realtime: bool = False) -> bool:
-    """把一次正常问答写入缓存（按归一化问题去重 upsert + 容量裁剪）。
-
-    scope='public' → 属主=PUBLIC_USER（全体共享）；scope='personal' → 属主=user_id。
-    门禁：开关关闭 / 提问或回答过短 / 个人域但游客 → 跳过。失败静默返回 False。
-    """
-    if not semantic_cache_enabled():
+                *, scope: str = "personal", is_realtime: bool = False,
+                contract: Optional[dict] = None, fingerprint: str = "", upstream_id: str = "") -> bool:
+    """正常完整答案原子写入 v2；无合同的旧调用不能复活旧缓存。"""
+    if is_realtime or scope != "personal" or not _eligible(user_id, contract, fingerprint):
         return False
-    q = (question or "").strip()
-    a = (answer or "").strip()
-    if len(q) < int(getattr(settings, "SEMANTIC_CACHE_MIN_QUESTION_CHARS", 4)):
+    q, a = question.strip(), answer.strip()
+    if len(q) < settings.SEMANTIC_CACHE_MIN_QUESTION_CHARS or len(a) < settings.SEMANTIC_CACHE_MIN_ANSWER_CHARS:
         return False
-    if len(a) < int(getattr(settings, "SEMANTIC_CACHE_MIN_ANSWER_CHARS", 30)):
+    from app.services.capability_gap import answer_indicates_failure
+    if answer_indicates_failure(a):
         return False
-    scope = "public" if scope == "public" else "personal"
-    owner = PUBLIC_USER if scope == "public" else user_id
-    if scope == "personal" and not _valid_user(user_id):
+    references = [int(n) for n in re.findall(r"\[来源\s*(\d+)\]", a)]
+    if any(n < 1 or n > len(contract["sources"]) for n in references):
         return False
-
     try:
-        query_vec = await _embed(q)
-        if not query_vec:
+        vec = await _embed(q) if contract["decision"]["kind"] == "knowledge_semantic" else []
+        if contract["decision"]["kind"] == "knowledge_semantic" and not vec:
             return False
-        now = datetime.now().isoformat()
-        qnorm = normalize_question(q)
-        srcs_json = json.dumps(sources or [], ensure_ascii=False)
-        emb_json = json.dumps(query_vec)
-        rt = 1 if is_realtime else 0
-        existing = db.query_one(
-            "SELECT id, hit_count FROM semantic_cache WHERE user_id = ? AND question_norm = ?",
-            (owner, qnorm),
+        if not _eligible(user_id, contract, fingerprint):
+            return False
+        now = datetime.now(timezone.utc)
+        ttl = min(compute_ttl_seconds(False, 0), int(contract["decision"]["ttl_seconds"]))
+        if ttl <= 0:
+            return False
+        db.execute(
+            "INSERT INTO semantic_cache_v2 (id,user_id,question,question_norm,answer,sources,embedding,"
+            "cache_kind,fingerprint,evidence_hash,revisions,model,upstream_id,profile_hash,expires_at,created_at,last_used_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(user_id,fingerprint,question_norm) DO UPDATE SET "
+            "answer=excluded.answer,sources=excluded.sources,embedding=excluded.embedding,"
+            "expires_at=excluded.expires_at,created_at=excluded.created_at,last_used_at=excluded.last_used_at",
+            (str(uuid.uuid4()), user_id, q, normalize_question(q), a,
+             cache_policy.canonical(contract["sources"]), json.dumps(vec), contract["decision"]["kind"],
+             fingerprint, contract["evidence_hash"], cache_policy.canonical(contract["revisions"]),
+             contract["model"], upstream_id, contract.get("profile_hash", ""),
+             (now + timedelta(seconds=ttl)).isoformat(), now.isoformat(), now.isoformat()),
         )
-        if existing:
-            hits = int(existing.get("hit_count", 0))
-            exp = _expires_at(is_realtime, hits)  # 保留既有热度
-            db.execute(
-                "UPDATE semantic_cache SET question = ?, answer = ?, sources = ?, embedding = ?,"
-                " scope = ?, is_realtime = ?, expires_at = ?, last_used_at = ? WHERE id = ?",
-                (q, a, srcs_json, emb_json, scope, rt, exp, now, existing["id"]),
-            )
-        else:
-            exp = _expires_at(is_realtime, 0)
-            db.execute(
-                "INSERT INTO semantic_cache"
-                " (id, user_id, question, question_norm, answer, sources, embedding, hit_count,"
-                "  scope, is_realtime, expires_at, created_at, last_used_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)",
-                (str(uuid.uuid4()), owner, q, qnorm, a, srcs_json, emb_json,
-                 scope, rt, exp, now, now),
-            )
-        _trim(owner)
+        _trim(user_id)
         return True
     except Exception as e:
-        logger.warning("[网关语义缓存] 写入失败: %s", e)
+        logger.warning("[网关语义缓存] v2 写入失败: %s", e)
         return False
 
 
@@ -318,17 +339,17 @@ def _trim(owner_id: str):
         if cap <= 0:
             return
         n = db.query_one(
-            "SELECT COUNT(*) AS n FROM semantic_cache WHERE user_id = ?", (owner_id,)
+            "SELECT COUNT(*) AS n FROM semantic_cache_v2 WHERE user_id = ?", (owner_id,)
         )
         total = int((n or {}).get("n", 0))
         if total <= cap:
             return
         stale = db.query(
-            "SELECT id FROM semantic_cache WHERE user_id = ? ORDER BY last_used_at ASC LIMIT ?",
+            "SELECT id FROM semantic_cache_v2 WHERE user_id = ? ORDER BY last_used_at ASC LIMIT ?",
             (owner_id, total - cap),
         )
         for r in stale:
-            db.execute("DELETE FROM semantic_cache WHERE id = ? AND user_id = ?",
+            db.execute("DELETE FROM semantic_cache_v2 WHERE id = ? AND user_id = ?",
                        (r["id"], owner_id))
     except Exception as e:
         logger.warning("[网关语义缓存] 容量裁剪失败: %s", e)
@@ -337,9 +358,9 @@ def _trim(owner_id: str):
 def purge_expired() -> int:
     """惰性清理：删除所有已过期条目（面板刷新/定时任务可调用）；返回删除条数。"""
     try:
-        now = datetime.now().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         return int(db.execute(
-            "DELETE FROM semantic_cache WHERE expires_at != '' AND expires_at <= ?", (now,)
+            "DELETE FROM semantic_cache_v2 WHERE expires_at != '' AND expires_at <= ?", (now,)
         ) or 0)
     except Exception as e:
         logger.warning("[网关语义缓存] 过期清理失败: %s", e)
@@ -353,18 +374,14 @@ def purge_expired() -> int:
 def list_entries(user_id: str, limit: int = 50, *, include_public: bool = True) -> List[dict]:
     """列出缓存条目（本人个人域 + 可选公共域，按最近使用倒序，不含 embedding）。"""
     cols = ("id, question, answer, sources, hit_count, scope, is_realtime, expires_at,"
-            " created_at, last_used_at")
+            " created_at, last_used_at, cache_kind, evidence_hash, model")
     rows: List[dict] = []
     if _valid_user(user_id):
         rows += db.query(
-            f"SELECT {cols} FROM semantic_cache WHERE user_id = ? ORDER BY last_used_at DESC LIMIT ?",
+            f"SELECT {cols} FROM semantic_cache_v2 WHERE user_id = ? ORDER BY last_used_at DESC LIMIT ?",
             (user_id, int(limit)),
         )
-    if include_public:
-        rows += db.query(
-            f"SELECT {cols} FROM semantic_cache WHERE user_id = ? ORDER BY last_used_at DESC LIMIT ?",
-            (PUBLIC_USER, int(limit)),
-        )
+    # v2 不开放跨用户公共答案；兼容参数仅保留调用签名。
     out = []
     seen = set()
     for r in rows:
@@ -383,7 +400,7 @@ def count(user_id: str) -> int:
     if not _valid_user(user_id):
         return 0
     row = db.query_one(
-        "SELECT COUNT(*) AS n FROM semantic_cache WHERE user_id = ?", (user_id,)
+        "SELECT COUNT(*) AS n FROM semantic_cache_v2 WHERE user_id = ?", (user_id,)
     )
     return int((row or {}).get("n", 0))
 
@@ -394,7 +411,7 @@ def delete_entry(user_id: str, entry_id: str) -> bool:
         return False
     try:
         n = db.execute(
-            "DELETE FROM semantic_cache WHERE id = ? AND user_id = ?", (entry_id, user_id)
+            "DELETE FROM semantic_cache_v2 WHERE id = ? AND user_id = ?", (entry_id, user_id)
         )
         return bool(n)
     except Exception as e:
@@ -407,7 +424,7 @@ def clear(user_id: str) -> int:
     if not _valid_user(user_id):
         return 0
     try:
-        return int(db.execute("DELETE FROM semantic_cache WHERE user_id = ?", (user_id,)) or 0)
+        return int(db.execute("DELETE FROM semantic_cache_v2 WHERE user_id = ?", (user_id,)) or 0)
     except Exception as e:
         logger.warning("[网关语义缓存] 清空失败: %s", e)
         return 0
@@ -420,21 +437,24 @@ def clear(user_id: str) -> int:
 def record_event(*, user_id: str = "", scope: str = "personal", hit: bool,
                  entry_id: str = "", score: Optional[float] = None,
                  latency_ms: int = 0, est_tokens: int = 0, saved_tokens: int = 0,
-                 question: str = "") -> Optional[str]:
+                 question: str = "", outcome: str = "", reason: str = "",
+                 validation_ms: int = 0) -> Optional[str]:
     """记录一次缓存命中/未命中事件（失败静默不阻断主链路）。
 
     返回事件 id：miss 事件供上游成功后按真实 usage 补记 est_tokens。
     """
     try:
+        from app.core.log_setup import redact_log_text
         eid = str(uuid.uuid4())
         db.execute(
             "INSERT INTO semantic_cache_events (id, created_at, user_id, scope, hit,"
-            " entry_id, score, latency_ms, est_tokens, saved_tokens, question)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            (eid, datetime.now().isoformat(), user_id or "", scope or "personal",
+            " entry_id, score, latency_ms, est_tokens, saved_tokens, question,outcome,reason,validation_ms)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (eid, datetime.now().isoformat(), user_id or "", "personal",
              1 if hit else 0, entry_id or "", float(score) if score is not None else 0.0,
-             int(latency_ms or 0),
-             int(est_tokens or 0), int(saved_tokens or 0), (question or "")[:120]))
+             int(latency_ms or 0), int(est_tokens or 0), int(saved_tokens or 0),
+             redact_log_text((question or "")[:120]), outcome or ("hit" if hit else "miss"),
+             reason, int(validation_ms or 0)))
         return eid
     except Exception as e:
         logger.warning("[网关语义缓存] 监控事件记录失败: %s", e)
@@ -470,7 +490,7 @@ def monitor_stats(days: int = 7) -> dict:
         "SELECT COUNT(*) AS n, COALESCE(SUM(hit), 0) AS hits,"
         " AVG(CASE WHEN hit = 1 THEN latency_ms END) AS hit_latency,"
         " COALESCE(SUM(saved_tokens), 0) AS saved_tokens"
-        " FROM semantic_cache_events WHERE created_at >= ?", (since,)) or {}
+        " FROM semantic_cache_events WHERE created_at >= ? AND outcome IN ('hit','miss')", (since,)) or {}
     total_ev = int(ev.get("n") or 0)
     hits = int(ev.get("hits") or 0)
     hit_latency = float(ev.get("hit_latency") or 0)
@@ -482,23 +502,24 @@ def monitor_stats(days: int = 7) -> dict:
     miss_tokens = float(miss.get("tokens") or 0)
     space = db.query_one(
         "SELECT COUNT(*) AS n, COALESCE(SUM(LENGTH(question) + LENGTH(answer)"
-        " + LENGTH(sources) + LENGTH(embedding)), 0) AS bytes FROM semantic_cache") or {}
+        " + LENGTH(sources) + LENGTH(embedding)), 0) AS bytes FROM semantic_cache_v2") or {}
     pub = db.query_one(
-        "SELECT COUNT(*) AS n FROM semantic_cache WHERE user_id = ?", (PUBLIC_USER,)) or {}
+        "SELECT COUNT(*) AS n FROM semantic_cache_v2 WHERE user_id = ?", (PUBLIC_USER,)) or {}
     expired = db.query_one(
-        "SELECT COUNT(*) AS n FROM semantic_cache WHERE expires_at != '' AND expires_at <= ?",
-        (datetime.now().isoformat(),)) or {}
+        "SELECT COUNT(*) AS n FROM semantic_cache_v2 WHERE expires_at != '' AND expires_at <= ?",
+        (datetime.now(timezone.utc).isoformat(),)) or {}
     daily_rows = db.query(
         "SELECT substr(created_at, 1, 10) AS day, COUNT(*) AS n, COALESCE(SUM(hit), 0) AS hits,"
         " COALESCE(SUM(saved_tokens), 0) AS saved_tokens FROM semantic_cache_events"
-        " WHERE created_at >= ? GROUP BY day ORDER BY day", (since,))
+        " WHERE created_at >= ? AND outcome IN ('hit','miss') GROUP BY day ORDER BY day", (since,))
     daily = [{"day": r["day"], "hits": int(r["hits"]), "misses": int(r["n"]) - int(r["hits"]),
               "hit_rate": round(int(r["hits"]) / int(r["n"]), 4) if r["n"] else 0.0,
               "saved_tokens": int(r["saved_tokens"])} for r in daily_rows]
     entries = []
     for r in db.query(
-            "SELECT id, question, answer, hit_count, scope, is_realtime, expires_at, last_used_at"
-            " FROM semantic_cache ORDER BY hit_count DESC, last_used_at DESC LIMIT 50"):
+            "SELECT id, question, answer, hit_count, scope, is_realtime, expires_at, last_used_at,"
+            " created_at,cache_kind,evidence_hash,model FROM semantic_cache_v2"
+            " ORDER BY hit_count DESC, last_used_at DESC LIMIT 50"):
         entries.append({
             "id": r["id"],
             "question": redact_log_text((r.get("question") or "").replace("\n", " ")[:80]),
@@ -508,13 +529,22 @@ def monitor_stats(days: int = 7) -> dict:
             "ttl_label": ttl_label(bool(r.get("is_realtime")), r.get("hit_count") or 0),
             "expired": _is_expired(r.get("expires_at") or ""),
             "last_used_at": (r.get("last_used_at") or "")[:16],
+            "created_at": r.get("created_at"), "expires_at": r.get("expires_at"),
+            "cache_kind": r.get("cache_kind"), "evidence_hash": r.get("evidence_hash"),
+            "model": r.get("model"),
         })
     n_space = int(space.get("n") or 0)
+    reasons = db.query("SELECT outcome,reason,COUNT(*) AS count FROM semantic_cache_events "
+                       "WHERE created_at>=? AND outcome IN ('bypass','invalidated') GROUP BY outcome,reason", (since,))
+    bypasses = sum(r["count"] for r in reasons if r["outcome"] == "bypass")
     return {
+        "policy_version": 2, "reasons": reasons,
         "days": days,
         "enabled": semantic_cache_enabled(),
         "overview": {
             "requests": total_ev, "hits": hits, "misses": total_ev - hits,
+            "bypasses": bypasses, "bypass_rate": round(bypasses / max(1, total_ev + bypasses), 4),
+            "savings_are_estimates": True,
             "hit_rate": round(hits / total_ev, 4) if total_ev else 0.0,
             "saved_time_ms": int(hits * max(0.0, miss_latency - hit_latency)),
             "saved_tokens": int(ev.get("saved_tokens") or 0),
@@ -543,28 +573,26 @@ def stats(user_id: str) -> dict:
     """语义缓存面板概览：开关/阈值/本人条目数/公共条目数/累计命中。"""
     own = db.query_one(
         "SELECT COUNT(*) AS n, COALESCE(SUM(hit_count), 0) AS hits"
-        " FROM semantic_cache WHERE user_id = ?",
+        " FROM semantic_cache_v2 WHERE user_id = ?",
         (user_id,) if _valid_user(user_id) else ("__none__",),
     )
     pub = db.query_one(
         "SELECT COUNT(*) AS n, COALESCE(SUM(hit_count), 0) AS hits"
-        " FROM semantic_cache WHERE user_id = ?",
+        " FROM semantic_cache_v2 WHERE user_id = ?",
         (PUBLIC_USER,),
     )
     valid = _valid_user(user_id)
     return {
         "enabled": semantic_cache_enabled(),
-        "threshold": float(settings.SEMANTIC_CACHE_THRESHOLD),
+        "threshold": effective_threshold(),
+        "policy_version": 2, "signing_ready": bool(cache_policy.signing_key()),
+        "public_enabled": False, "hard_ttl_seconds": compute_ttl_seconds(False, 0),
         "count": int((own or {}).get("n", 0)) if valid else 0,
         "total_hits": int((own or {}).get("hits", 0)) if valid else 0,
         "public_count": int((pub or {}).get("n", 0)),
         "public_hits": int((pub or {}).get("hits", 0)),
         "ttl": {
-            "realtime_hours": int(getattr(settings, "SEMANTIC_CACHE_TTL_REALTIME_HOURS", 2)),
-            "cold_days": int(getattr(settings, "SEMANTIC_CACHE_TTL_COLD_DAYS", 3)),
-            "warm_days": int(getattr(settings, "SEMANTIC_CACHE_TTL_WARM_DAYS", 7)),
-            "hot_days": int(getattr(settings, "SEMANTIC_CACHE_TTL_HOT_DAYS", 30)),
-            "warm_hits": int(getattr(settings, "SEMANTIC_CACHE_WARM_HITS", 3)),
-            "hot_hits": int(getattr(settings, "SEMANTIC_CACHE_HOT_HITS", 10)),
+            "realtime_hours": 0, "cold_days": 1, "warm_days": 1, "hot_days": 1,
+            "sliding": False,
         },
     }

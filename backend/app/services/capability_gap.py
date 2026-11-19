@@ -15,11 +15,14 @@
 
 所有缺口与执行均落库 capability_gaps 表，供可观测性「技能沉淀建议」面板聚合。
 """
+import asyncio
+import hashlib
 import json
 import logging
 import re
+import unicodedata
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
 from app.core import db
@@ -211,20 +214,43 @@ def propose_solutions(scenario: str, context: Optional[dict] = None) -> List[dic
     return out
 
 
+def gap_identity(query: str, scenario: str, user_id: str) -> tuple[str, str, str]:
+    """窄意图分组；未知能力保留问题实体和约束，不按宽泛场景合并。"""
+    normalized = " ".join(unicodedata.normalize("NFC", query or "").split())
+    normalized = re.sub(r"^(请问|请|帮我|麻烦)?(查询|查一下|查看)?", "", normalized).strip()
+    if scenario == "realtime_weather":
+        intent = ("weather.alerts" if re.search(r"预警|台风|警报", normalized) else
+                  "weather.forecast" if re.search(r"预报|明天|后天|未来|本周|下周", normalized) else "weather.current")
+    elif re.search(r"海拔|elevation", normalized, re.I):
+        intent = "geography.elevation"
+    else:
+        intent = normalized[:500]
+    missing = {"weather.current": "weather_current_api", "weather.forecast": "weather_forecast_api",
+               "weather.alerts": "weather_alert_api", "geography.elevation": "elevation_api"}.get(intent, "external_read")
+    key = hashlib.sha256(json.dumps([user_id, intent, missing], ensure_ascii=False).encode()).hexdigest()
+    return intent, missing, key
+
+
 def record_gap(*, session_id: str = "", user_id: str = "", trace_id: str = "",
-               query: str = "", scenario: str = "", context: Optional[dict] = None) -> str:
+               query: str = "", scenario: str = "", context: Optional[dict] = None,
+               request_id: str = "", failure_reason: str = "") -> str:
     """留痕一次能力缺口（返回 gap id）。同场景重复出现会累计，供频次沉淀。"""
+    if re.search(r"^\s*@(?:skills?|tools?)\b|(?:添加|创建|沉淀|安装).{0,12}(?:技能|工具|skill|tool)", query or "", re.I):
+        return ""
     gap_id = str(uuid.uuid4())
+    intent, missing, group = gap_identity(query, scenario, user_id)
+    request_key = request_id or trace_id
     solutions = propose_solutions(scenario, context)
     try:
         db.execute(
             "INSERT INTO capability_gaps (id, session_id, user_id, trace_id, query, scenario,"
-            " context_json, proposed_json, chosen, status, executions, last_result, created_at)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,0,'',?)",
+            " context_json, proposed_json, chosen, status, executions, last_result, created_at,"
+            " intent_key,missing_capability,group_key,request_key,failure_reason)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,0,'',?,?,?,?,?,?)",
             (gap_id, session_id, user_id, trace_id, (query or "")[:500], scenario,
              json.dumps(context or {}, ensure_ascii=False),
              json.dumps(solutions, ensure_ascii=False), "", "pending",
-             datetime.now().isoformat()),
+             datetime.now().isoformat(), intent, missing, group, request_key, failure_reason[:80]),
         )
     except Exception as e:
         logger.warning("能力缺口留痕失败（忽略）: %s", e)
@@ -556,32 +582,363 @@ async def auto_resolve(gap_id: str, *, url: str = "") -> dict:
             "hint": "已自动尝试低危方案仍未解决，请手动选择", "attempts": attempts}
 
 
-def frequency_suggestions(threshold: int = SEDIMENT_THRESHOLD, days: int = 30) -> dict:
-    """聚合频繁能力缺口，产出「沉淀为 skill/工具」建议（需求6 可进化性）。"""
-    from datetime import timedelta
-
+def frequency_suggestions(threshold: int = SEDIMENT_THRESHOLD, days: int = 30,
+                          *, user_id: str = "", include_cooldown: bool = False) -> dict:
+    """个人建议按独立请求聚合；无属主时仅返回脱敏全局趋势。"""
+    threshold, days = max(3, min(50, int(threshold))), max(1, min(180, int(days)))
     since = (datetime.now() - timedelta(days=days)).isoformat()
+    cooldown = (datetime.now() - timedelta(days=7)).isoformat()
+    args = [since]
+    owner_clause = ""
+    if user_id:
+        owner_clause = " AND g.user_id=?"
+        args.append(user_id)
     rows = db.query(
-        "SELECT scenario, COUNT(*) AS n, MAX(created_at) AS last_at,"
-        " MAX(query) AS sample_query"
-        " FROM capability_gaps WHERE created_at >= ? AND scenario != ''"
-        " GROUP BY scenario HAVING n >= ? ORDER BY n DESC",
-        (since, threshold),
-    )
+        "SELECT g.user_id,g.group_key,g.intent_key,g.missing_capability,g.scenario,"
+        "COUNT(DISTINCT g.request_key) n,MAX(g.created_at) last_at,MAX(g.query) sample_query,"
+        "s.status suggestion_status,s.last_prompted_at,s.draft_id,d.status draft_status,d.expires_at draft_expires_at,u.id installed_skill_id "
+        "FROM capability_gaps g LEFT JOIN capability_suggestions s "
+        "ON s.owner_id=g.user_id AND s.group_key=g.group_key "
+        "LEFT JOIN skill_drafts d ON d.owner_id=s.owner_id AND d.id=s.draft_id "
+        "LEFT JOIN user_skills u ON u.owner_id=d.owner_id AND u.id=d.skill_id "
+        "WHERE g.created_at>=? AND g.user_id NOT IN ('','guest') AND g.request_key!='' AND g.group_key!='' "
+        "AND g.scenario!='' AND g.status NOT IN ('resolved','sedimented') AND g.failure_reason='' "
+        "AND NOT EXISTS (SELECT 1 FROM capability_gaps done WHERE done.user_id=g.user_id "
+        "AND done.request_key=g.request_key AND (done.status='resolved' OR done.failure_reason!=''))" + owner_clause +
+        " GROUP BY g.user_id,g.group_key HAVING n>=? ORDER BY n DESC,last_at DESC",
+        (*args, threshold))
     suggestions = []
-    for r in rows:
-        scenario = r["scenario"]
-        recipe = CAPABILITY_RECIPES.get(scenario, {})
+    trend_owners = {}
+    for row in rows:
+        if row["suggestion_status"] == "resolved":
+            continue
+        active_draft = ((row["draft_status"] == "pending" and (row["draft_expires_at"] or "") > datetime.now().isoformat())
+                        or (row["draft_status"] == "imported" and row["installed_skill_id"]))
+        if user_id and not include_cooldown and row["suggestion_status"] == "drafted" and active_draft:
+            continue
+        if user_id and not include_cooldown and (row["last_prompted_at"] or "") > cooldown:
+            continue
+        label = {"weather_current_api": "当前天气查询", "weather_forecast_api": "天气预报",
+                 "weather_alert_api": "天气预警", "elevation_api": "坐标海拔查询"}.get(
+                     row["missing_capability"], "外部只读能力")
+        trend_owners.setdefault((row["scenario"], row["missing_capability"]), set()).add(row["user_id"])
         suggestions.append({
-            "scenario": scenario,
-            "label": recipe.get("label", scenario),
-            "count": int(r["n"]),
-            "last_at": r["last_at"],
-            "sample_query": (r["sample_query"] or "")[:60],
-            "suggested_name": f"auto_{scenario}",
-            "suggested_kind": "skill" if scenario.startswith("realtime") else "tool",
-            "solutions": propose_solutions(scenario),
-            "message": f"「{recipe.get('label', scenario)}」场景近 {days} 天出现 {int(r['n'])} 次，"
-                       f"是否沉淀为 {('Skill' if scenario.startswith('realtime') else '工具')}？",
-        })
-    return {"threshold": threshold, "days": days, "suggestions": suggestions}
+            "id": row["group_key"] if user_id else "", "scenario": row["scenario"], "label": label,
+            "count": row["n"], "last_at": row["last_at"],
+            "sample_query": row["sample_query"] if user_id else "",
+            "intent": row["intent_key"] if user_id else "",
+            "missing_capability": row["missing_capability"], "suggested_name": f"auto_{row['scenario']}",
+            "suggested_kind": "skill", "solutions": [], "draft_id": row["draft_id"] if user_id else "",
+            "message": f"近 {days} 天有 {row['n']} 条独立请求缺少{label}，可进入个人 Skill 草稿流程；添加不等于验收通过。"})
+    if not user_id:
+        trends = {}
+        for item in suggestions:
+            key = (item["scenario"], item["missing_capability"])
+            trend = trends.setdefault(key, {**item, "count": 0, "owners": 0})
+            trend["count"] += item["count"]
+            trend["owners"] = len(trend_owners[key])
+            trend["last_at"] = max(trend["last_at"], item["last_at"])
+            trend["message"] = f"{trend['owners']} 位用户存在同类未满足能力，共 {trend['count']} 条独立请求；仅展示脱敏趋势。"
+        suggestions = list(trends.values())
+    elif not include_cooldown:
+        suggestions = suggestions[:20]
+    return {"threshold": threshold, "days": days, "suggestions": suggestions, "scope": "personal" if user_id else "aggregate"}
+
+
+def mark_suggestions_seen(user_id: str, group_keys: list[str]) -> dict:
+    """显式展示回执领取七天提示窗口；GET 本身不改变状态。"""
+    eligible = {s["id"] for s in frequency_suggestions(user_id=user_id)["suggestions"]}
+    now = datetime.now()
+    marked = []
+    with db.transaction() as conn:
+        for key in dict.fromkeys(group_keys[:20]):
+            if key not in eligible:
+                continue
+            cursor = conn.execute(
+                "INSERT INTO capability_suggestions(owner_id,group_key,status,last_prompted_at,updated_at) "
+                "VALUES(?,?,'shown',?,?) ON CONFLICT(owner_id,group_key) DO UPDATE SET "
+                "status='shown',last_prompted_at=excluded.last_prompted_at,updated_at=excluded.updated_at "
+                "WHERE capability_suggestions.last_prompted_at<=? AND capability_suggestions.status!='resolved' "
+                "AND (capability_suggestions.status!='processing' OR capability_suggestions.updated_at<=?) "
+                "AND NOT EXISTS (SELECT 1 FROM skill_drafts d WHERE d.owner_id=capability_suggestions.owner_id "
+                "AND d.id=capability_suggestions.draft_id AND ((d.status='pending' AND d.expires_at>?) "
+                "OR (d.status='imported' AND EXISTS (SELECT 1 FROM user_skills u WHERE u.id=d.skill_id AND u.owner_id=d.owner_id))))",
+                (user_id, key, now.isoformat(), now.isoformat(), (now - timedelta(days=7)).isoformat(),
+                 (now - timedelta(minutes=5)).isoformat(), now.isoformat()))
+            if cursor.rowcount:
+                marked.append(key)
+    return {"ids": marked, "cooldown_days": 7}
+
+
+def dismiss_suggestion(user_id: str, group_key: str):
+    from fastapi import HTTPException
+    if not any(s["id"] == group_key for s in frequency_suggestions(user_id=user_id, include_cooldown=True)["suggestions"]):
+        raise HTTPException(404, "建议不存在或不属于当前用户")
+    now = datetime.now().isoformat()
+    with db.transaction() as conn:
+        row = conn.execute("SELECT status FROM capability_suggestions WHERE owner_id=? AND group_key=?",
+                           (user_id, group_key)).fetchone()
+        if row and row[0] in ("processing", "drafted", "resolved"):
+            raise HTTPException(409, "建议已有发现任务或待验收能力，请处理已有草稿")
+        conn.execute("INSERT INTO capability_suggestions(owner_id,group_key,status,last_prompted_at,updated_at) "
+                     "VALUES(?,?,'dismissed',?,?) ON CONFLICT(owner_id,group_key) DO UPDATE SET "
+                     "status='dismissed',last_prompted_at=excluded.last_prompted_at,updated_at=excluded.updated_at",
+                     (user_id, group_key, now, now))
+    return {"status": "dismissed", "cooldown_days": 7}
+
+
+async def accept_suggestion(user_id: str, group_key: str):
+    """接受建议只启动已有草稿流程；原子领取防止并发重复生成，不直接安装。"""
+    from fastapi import HTTPException
+    from app.services import skill_drafts, skill_workflow
+    from app.services.chat import chat_service, Message
+    candidates = frequency_suggestions(user_id=user_id, include_cooldown=True)["suggestions"]
+    candidate = next((s for s in candidates if s["id"] == group_key), None)
+    if not candidate:
+        raise HTTPException(404, "建议不存在或不属于当前用户")
+    now = datetime.now()
+    with db.transaction() as conn:
+        row = conn.execute("SELECT * FROM capability_suggestions WHERE owner_id=? AND group_key=?",
+                           (user_id, group_key)).fetchone()
+        previous = dict(row) if row else {}
+        if previous.get("status") == "processing" and previous["updated_at"] > (now - timedelta(minutes=5)).isoformat():
+            raise HTTPException(409, "正在生成同一建议的草稿，请稍后刷新")
+        old_draft = conn.execute("SELECT id FROM skill_drafts WHERE owner_id=? AND session_id=? AND message_id=? "
+                                 "AND ((status='imported' AND EXISTS (SELECT 1 FROM user_skills u WHERE u.id=skill_drafts.skill_id "
+                                 "AND u.owner_id=skill_drafts.owner_id)) OR (status='pending' AND expires_at>?)) ORDER BY created_at DESC LIMIT 1",
+                                 (user_id, previous.get("session_id", ""), previous.get("message_id", ""), now.isoformat())).fetchone() if previous else None
+        if old_draft:
+            draft_id = old_draft[0]
+            conn.execute("UPDATE capability_suggestions SET status='drafted',draft_id=?,last_prompted_at=?,updated_at=? "
+                         "WHERE owner_id=? AND group_key=?",
+                         (draft_id, now.isoformat(), now.isoformat(), user_id, group_key))
+        else:
+            draft_id = ""
+            if (previous.get("status") not in ("shown", "open", "processing")
+                    and previous.get("last_prompted_at", "") > (now - timedelta(days=7)).isoformat()):
+                raise HTTPException(409, "同类建议处于 7 天冷却期；可在对话中主动发起 @skills")
+            session_id, message_id = str(uuid.uuid4()), str(uuid.uuid4())
+            conn.execute("INSERT INTO capability_suggestions(owner_id,group_key,status,session_id,message_id,updated_at) "
+                         "VALUES(?,?,'processing',?,?,?) ON CONFLICT(owner_id,group_key) DO UPDATE SET "
+                         "status='processing',session_id=excluded.session_id,message_id=excluded.message_id,updated_at=excluded.updated_at",
+                         (user_id, group_key, session_id, message_id, now.isoformat()))
+    if draft_id:
+        return {"draft": skill_drafts.get_draft(draft_id, user_id), "session_id": previous["session_id"]}
+    task = asyncio.current_task()
+    session = assistant = None
+    chat_service._active_tasks.setdefault(session_id, set()).add(task)
+    try:
+        session = chat_service.create_session(user_id=user_id, session_id=session_id)
+        session.add_message(Message(role="user", content="@skills " + candidate["sample_query"]))
+        assistant = Message(role="assistant", content="正在根据个人能力建议查找资料并生成草稿。", message_id=message_id)
+        session.add_message(assistant)
+        chat_service._persist_session(session)
+        async with asyncio.timeout(180):
+            draft = await skill_workflow.build_draft(user_id, session_id, message_id, candidate["sample_query"])
+        # 即使外部发现器吞掉取消，也不得恢复已删除会话或产生可确认的迟到草稿。
+        if task.cancelling() or not db.query_one(
+                "SELECT 1 FROM chat_sessions WHERE session_id=? AND user_id=?", (session_id, user_id)):
+            raise asyncio.CancelledError()
+        assistant.content = f"已准备《{draft['name']}》的个人 Skill 草稿。请确认来源与依赖；保存不代表能力验收通过。"
+        timestamp = datetime.now().isoformat()
+        with db.transaction() as conn:
+            chat_service._persist_session_transaction(conn, session)
+            conn.execute("UPDATE capability_suggestions SET status='drafted',draft_id=?,last_prompted_at=?,updated_at=? "
+                         "WHERE owner_id=? AND group_key=? AND message_id=?",
+                         (draft["id"], timestamp, timestamp, user_id, group_key, message_id))
+        return {"draft": draft, "session_id": session_id}
+    except BaseException:
+        exists = db.query_one("SELECT 1 FROM chat_sessions WHERE session_id=? AND user_id=?", (session_id, user_id))
+        if not exists:
+            skill_drafts.invalidate_session(session_id)
+            chat_service.sessions.pop(session_id, None)
+        elif assistant:
+            assistant.content = "草稿发现未完成，未安装能力。可返回个人能力建议重试。"
+            assistant.interrupted = True
+            chat_service._persist_session(session)
+        db.execute("UPDATE capability_suggestions SET status='open',last_prompted_at='',updated_at=? "
+                   "WHERE owner_id=? AND group_key=? AND message_id=?",
+                   (datetime.now().isoformat(), user_id, group_key, message_id))
+        raise
+    finally:
+        active = chat_service._active_tasks.get(session_id, set())
+        active.discard(task)
+        if not active:
+            chat_service._active_tasks.pop(session_id, None)
+
+
+def _business_messages(conn, owner, session_id, user_message_id, message_id):
+    from fastapi import HTTPException
+    rows = conn.execute(
+        "SELECT m.* FROM chat_messages m JOIN chat_sessions s ON s.session_id=m.session_id "
+        "WHERE s.user_id=? AND m.session_id=? AND m.message_id IN (?,?)",
+        (owner, session_id, user_message_id, message_id)).fetchall()
+    user = next((dict(r) for r in rows if r["message_id"] == user_message_id and r["role"] == "user"), None)
+    answer = next((dict(r) for r in rows if r["message_id"] == message_id and r["role"] == "assistant"), None)
+    if (not user or not answer or answer["seq"] != user["seq"] + 1 or answer.get("interrupted")
+            or not answer["content"].strip() or answer_indicates_failure(answer["content"])):
+        raise HTTPException(409, "业务轮次不存在、已中断或没有完整可核验的回答")
+    return user, answer
+
+
+def _business_executions(conn, owner, session_id, message_id, identity):
+    from fastapi import HTTPException
+    rows = [dict(r) for r in conn.execute(
+        "SELECT * FROM personal_tool_executions WHERE owner_id=? AND session_id=? AND message_id=? ORDER BY id",
+        (owner, session_id, message_id))]
+    # 数据结构通过与业务满足分开：unverified 需求只能等待用户验收，不能自动算成功。
+    if (not rows or not identity.get("bindings") or any(
+            r["test_id"] or r["result_origin"] != "live" or r["execution_status"] != "completed"
+            or r["validation_status"] != "passed" or r["requirement_status"] not in ("satisfied", "unverified")
+            or r["error_code"] or not r["finished_at"] for r in rows)):
+        raise HTTPException(409, "需要真实业务执行且数据验证通过；样例、缓存、失败或未验证数据不能作为验收证据")
+    actual = {(r["tool_id"], r["version"]) for r in rows}
+    required = {(b["tool_id"], b["version"]) for b in identity["bindings"]}
+    if actual != required:
+        raise HTTPException(409, "本轮没有完整执行当前 Skill 绑定的工具版本")
+    return rows
+
+
+def record_business_evidence(owner, session_id, user_message_id, message_id, identity, result_status):
+    """仅聊天收尾调用，记录待人工验收证据；不将安装、样例或模型判断标成已解决。"""
+    from fastapi import HTTPException
+    from app.services import skill_dependencies, skill_packages
+    if not identity or result_status not in ("ok", "unverified"):
+        return
+    try:
+        with db.transaction() as conn:
+            if skill_dependencies.execution_identity(owner, identity["skill_id"], conn=conn) != identity:
+                return
+            user, answer = _business_messages(conn, owner, session_id, user_message_id, message_id)
+            executions = _business_executions(conn, owner, session_id, message_id, identity)
+            suggestions = conn.execute(
+                "SELECT s.group_key,s.draft_id FROM capability_suggestions s JOIN skill_drafts d "
+                "ON d.owner_id=s.owner_id AND d.id=s.draft_id WHERE s.owner_id=? AND d.skill_id=? "
+                "AND d.status='imported' AND s.status NOT IN ('resolved','processing')",
+                (owner, identity["skill_id"])).fetchall()
+            for suggestion in suggestions:
+                gap = conn.execute("SELECT scenario FROM capability_gaps WHERE user_id=? AND group_key=? "
+                                   "ORDER BY created_at DESC LIMIT 1", (owner, suggestion["group_key"])).fetchone()
+                if not gap or gap_identity(user["content"], gap["scenario"], owner)[2] != suggestion["group_key"]:
+                    continue
+                conn.execute(
+                    "INSERT OR IGNORE INTO capability_acceptance_evidence(id,owner_id,group_key,draft_id,skill_id,identity_json,"
+                    "session_id,user_message_id,message_id,query_hash,answer_hash,execution_ids_json,created_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (uuid.uuid4().hex, owner, suggestion["group_key"], suggestion["draft_id"], identity["skill_id"],
+                     skill_packages.canonical(identity), session_id, user_message_id, message_id,
+                     skill_packages.sha(user["content"].encode()), skill_packages.sha(answer["content"].encode()),
+                     skill_packages.canonical([r["id"] for r in executions]), datetime.now().isoformat()))
+    except (HTTPException, ValueError, KeyError, TypeError):
+        return
+    except Exception:
+        logger.exception("业务验收证据记录失败，建议保持未解决")
+
+
+def _validate_business_evidence(conn, owner, evidence):
+    from fastapi import HTTPException
+    from app.services import skill_dependencies, skill_packages
+    identity = json.loads(evidence["identity_json"])
+    if skill_dependencies.execution_identity(owner, evidence["skill_id"], conn=conn) != identity:
+        raise HTTPException(409, "Skill 或工具配置已变更，请使用当前版本重新完成业务请求")
+    user, answer = _business_messages(conn, owner, evidence["session_id"], evidence["user_message_id"], evidence["message_id"])
+    if (skill_packages.sha(user["content"].encode()) != evidence["query_hash"]
+            or skill_packages.sha(answer["content"].encode()) != evidence["answer_hash"]):
+        raise HTTPException(409, "原业务问答已变化，不能复用旧验收证据")
+    executions = _business_executions(conn, owner, evidence["session_id"], evidence["message_id"], identity)
+    if [r["id"] for r in executions] != json.loads(evidence["execution_ids_json"]):
+        raise HTTPException(409, "业务执行记录已变化，请刷新")
+    return user, answer, executions
+
+
+def _evidence_hash(evidence):
+    from app.services import skill_packages
+    return skill_packages.sha(skill_packages.canonical({k: evidence[k] for k in (
+        "id", "owner_id", "group_key", "draft_id", "identity_json", "session_id", "user_message_id",
+        "message_id", "query_hash", "answer_hash", "execution_ids_json", "created_at")}).encode())
+
+
+def pending_acceptances(owner):
+    """刷新可恢复已安装待验收项；仅返回属主本人资料和真实业务证据。"""
+    from fastapi import HTTPException
+    result = []
+    with db.transaction() as conn:
+        suggestions = conn.execute(
+            "SELECT s.group_key,s.draft_id,d.skill_id,d.name FROM capability_suggestions s JOIN skill_drafts d "
+            "ON s.owner_id=d.owner_id AND s.draft_id=d.id WHERE s.owner_id=? AND d.status='imported' "
+            "AND s.status!='resolved' ORDER BY s.updated_at DESC LIMIT 20", (owner,)).fetchall()
+        for suggestion in suggestions:
+            item = dict(suggestion)
+            gap = conn.execute("SELECT query FROM capability_gaps WHERE user_id=? AND group_key=? "
+                               "ORDER BY created_at DESC LIMIT 1", (owner, item["group_key"])).fetchone()
+            original = conn.execute("SELECT package_json FROM skill_drafts WHERE owner_id=? AND id=?", (owner, item["draft_id"])).fetchone()
+            try:
+                request = json.loads(original["package_json"]).get("provenance", {}).get("requested_capability", "") if original else ""
+            except (ValueError, TypeError, AttributeError):
+                request = ""
+            previous = conn.execute("SELECT status,note,confirmed_at FROM capability_acceptance_evidence WHERE owner_id=? "
+                                    "AND group_key=? AND status='rejected' ORDER BY confirmed_at DESC LIMIT 1",
+                                    (owner, item["group_key"])).fetchone()
+            item.update(sample_query=request or (gap["query"] if gap else ""), evidence=[],
+                        previous_decision=dict(previous) if previous else None)
+            rows = conn.execute("SELECT * FROM capability_acceptance_evidence WHERE owner_id=? AND group_key=? "
+                                "AND draft_id=? AND status='pending' ORDER BY created_at DESC LIMIT 5",
+                                (owner, item["group_key"], item["draft_id"])).fetchall()
+            for row in rows:
+                evidence = dict(row)
+                try:
+                    user, answer, executions = _validate_business_evidence(conn, owner, evidence)
+                except (HTTPException, ValueError, KeyError, TypeError):
+                    continue
+                item["evidence"].append({"id": evidence["id"], "expected_hash": _evidence_hash(evidence),
+                    "session_id": evidence["session_id"], "message_id": evidence["message_id"],
+                    "query": user["content"], "answer": answer["content"], "created_at": evidence["created_at"],
+                    "version": json.loads(evidence["identity_json"])["version"],
+                    "executions": [{k: r[k] for k in ("tool_id", "version", "execution_status", "validation_status",
+                                                       "requirement_status", "result_origin")} for r in executions]})
+            result.append(item)
+    return result
+
+
+def acceptance_history(owner):
+    return db.query("SELECT e.id,e.skill_id,e.note,e.confirmed_at,COALESCE(d.name,'已删除 Skill') name "
+                    "FROM capability_acceptance_evidence e LEFT JOIN skill_drafts d ON d.owner_id=e.owner_id AND d.id=e.draft_id "
+                    "WHERE e.owner_id=? AND e.status='accepted' ORDER BY e.confirmed_at DESC LIMIT 20", (owner,))
+
+
+def confirm_business_acceptance(owner, group_key, evidence_id, expected_hash, accepted, note):
+    from fastapi import HTTPException
+    if type(accepted) is not bool or not isinstance(note, str) or not 4 <= len(note.strip()) <= 1000:
+        raise HTTPException(400, "请填写核对原需求的具体验收结论（4–1000 字）")
+    with db.transaction() as conn:
+        row = conn.execute("SELECT * FROM capability_acceptance_evidence WHERE owner_id=? AND group_key=? AND id=?",
+                           (owner, group_key, evidence_id)).fetchone()
+        suggestion = conn.execute("SELECT * FROM capability_suggestions WHERE owner_id=? AND group_key=?",
+                                  (owner, group_key)).fetchone()
+        if not row or not suggestion:
+            raise HTTPException(404, "验收证据不存在或不属于当前用户")
+        evidence = dict(row)
+        if expected_hash != _evidence_hash(evidence) or suggestion["draft_id"] != evidence["draft_id"]:
+            raise HTTPException(409, "验收目标已变化，请重新核对")
+        status = "accepted" if accepted else "rejected"
+        if evidence["status"] == status:
+            return {"status": suggestion["status"], "evidence_id": evidence_id}
+        if evidence["status"] != "pending" or suggestion["status"] == "resolved":
+            raise HTTPException(409, "此业务结果已确认，不能重复改变验收结论")
+        if not conn.execute("SELECT 1 FROM skill_drafts WHERE owner_id=? AND id=? AND skill_id=? AND status='imported'",
+                            (owner, evidence["draft_id"], evidence["skill_id"])).fetchone():
+            raise HTTPException(409, "建议对应的 Skill 尚未成功安装")
+        if accepted:
+            try:
+                _validate_business_evidence(conn, owner, evidence)
+            except (ValueError, KeyError, TypeError) as exc:
+                raise HTTPException(409, "验收证据已失效，请重新完成业务请求") from exc
+        now = datetime.now().isoformat()
+        conn.execute("UPDATE capability_acceptance_evidence SET status=?,note=?,confirmed_at=? WHERE id=? AND owner_id=?",
+                     (status, note.strip(), now, evidence_id, owner))
+        conn.execute("UPDATE capability_suggestions SET status=?,updated_at=? WHERE owner_id=? AND group_key=?",
+                     ("resolved" if accepted else "drafted", now, owner, group_key))
+        if accepted:
+            conn.execute("UPDATE capability_gaps SET status='resolved' WHERE user_id=? AND group_key=? AND failure_reason='' "
+                         "AND created_at<=?", (owner, group_key, evidence["created_at"]))
+    return {"status": "resolved" if accepted else "drafted", "evidence_id": evidence_id}

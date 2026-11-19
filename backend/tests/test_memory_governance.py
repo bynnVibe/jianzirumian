@@ -172,6 +172,18 @@ def test_retrieve_relevant_exclude_ids_and_last_used_touch(mem_db):
     assert row["last_used_at"]
 
 
+def test_retrieve_relevant_no_unrelated_fallback(mem_db):
+    """整改2：无有效关键词重叠时不注入任何记忆（旧版兜底注入 top 会使
+    每个问题都携带个性化上下文，语义缓存探针与写入被一刀切旁路）。"""
+    MemoryService.add_memory("u1", "用户有高血压病史需要控盐")
+    MemoryService.add_memory("u1", "我是一个十分注重养生的人", memory_type="preference")
+    assert MemoryService.retrieve_relevant("u1", "系统的网关模块设计") == []
+    # 单字关键词（的/和…）不算有效重叠
+    assert MemoryService.retrieve_relevant("u1", "我的和") == []
+    # 真实相关查询仍正常召回
+    assert MemoryService.retrieve_relevant("u1", "高血压控盐怎么做") != []
+
+
 # ============================================
 # M3 索引治理
 # ============================================

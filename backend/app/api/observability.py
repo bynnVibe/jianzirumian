@@ -322,7 +322,7 @@ async def get_skill_reviews(
 @router.get("/sediment-suggestions")
 async def get_sediment_suggestions(
     days: int = Query(30, ge=1, le=180),
-    threshold: int = Query(3, ge=2, le=50),
+    threshold: int = Query(3, ge=3, le=50),
     _admin: dict = Depends(require_ops),
 ):
     """能力缺口沉淀建议（需求6）：同类场景在统计窗口内出现次数达阈值时，

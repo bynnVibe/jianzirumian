@@ -76,7 +76,7 @@ const props = defineProps({
   isGuest: { type: Boolean, default: false },
   focusSource: { type: String, default: '' },
 })
-const emit = defineEmits(['upload', 'changed'])
+const emit = defineEmits(['upload', 'changed', 'snapshot', 'previewed'])
 
 const documents = ref([])
 const loading = ref(true)
@@ -124,6 +124,8 @@ async function load() {
   try {
     const res = await listKbDocuments(props.kbId, query.value.trim())
     documents.value = res.data.documents || []
+    // 上报界面快照：供知识库详情页组装 page_state 注入知识助手上下文
+    emit('snapshot', { documents: documents.value, query: query.value.trim() })
     applyFocus()
   } catch (e) {
     error.value = e.response?.data?.detail || '加载文档列表失败'
@@ -133,6 +135,7 @@ async function load() {
 }
 
 function preview(doc) {
+  emit('previewed', doc.title || '')
   const filename = (doc.source_image || '').split('/').pop()
   // Markdown：在线渲染预览（/doc-preview 拉取原文渲染），不再直接打开原始文件触发下载
   if (doc.source_type === 'markdown' || /\.(md|markdown)$/i.test(filename)) {

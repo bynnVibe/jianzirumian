@@ -49,6 +49,7 @@ class UpstreamBody(BaseModel):
     category: str = "llm"
     # 模型清单（该上游可服务的模型名，图2「模型列表」）
     models: List[str] = []
+    tool_models: List[str] = []
     weight: int = 100
     enabled: bool = True
     remark: str = ""
@@ -63,6 +64,7 @@ class UpstreamPatch(BaseModel):
     tier: Optional[str] = None
     category: Optional[str] = None
     models: Optional[List[str]] = None
+    tool_models: Optional[List[str]] = None
     weight: Optional[int] = None
     enabled: Optional[bool] = None
     remark: Optional[str] = None

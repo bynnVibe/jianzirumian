@@ -377,9 +377,12 @@ class MemoryService:
         if not memories:
             return []
         query_tokens = set(_tokenize_keywords(query))
+        # 整改：单字关键词（的/系/和…）几乎与任何记忆重叠，会造成无关注入；
+        # 相关性门禁仅计二字及以上关键词，无有效重叠时不注入任何记忆。
+        meaningful = {t for t in query_tokens if len(t) >= 2}
 
         def score(m: dict) -> float:
-            overlap = len(query_tokens & set(m.get("keywords") or []))
+            overlap = len(meaningful & set(m.get("keywords") or []))
             decay = math.exp(-_days_since(m.get("last_used_at") or m.get("updated_at")) / _DECAY_DAYS)
             weight = _TYPE_WEIGHT.get(m.get("memory_type") or "fact", 1.0)
             # 置信度因子（0.1*confidence）：反复确认的记忆排序更靠前，但权重低于关键词/重要度
@@ -387,9 +390,9 @@ class MemoryService:
             return overlap * 2 + (float(m.get("importance", 0.5)) + decay) * weight + conf
 
         ranked = sorted(memories, key=score, reverse=True)
-        # 关键词完全不重叠时，仅保留评分最高的少量记忆兜底，避免无关注入
-        top = [m for m in ranked if query_tokens & set(m.get("keywords") or [])]
-        chosen = (top or ranked)[:limit]
+        # 无有效关键词重叠 → 不注入（旧版「无重叠也兜底注入 top」会让每个问题
+        # 都携带个性化上下文，语义缓存探针与写入被一刀切旁路）。
+        chosen = [m for m in ranked if meaningful & set(m.get("keywords") or [])][:limit]
         if chosen:
             now = datetime.now().isoformat()
             db.executemany(

@@ -41,6 +41,7 @@ from app.api import gateway_proxy as gateway_proxy_api
 from app.api import me as me_api
 from app.api import instructions as instructions_api
 from app.api import skills as skills_api
+from app.api import personal_tools as personal_tools_api
 from app.api import capability as capability_api
 from app.services import auth as auth_service
 from app.config import settings
@@ -102,6 +103,8 @@ async def lifespan(app: FastAPI):
         Path(directory).mkdir(parents=True, exist_ok=True)
     run_migration()
     runtime.recover()
+    from app.services import personal_tools
+    personal_tools.recover()
     # 只加载本地索引，不调用 Embedding；本地持久化损坏阻断启动。
     index_loaded = vector_store.initialize()
     if settings.EMBEDDING_STARTUP_PROBE:
@@ -287,6 +290,7 @@ app.include_router(gateway_proxy_api.router)
 app.include_router(me_api.router)
 app.include_router(instructions_api.router)
 app.include_router(skills_api.router)
+app.include_router(personal_tools_api.router)
 app.include_router(capability_api.router)
 
 

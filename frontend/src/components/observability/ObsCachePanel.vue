@@ -8,7 +8,7 @@
       <button class="btn btn-ghost sm" :disabled="loading" @click="load(true)">{{ loading ? '加载中…' : '刷新' }}</button>
     </div>
     <p class="cache-sub">
-      命中即复用缓存答案（不再消耗上游 Token）；未命中对照为同窗口真实出网成功请求。语义详情已脱敏。
+      v2 仅复用通过上下文和证据校验的个人答案，知识检索仍会执行。命中率只统计符合缓存条件的请求；命中不续期。节省为估算值，不是实际账单，验证可能消耗模型 Token。详情已脱敏。
     </p>
     <p v-if="errorMsg" class="inline-error">{{ errorMsg }}</p>
     <div v-if="loading && !data" class="empty-hint">加载缓存监控中…</div>
@@ -22,11 +22,11 @@
         </div>
         <div class="metric-card">
           <span class="metric-num good">{{ fmtDuration(data.overview.saved_time_ms) }}</span>
-          <span class="metric-label">节省时间（命中 × 单次提速）</span>
+          <span class="metric-label">估算节省时间（未扣除验证成本）</span>
         </div>
         <div class="metric-card">
           <span class="metric-num good">{{ formatNum(data.overview.saved_tokens) }}</span>
-          <span class="metric-label">节省 Token（跳过的上游消耗）</span>
+          <span class="metric-label">估算节省回答 Token</span>
         </div>
         <div class="metric-card">
           <span class="metric-num">{{ data.space.mb }} MB</span>
@@ -34,6 +34,11 @@
         </div>
       </div>
 
+      <p class="cache-sub">旁路 {{ data.overview.bypasses || 0 }} 次（{{ ((data.overview.bypass_rate || 0) * 100).toFixed(1) }}%） · 公共答案共享未开放</p>
+      <details v-if="data.reasons?.length" class="cache-sub">
+        <summary>查看旁路／失效原因</summary>
+        <p v-for="r in data.reasons" :key="r.outcome + r.reason">{{ reasonLabel(r.reason) }}：{{ r.count }} 次</p>
+      </details>
       <!-- 命中 vs 未命中对比 -->
       <div class="cache-block-title">命中 vs 未命中（近 {{ data.days }} 天）</div>
       <table class="obs-table">
@@ -87,7 +92,9 @@
               <td>{{ e.last_used_at || '-' }}</td>
             </tr>
             <tr v-if="expanded.has(e.id)" class="entry-drill">
-              <td colspan="6"><p class="entry-answer">{{ e.answer || '（无答案摘要）' }}</p></td>
+              <td colspan="6"><p class="entry-answer">{{ e.answer || '（无答案摘要）' }}</p>
+                              <p class="cache-sub">{{ e.cache_kind === 'knowledge_semantic' ? '知识语义复用' : '模型精确复用' }} · {{ e.model }}<br>生成：{{ e.created_at }} · 到期：{{ e.expires_at }}<br>证据版本：{{ e.evidence_hash }}</p>
+                            </td>
             </tr>
           </template>
         </tbody>
@@ -108,6 +115,9 @@ const loading = ref(false)
 const errorMsg = ref('')
 const expanded = ref(new Set())
 
+function reasonLabel(reason) {
+  return ({ force_refresh: '用户强制刷新', web_search_enabled: '联网模式', dynamic_query: '动态问题', dependency_changed: '依赖变化', permission_changed: '权限变化', expired: '有效期已过', signing_not_configured: '未配置签名密钥', invalid_contract: '无有效合同', conversation_context: '多轮上下文', personalized_context: '个性化上下文', freshness_unverified: '时效尚未验证', tool_execution: '实际工具执行', disabled: '缓存已关闭' })[reason] || reason
+}
 function formatNum(n) { return Math.round(n || 0).toLocaleString('en-US') }
 function fmtDuration(ms) {
   const s = Math.round((ms || 0) / 1000)

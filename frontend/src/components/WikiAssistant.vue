@@ -9,7 +9,9 @@
 
     <!-- 展开态：问答面板 -->
     <transition name="assistant-slide">
-      <section v-if="store.isOpen" class="assistant-panel" aria-label="知识助手">
+      <section v-if="store.isOpen" class="assistant-panel" :style="{ width: store.panelWidth + 'px' }" aria-label="知识助手">
+        <!-- 左边缘拖拽手柄：调整侧边面板宽度（持久化） -->
+        <div class="panel-resizer" title="拖拽调整面板宽度" @pointerdown="startResize"></div>
         <header class="panel-head">
           <div class="head-title">
             <span class="head-dot"></span>
@@ -480,6 +482,27 @@ function autoGrow(e) {
   el.style.height = Math.min(el.scrollHeight, 120) + 'px'
 }
 
+// ---- 侧边面板宽度拖拽（左边缘手柄，pointer 事件 + 持久化） ----
+function startResize(e) {
+  e.preventDefault()
+  const startX = e.clientX
+  const startW = store.panelWidth
+  const maxW = Math.max(360, Math.min(window.innerWidth - 240, 760))
+  const onMove = (ev) => {
+    store.setPanelWidth(Math.min(maxW, startW + (startX - ev.clientX)))
+  }
+  const onUp = () => {
+    window.removeEventListener('pointermove', onMove)
+    window.removeEventListener('pointerup', onUp)
+    document.body.style.cursor = ''
+    document.body.style.userSelect = ''
+  }
+  document.body.style.cursor = 'col-resize'
+  document.body.style.userSelect = 'none'
+  window.addEventListener('pointermove', onMove)
+  window.addEventListener('pointerup', onUp)
+}
+
 function scrollToBottom() {
   nextTick(() => {
     const el = bodyRef.value
@@ -593,6 +616,22 @@ onMounted(() => {
   background: #fdfbf7;
   border-left: 1px solid #ede6dc;
   box-shadow: -6px 0 28px rgba(80, 60, 35, 0.14);
+}
+
+/* 左边缘拖拽手柄：hover 高亮提示可调宽 */
+.panel-resizer {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  cursor: col-resize;
+  z-index: 5;
+  transition: background 0.15s;
+}
+
+.panel-resizer:hover {
+  background: rgba(201, 138, 75, 0.25);
 }
 
 .assistant-slide-enter-active,
@@ -1569,11 +1608,11 @@ onMounted(() => {
   text-align: center;
 }
 
-/* ---- 移动端：全屏面板 ---- */
+/* ---- 移动端：全屏面板（!important 覆盖内联拖拽宽度） ---- */
 @media (max-width: 768px) {
   .assistant-panel {
-    width: 100vw;
-    max-width: 100vw;
+    width: 100vw !important;
+    max-width: 100vw !important;
   }
 }
 </style>

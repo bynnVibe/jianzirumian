@@ -20,6 +20,7 @@
     </div>
     <p class="alert-sub">
       后台周期扫描错误率 / P95 延迟 / Token 超用 / 回归均分 / 点踩占比 / 在线评测均分；越限自动归因并给出优化建议，指标回落后自动恢复。
+      生成整体超预算（默认 5 分钟）自动停止会话生成任务并落「事件」告警，需人工确认/处置。
     </p>
     <p v-if="errorMsg" class="inline-error">{{ errorMsg }}</p>
     <div v-if="loading && !alerts.length" class="empty-hint">加载告警中…</div>
@@ -28,7 +29,7 @@
       <article v-for="a in alerts" :key="a.id" class="alert-card" :class="[`sev-${a.severity}`, `st-${a.status}`]">
         <div class="alert-head" @click="toggle(a.id)">
           <span class="sev-tag" :class="`sev-${a.severity}`">{{ a.severity === 'critical' ? '严重' : '警告' }}</span>
-          <span class="type-tag">{{ a.type === 'quality' ? '质量' : '性能' }}</span>
+          <span class="type-tag">{{ { quality: '质量', performance: '性能', event: '事件' }[a.type] || a.type }}</span>
           <strong class="alert-metric">{{ metricLabel(a.metric) }}</strong>
           <span class="alert-value">
             当前 <b>{{ fmtValue(a) }}</b> / 阈值 {{ fmtThreshold(a) }}
@@ -85,6 +86,10 @@ const METRIC_LABELS = {
   eval_regression: '回归评测均分',
   dislike_rate: '点踩占比',
   online_quality: '在线评测均分',
+  empty_answer_rate: '空回答率',
+  agent_task_completion: 'Agent 任务完成均分',
+  generation_timeout: '生成整体超时',
+  failover_promotion: '主备路由·备升主',
 }
 
 const alerts = ref([])
@@ -100,11 +105,15 @@ function metricLabel(m) { return METRIC_LABELS[m] || m }
 function statusLabel(s) { return { open: '待确认', acked: '已确认', resolved: '已恢复' }[s] || s }
 function fmtValue(a) {
   if (a.metric === 'p95_latency') return `${Math.round(a.value)}ms`
+  if (a.metric === 'generation_timeout') return `${Math.round(a.value)}s`
+  if (a.metric === 'failover_promotion') return '备已升主（已持久化）'
   if (['error_rate', 'dislike_rate'].includes(a.metric)) return `${(a.value * 100).toFixed(1)}%`
   return Number(a.value).toFixed(a.value < 10 ? 2 : 0)
 }
 function fmtThreshold(a) {
   if (a.metric === 'p95_latency') return `${Math.round(a.threshold)}ms`
+  if (a.metric === 'generation_timeout') return `${Math.round(a.threshold)}s`
+  if (a.metric === 'failover_promotion') return '事件触发'
   if (['error_rate', 'dislike_rate'].includes(a.metric)) return `${(a.threshold * 100).toFixed(0)}%`
   return a.threshold
 }

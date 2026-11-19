@@ -149,6 +149,19 @@ class RuntimeConfig:
     def semantic_cache_enabled(self, value: bool):
         self.set("semantic_cache_enabled", bool(value))
 
+    @property
+    def semantic_cache_threshold(self):
+        """语义缓存命中阈值（None = 未配置，回退 .env 默认）"""
+        return self._data.get("semantic_cache_threshold")
+
+    @semantic_cache_threshold.setter
+    def semantic_cache_threshold(self, value):
+        try:
+            t = float(value)
+        except (TypeError, ValueError):
+            return
+        self.set("semantic_cache_threshold", min(0.99, max(0.5, t)))
+
     # ---- 提供商参数覆盖（页面在线配置，覆盖 .env 默认值） ----
     def get_provider_settings(self, category: str, provider: str) -> dict:
         """获取某类别/提供商的参数覆盖（仅页面保存过的字段）"""

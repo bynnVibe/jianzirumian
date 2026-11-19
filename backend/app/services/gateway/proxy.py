@@ -29,6 +29,7 @@ from app.services.gateway import rules as rule_svc
 from app.services.gateway import security
 from app.services.gateway import security_events as sec_event_svc
 from app.services.gateway import semantic_cache
+from app.services import cache_policy
 from app.services.gateway import settings as settings_svc
 from app.services.gateway import upstream
 from app.services.gateway import upstreams as up_svc
@@ -124,6 +125,10 @@ class Ctx:
         self.cache_hit = False
         # 监控埋点：未命中事件 id（上游成功后按真实 usage 补记 est_tokens）
         self.cache_event_id = ""
+        self.cache_contract = {}
+        self.cache_fingerprint = ""
+        self.cache_info = {}
+        self.cache_bypass_recorded = False
 
 
 def _requested_tool_names(body: dict) -> List[str]:
@@ -163,18 +168,12 @@ def prepare(body: dict, raw_key: str, client_ip: str = "", kind: str = "chat") -
     # 语义缓存提示（由业务层在意图识别后经 extra_body 注入）：
     # _gw_cache_query=意图识别后的问题（缓存键）、_gw_cache_scope=public|personal、
     # _gw_cache_realtime=是否实时。仅对回答类角色且无工具调用时启用。
-    ctx.cache_query = str(body.get("_gw_cache_query") or "")
-    ctx.cache_scope = "public" if str(body.get("_gw_cache_scope") or "") == "public" else "personal"
-    ctx.cache_realtime = bool(body.get("_gw_cache_realtime"))
-    ctx.cache_enabled = (
-        kind == "chat" and ctx.role in ("chat_answer", "assistant")
-        and bool(ctx.cache_query) and not _requested_tool_names(body)
-        and semantic_cache.semantic_cache_enabled()
-    )
+    ctx.cache_enabled = kind == "chat" and ctx.role in ("chat_answer", "assistant")
+    ctx.cache_scope = "personal"
     base = {
         "id": ctx.log_id, "created_at": ctx.created_at, "client_ip": ctx.client_ip,
         "model_requested": ctx.model_req, "stream": ctx.stream,
-        "request_body": json.dumps(body, ensure_ascii=False),
+        "request_body": json.dumps({k: v for k, v in body.items() if k != "_gw_cache_contract"}, ensure_ascii=False),
         "key_id": "", "key_name": "",
         # 业务场景（role）：审计页据此展示「该链路是哪个业务模块发起的」
         "role": ctx.role,
@@ -253,7 +252,8 @@ def prepare(body: dict, raw_key: str, client_ip: str = "", kind: str = "chat") -
     ctx.audit_action = security.decide_action(findings, mode)
     if do_mask and findings:
         ctx.forward_body = scanned
-        base["request_body"] = json.dumps(scanned, ensure_ascii=False)
+        base["request_body"] = json.dumps(
+            {k: v for k, v in scanned.items() if k != "_gw_cache_contract"}, ensure_ascii=False)
     sec_status = "blocked" if ctx.audit_action == "block" else ("warn" if findings else "ok")
     ctx.tracer.add(
         "security", "安全审计", sec_status,
@@ -285,6 +285,66 @@ def prepare(body: dict, raw_key: str, client_ip: str = "", kind: str = "chat") -
     ctx.rule, ctx.candidates = rule_svc.select_upstreams(
         ctx.model_req, role=ctx.role or None,
         rule_id=ctx.rule_id or None, user_id=ctx.user_id or None)
+    # 4a. 整改3：主备升主——主路由失效且存在健康备时，备升主持久化，
+    #     后续请求不再重试旧主；切换过程经 trace+日志+可观测告警显性化。
+    if ctx.rule:
+        try:
+            promo = rule_svc.promote_failed_primary(ctx.rule)
+        except Exception as e:
+            logger.warning("主备升主检查失败（不阻断选路）: %s", e)
+            promo = None
+        if promo:
+            old_name = (promo["old_primary"] or {}).get("name") or promo["old_primary"]["id"]
+            new_name = (promo["new_primary"] or {}).get("name") or promo["new_primary"]["id"]
+            ctx.tracer.add("route", "主备切换·备升主", "warn",
+                           f"规则「{promo['rule_name']}」主路由「{old_name}」失效，"
+                           f"备「{new_name}」已升主并持久化，后续请求不再重试旧主")
+            logger.warning("[网关选路] 主备切换·备升主: role=%s rule=%s 「%s」→「%s」",
+                           ctx.role or "-", promo["rule_id"], old_name, new_name)
+            try:
+                from app.services import alert_analysis
+                alert_analysis.record_failover_promotion(
+                    rule_id=promo["rule_id"], rule_name=promo["rule_name"],
+                    old_primary=old_name, new_primary=new_name,
+                    role=ctx.role or "", user_id=ctx.user_id or "")
+            except Exception as e:
+                logger.warning("备升主告警写入失败（不阻断选路）: %s", e)
+            ctx.rule, ctx.candidates = rule_svc.select_upstreams(
+                ctx.model_req, role=ctx.role or None,
+                rule_id=ctx.rule_id or None, user_id=ctx.user_id or None)
+    # 4b. 主备模型兜底：切换后原模型若仅主路由支持，候选会被模型过滤剩主路由，
+    #     显式模型请求与调用方重试将永远命中熔断主路由；改写为备路由支持模型并重选。
+    if ctx.rule:
+        fb_model = rule_svc.primary_backup_fallback_model(
+            ctx.rule, ctx.model_req,
+            category=rule_svc.ROLE_CATEGORY.get(ctx.role, "llm"))
+        if fb_model and fb_model != ctx.model_req \
+                and key_svc.check_model_allowed(ctx.key_row, fb_model):
+            old_model = ctx.model_req
+            ctx.model_req = fb_model
+            ctx.forward_body["model"] = fb_model
+            ctx.rule, ctx.candidates = rule_svc.select_upstreams(
+                fb_model, role=ctx.role or None,
+                rule_id=ctx.rule_id or None, user_id=ctx.user_id or None)
+            ctx.tracer.add("route", "主备模型兜底", "warn",
+                           f"主路由不可用且模型「{old_model}」仅主路由支持，"
+                           f"回退备路由支持模型「{fb_model}」并重新选路")
+            logger.warning("[网关选路] 主备模型兜底: role=%s 模型「%s」→「%s」",
+                           ctx.role or "-", old_model, fb_model)
+    messages = body.get("messages")
+    needs_tools = bool(body.get("tools")) or any(
+        isinstance(m, dict) and (m.get("role") == "tool" or m.get("tool_calls"))
+        for m in (messages if isinstance(messages, list) else []))
+    if needs_tools and ctx.candidates:
+        ctx.cache_enabled = False
+        ctx.candidates = [up for up in ctx.candidates
+                          if up_svc.supports_tools(up, ctx.model_req, body.get("tool_choice", "auto"))]
+        if not ctx.candidates:
+            msg = "当前路由没有声明支持原生工具调用的模型／上游，请在上游管理中配置原生工具模型"
+            ctx.tracer.add("route", "工具能力校验", "error", msg)
+            log_svc.write_log({**base, "status": "error", "status_code": 503,
+                               "latency_ms": _latency(ctx), "trace_steps": ctx.tracer.dump(), "error": msg})
+            raise GatewayError(503, msg, "tool_model_unavailable")
     if not ctx.candidates:
         rule_name = (ctx.rule or {}).get("model_pattern") or ""
         if ctx.role and rule_name:
@@ -441,9 +501,25 @@ async def _cache_lookup(ctx: Ctx) -> Optional[str]:
         return None
     t0 = time.monotonic()
     try:
-        hit = await semantic_cache.lookup(
-            ctx.user_id, ctx.cache_query, scope=ctx.cache_scope, is_realtime=ctx.cache_realtime)
+        contract, reason = cache_policy.verify_contract(ctx.forward_body, ctx.user_id)
+        if not semantic_cache.semantic_cache_enabled():
+            contract, reason = {}, "disabled"
+        ctx.cache_contract = contract
+        if not contract:
+            if not ctx.cache_bypass_recorded:
+                semantic_cache.record_event(user_id=ctx.user_id, hit=False, outcome="bypass", reason=reason)
+                ctx.cache_bypass_recorded = True
+            ctx.cache_info = {"hit": False, "reason": reason, "policy_version": 2}
+            return None
+        ctx.cache_query = contract["query"]
+        ctx.cache_fingerprint = cache_policy.fingerprint(
+            contract, model=ctx.model_req, upstream=up_svc.effective(ctx.upstream),
+            rule=ctx.rule or {}, body=ctx.forward_body)
+        async with asyncio.timeout(min(8, remaining(ctx.deadline))):
+            hit = await semantic_cache.lookup(
+                ctx.user_id, ctx.cache_query, contract=contract, fingerprint=ctx.cache_fingerprint)
     except Exception as e:
+        ctx.cache_contract = {}
         logger.warning("[网关语义缓存] 查询失败，走上游: %s", e)
         return None
     latency_ms = int((time.monotonic() - t0) * 1000)
@@ -451,17 +527,24 @@ async def _cache_lookup(ctx: Ctx) -> Optional[str]:
         answer = hit.get("answer") or ""
         # 命中即省去上游消耗：估算缓存答案+问题的 Token 作为节省量
         est = agent_obs.estimate_tokens(answer) + agent_obs.estimate_tokens(ctx.cache_query)
-        semantic_cache.record_event(
-            user_id=ctx.user_id, scope=hit.get("scope") or ctx.cache_scope, hit=True,
-            entry_id=hit.get("id") or "", score=hit.get("score"), latency_ms=latency_ms,
-            est_tokens=est, saved_tokens=est, question=ctx.cache_query)
+        if ctx.cache_event_id:
+            db.execute("UPDATE semantic_cache_events SET hit=1,outcome='hit',entry_id=?,score=?,"
+                       "saved_tokens=?,latency_ms=? WHERE id=?",
+                       (hit["id"], hit.get("score", 1), est, latency_ms, ctx.cache_event_id))
+        else:
+            semantic_cache.record_event(
+                user_id=ctx.user_id, hit=True, entry_id=hit["id"], score=hit.get("score"),
+                latency_ms=latency_ms, est_tokens=est, saved_tokens=est, question=ctx.cache_query)
+        ctx.cache_info = {k: hit.get(k) for k in ("score", "cache_kind", "created_at", "expires_at", "evidence_hash", "model")}
+        ctx.cache_info.update({"hit": True, "policy_version": 2})
         ctx.tracer.add("cache", "语义缓存", "ok",
                        f"命中（scope={hit.get('scope')} 相似度={hit.get('score')} "
                        f"ttl={hit.get('ttl_label')}），跳过上游 LLM")
         return answer
-    ctx.cache_event_id = semantic_cache.record_event(
-        user_id=ctx.user_id, scope=ctx.cache_scope, hit=False,
-        latency_ms=latency_ms, question=ctx.cache_query) or ""
+    if not ctx.cache_event_id:
+        ctx.cache_event_id = semantic_cache.record_event(
+            user_id=ctx.user_id, scope=ctx.cache_scope, hit=False,
+            latency_ms=latency_ms, question=ctx.cache_query) or ""
     ctx.tracer.add("cache", "语义缓存", "ok",
                    f"未命中（scope={ctx.cache_scope} realtime={ctx.cache_realtime}），调用上游")
     return None
@@ -469,15 +552,15 @@ async def _cache_lookup(ctx: Ctx) -> Optional[str]:
 
 async def _cache_store(ctx: Ctx, text: str) -> None:
     """上游成功产出正文后回写缓存（失败静默降级，不阻塞响应）。"""
-    if not ctx.cache_enabled:
+    if not ctx.cache_enabled or not ctx.cache_contract:
         return
     ans = (text or "").strip()
     if len(ans) < _cache_min_answer():
         return
     try:
         await semantic_cache.store(
-            ctx.user_id, ctx.cache_query, ans, None,
-            scope=ctx.cache_scope, is_realtime=ctx.cache_realtime)
+            ctx.user_id, ctx.cache_query, ans, contract=ctx.cache_contract,
+            fingerprint=ctx.cache_fingerprint, upstream_id=(ctx.upstream or {}).get("id", ""))
     except Exception as e:
         logger.warning("[网关语义缓存] 回写失败: %s", e)
 
@@ -495,7 +578,7 @@ def _synthetic_completion(ctx: Ctx, text: str) -> dict:
             "finish_reason": "stop",
         }],
         "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
-        "_gw_cache": "hit",
+        "_gw_cache": "hit", "_gw_cache_info": ctx.cache_info,
     }
 
 
@@ -509,6 +592,7 @@ def _synthetic_stream(ctx: Ctx, text: str) -> List[str]:
             "id": cid, "object": "chat.completion.chunk", "created": created,
             "model": ctx.model_req,
             "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
+            "_gw_cache_info": ctx.cache_info,
         }
         return "data: " + json.dumps(obj, ensure_ascii=False) + "\n\n"
 
@@ -536,12 +620,6 @@ async def json_response(ctx: Ctx) -> tuple[int, dict]:
 
 
 async def _json_response(ctx: Ctx) -> tuple[int, dict]:
-    # 语义缓存命中：直接合成响应返回，不调用任何上游
-    cached = await _cache_lookup(ctx)
-    if cached is not None:
-        ctx.cache_hit = True
-        _finalize(ctx, status="ok", status_code=200, response_preview=cached)
-        return 200, _synthetic_completion(ctx, cached)
     last_err = ""
     candidates, opened = _filter_circuit(ctx)
     if not candidates and opened:
@@ -555,6 +633,11 @@ async def _json_response(ctx: Ctx) -> tuple[int, dict]:
         ctx.upstream, ctx.model_mapped, ctx.upstream_url = up, mapped, url
         t0 = time.monotonic()
         try:
+            cached_answer = await _cache_lookup(ctx)
+            if cached_answer is not None:
+                ctx.cache_hit = True
+                _finalize(ctx, status="ok", status_code=200, response_preview=cached_answer)
+                return 200, _synthetic_completion(ctx, cached_answer)
             headers, payload = upstream.build_request(eff, ctx.forward_body, mapped, stream=False)
             _suppress_utility_thinking(ctx, eff, payload)
             async with httpx.AsyncClient(timeout=_network_timeout(ctx)) as client:
@@ -582,7 +665,7 @@ async def _json_response(ctx: Ctx) -> tuple[int, dict]:
             cached = int((usage.get("prompt_tokens_details") or {}).get("cached_tokens") or 0)
             preview, tool_calls = _extract_preview(normalized)
             # 成功产出正文且非工具调用 → 回写语义缓存（按 public/personal + 实时阶梯 TTL）
-            if sc < 400 and not tool_calls:
+            if sc < 400 and not tool_calls and (normalized.get("choices") or [{}])[0].get("finish_reason") == "stop":
                 await _cache_store(ctx, preview)
             ctx.tracer.add("response", "响应下游", "ok",
                            f"tokens={pt}+{ct}，预览 {len(preview)} 字")
@@ -728,17 +811,8 @@ def _network_timeout(ctx):
 
 async def stream_response(ctx: Ctx) -> AsyncGenerator[str, None]:
     """收到协议终止信号才成功；产出首块后不切换，所有重试共用预算。"""
-    # 语义缓存命中：合成流式响应直接下发，不调用任何上游
-    cached = await _cache_lookup(ctx)
-    if cached is not None:
-        ctx.cache_hit = True
-        for sse in _synthetic_stream(ctx, cached):
-            yield sse
-        ctx.tracer.add("response", "响应下游", "ok", "语义缓存命中，合成流式响应")
-        _finalize(ctx, status="ok", status_code=200, response_preview=cached)
-        return
     acc_text: List[str] = []
-    usage = {"pt": 0, "ct": 0, "cached": 0}
+    usage = {"pt": 0, "ct": 0, "cached": 0, "finish_reason": ""}
     tool_names: List[str] = []
     final_status, final_code, final_err = "error", 502, "所有上游均调用失败"
     committed = False
@@ -757,6 +831,14 @@ async def stream_response(ctx: Ctx) -> AsyncGenerator[str, None]:
             t0 = time.monotonic()
             client = resp = iterator = None
             try:
+                cached_answer = await _cache_lookup(ctx)
+                if cached_answer is not None:
+                    ctx.cache_hit = True
+                    acc_text.append(cached_answer)
+                    final_status, final_code, final_err = "ok", 200, ""
+                    for sse in _synthetic_stream(ctx, cached_answer):
+                        yield sse
+                    return
                 headers, payload = upstream.build_request(eff, ctx.forward_body, mapped, stream=True)
                 _suppress_utility_thinking(ctx, eff, payload)
                 client = httpx.AsyncClient(timeout=_network_timeout(ctx))
@@ -793,7 +875,7 @@ async def stream_response(ctx: Ctx) -> AsyncGenerator[str, None]:
                                     (ctx.rule or {}).get("model_pattern", ""), mapped, up["name"],
                                     int((time.monotonic() - t0) * 1000))
                         # 成功结束且非工具调用 → 回写语义缓存
-                        if not tool_names:
+                        if not tool_names and usage["finish_reason"] == "stop":
                             await _cache_store(ctx, "".join(acc_text))
                         yield sse
                         break
@@ -860,6 +942,8 @@ def _account_sse(sse: str, acc_text: List[str], usage: dict, tool_names: List[st
                 if cached:
                     usage["cached"] = cached
             for choice in obj.get("choices") or []:
+                if choice.get("finish_reason"):
+                    usage["finish_reason"] = choice["finish_reason"]
                 delta = choice.get("delta") or {}
                 if delta.get("content"):
                     acc_text.append(delta["content"])

@@ -166,7 +166,7 @@ class DuckDuckGoSearch:
                     await asyncio.sleep(1 + attempt)
 
         logger.error("DuckDuckGo 搜索最终失败: %s", last_error)
-        return []
+        raise RuntimeError("搜索服务暂时不可用，请稍后重试") from last_error
 
 
 class BingSearch:

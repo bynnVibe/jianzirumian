@@ -57,15 +57,31 @@
             :content="msg.content"
             :sources="msg.sources"
             :search-results="msg.search_results"
+            :tool-sources="msg.tool_sources || []"
             :attachments="msg.attachments"
             :message-id="msg.message_id"
             :feedback="msg.feedback"
             :can-feedback="!auth.isGuest && !msg.interrupted"
             :cache-hit="!!msg.cache_hit"
             :cache-score="msg.cache_score || 0"
+            :cache-info="msg.cache_info || {}"
+            :can-refresh="canRefresh(msg, idx)"
+            :busy="store.isGenerating"
+            @refresh="refreshAnswer(idx)"
             @reask="handleReask"
             @feedback="(fb) => handleFeedback(msg, fb)"
-          />
+          >
+            <template #process>
+              <AgentProcessPanel v-if="msg.agent_process" :plan="msg.agent_process.plan" :tools="msg.agent_process.tools"
+                :collapsed="msg.process_collapsed !== false" @toggle="msg.process_collapsed = !(msg.process_collapsed !== false)" />
+            </template>
+            <template #cards>
+              <ChatActionCard v-for="action in msg.actions || []" :key="action.id" :action="action" @update="store.updateAction" />
+              <CapabilityGapCard v-if="msg.capability_gap" :gap="msg.capability_gap" />
+              <SkillDraftCard v-for="d in msg.skill_drafts || []" :key="d.id" :draft="d" @update="store.updateSkillDraft" />
+              <ToolDraftCard v-for="d in msg.tool_drafts || []" :key="d.id" :draft="d" @update="store.updateToolDraft" />
+            </template>
+          </ChatMessage>
           <!-- HITL 卡片：联网确认 / 意图澄清（后端暂停本轮，等待用户响应后触发新请求） -->
           <ChatHitlCard
             v-else
@@ -75,70 +91,22 @@
             @direct="handleHitlDirect"
             @option="handleHitlOption"
           />
-          <ChatActionCard v-for="action in msg.actions || []" :key="action.id" :action="action" @update="store.updateAction" />
-          <!-- 能力缺口卡片（需求5）：系统无合适工具时给出 CLI 候选方案，用户选择后沙箱执行 -->
-          <CapabilityGapCard v-if="msg.capability_gap" :gap="msg.capability_gap" />
+
         </div>
         <!-- 正在生成的流式响应 -->
-        <ChatMessage
-          v-if="store.isGenerating && currentResponse"
-          role="assistant"
-          :content="currentResponse"
-          :sources="store.sources"
-          :search-results="store.searchResults"
-        />
-        <!-- 流水线进度指示器：逐步展示处理阶段，替代干等 -->
-        <div v-if="store.isGenerating && pipelineSteps.length" class="pipeline-indicator">
-          <div class="pipeline-steps">
-            <template v-for="(step, idx) in pipelineSteps" :key="step.key">
-              <div class="pipeline-step" :class="step.state">
-                <span class="step-dot">
-                  <svg v-if="step.state === 'done'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" width="9" height="9">
-                    <polyline points="20 6 9 17 4 12"/>
-                  </svg>
-                  <span v-else-if="step.state === 'active'" class="step-spinner"></span>
-                </span>
-                <span class="step-label">{{ step.label }}</span>
-              </div>
-              <span
-                v-if="idx < pipelineSteps.length - 1"
-                class="step-line"
-                :class="{ done: step.state === 'done' }"
-              ></span>
-            </template>
-          </div>
-          <div v-if="phaseMessage" class="pipeline-message">
-            <div class="status-spinner"></div>
-            <span>{{ phaseMessage }}</span>
-          </div>
-        </div>
-        <!-- Agent（复杂度分流）执行过程：思考链 / 解题计划 / 工具调用 -->
-        <div v-if="store.isGenerating && hasAgentActivity" class="agent-panel">
-          <div v-if="store.agentPlan.length" class="agent-block">
-            <div class="agent-block-title">解题计划</div>
-            <ol class="agent-plan-list">
-              <li v-for="(s, i) in store.agentPlan" :key="i">
-                <span class="agent-tag">{{ s.tool }}</span>
-                <span class="agent-plan-text">{{ s.purpose || s.query }}</span>
-              </li>
-            </ol>
-          </div>
-          <div v-if="store.agentThoughts.length" class="agent-block">
-            <div class="agent-block-title">思考</div>
-            <p v-for="(t, i) in store.agentThoughts" :key="i" class="agent-thought">{{ t }}</p>
-          </div>
-          <div v-if="store.agentTools.length" class="agent-block">
-            <div class="agent-block-title">工具调用</div>
-            <div v-for="(t, i) in store.agentTools" :key="i" class="agent-tool-row" :class="{ failed: t.failed }">
-              <span class="agent-tag">{{ t.tool }}</span>
-              <span class="agent-tool-query">{{ t.query }}</span>
-              <span class="agent-tool-state">
-                <span v-if="t.state === 'start'" class="step-spinner"></span>
-                <template v-else>{{ t.failed ? '失败' : (t.summary || '完成') }}</template>
-              </span>
-            </div>
-          </div>
-        </div>
+        <ChatMessage v-if="store.isGenerating" role="assistant" :content="currentResponse"
+          :sources="store.sources" :search-results="store.searchResults" :tool-sources="store.toolSources"
+          :cache-hit="!!store.cacheHitInfo?.hit" :cache-info="store.cacheHitInfo || {}">
+          <template #process>
+            <AgentProcessPanel :plan="store.agentPlan" :tools="store.agentTools"
+              :steps="pipelineSteps" :status-text="phaseMessage" :collapsed="processCollapsed" live
+              @toggle="toggleProcess" />
+          </template>
+          <template #cards>
+            <SkillDraftCard v-if="store.skillDraft" :draft="store.skillDraft" @update="store.updateSkillDraft" />
+            <ToolDraftCard v-if="store.toolDraft" :draft="store.toolDraft" @update="store.updateToolDraft" />
+          </template>
+        </ChatMessage>
       </div>
     </div>
 
@@ -156,6 +124,18 @@
         <router-link to="/login" class="guest-login-link">去登录</router-link>
       </div>
       <button v-if="store.isGenerating" class="stop-generation" @click="store.stopGeneration()">停止生成</button>
+      <!-- 中途停止任务 checkpoint：是否继续 -->
+      <div v-if="store.pendingCheckpoint && !store.isGenerating" class="checkpoint-bar">
+        <div class="checkpoint-text">
+          <span class="checkpoint-title">检测到中途停止的任务，是否继续？</span>
+          <span class="checkpoint-query">{{ store.pendingCheckpoint.query }}</span>
+          <span class="checkpoint-hint">继续将在前序进度基础上续答；不继续则软删除（保留 48 小时，可后续检索）</span>
+        </div>
+        <div class="checkpoint-actions">
+          <button class="checkpoint-btn primary" @click="store.resumeCheckpoint()">继续任务</button>
+          <button class="checkpoint-btn ghost" @click="store.abandonPendingCheckpoint()">不继续</button>
+        </div>
+      </div>
       <ChatInput
         ref="chatInputRef"
         :disabled="store.isGenerating"
@@ -176,6 +156,9 @@ import ChatInput from '@/components/ChatInput.vue'
 import ChatActionCard from '@/components/ChatActionCard.vue'
 import ChatHitlCard from '@/components/ChatHitlCard.vue'
 import CapabilityGapCard from '@/components/CapabilityGapCard.vue'
+import AgentProcessPanel from '@/components/AgentProcessPanel.vue'
+import SkillDraftCard from '@/components/SkillDraftCard.vue'
+import ToolDraftCard from '@/components/ToolDraftCard.vue'
 import ConversationNavigator from '@/components/ConversationNavigator.vue'
 import { messageAnchor } from '@/utils/conversationNavigation'
 import { useConversationNavigation } from '@/utils/useConversationNavigation'
@@ -201,6 +184,11 @@ const { entries, active, following, navigate, scrollToBottom } = useConversation
 
 const phaseMessage = computed(() => {
   switch (store.generationPhase) {
+    case 'capability_discovery': return '本次能力添加将联网查找资料，不改变普通聊天的联网开关'
+    case 'skill_loading': return '正在匹配个人 Skill 并核验资源…'
+    case 'tool_selecting': return '正在匹配已授权个人工具…'
+    case 'native_tools': return '正在执行原生工具调用；个人 API 使用独立网络授权'
+    case 'tool_results': return '工具结果已返回，正在核验数据并生成回答'
     case 'tool_start':
     case 'tool_processing': return '正在处理附件...'
     case 'tool_done': return toolCallsSummary.value || '附件处理完成'
@@ -223,7 +211,7 @@ const phaseMessage = computed(() => {
     case 'thinking': return '正在思考...'
     case 'fallback': return '当前模型不可用，已切换免费模型重试...'
     case 'citations_checked': return '已核对引用编号'
-    case 'cache_hit': return '命中语义缓存，直接回复历史回答'
+    case 'cache_hit': return '已核对上下文与证据，复用有效答案'
     default: return ''
   }
 })
@@ -281,6 +269,21 @@ const hasAgentActivity = computed(() =>
   (store.agentTools && store.agentTools.length)
 )
 
+// 灰色过程区收缩控制：新一轮生成展开；最终答案开始流式呈现时自动收缩，
+// 答案与收缩后的过程区同屏，用户可点头部随时展开回看。
+const processCollapsed = ref(false)
+const processTouched = ref(false)
+function toggleProcess() {
+  processTouched.value = true
+  processCollapsed.value = !processCollapsed.value
+}
+watch(() => store.isGenerating, (gen) => {
+  if (gen) { processCollapsed.value = false; processTouched.value = false }
+})
+watch(currentResponse, (text, old) => {
+  if (text && !old && store.isGenerating && !processTouched.value) processCollapsed.value = true
+})
+
 // HITL 卡片交互：联网搜索 / 直接回答 / 澄清选项
 function handleHitlSearch(query) {
   store.resendWithSearch(query)
@@ -300,9 +303,23 @@ watch(() => route.params.sessionId, async (newId) => {
 }, { immediate: true })
 
 // 新提问恢复跟随；流式结束后不强行覆盖用户的历史定位。
-async function handleSend(text, files) {
+async function handleSend(text, files, options = {}) {
   scrollToBottom()
-  await store.sendMessage(text, files)
+  await store.sendMessage(text, files, options)
+}
+
+function canRefresh(msg, idx) {
+  const question = messages.value[idx - 1]
+  return msg.role === 'assistant' && question?.role === 'user' && !question.attachments?.length &&
+    !msg.skill_drafts?.length && !msg.tool_drafts?.length && !msg.actions?.length && !msg.capability_gap &&
+    !/^@(skills|tools?)\b/i.test(question.content || '')
+}
+function refreshAnswer(idx) {
+  if (!canRefresh(messages.value[idx], idx) || store.isGenerating) return
+  const question = messages.value[idx - 1]
+  store.useKnowledge = question.use_knowledge ?? store.useKnowledge
+  store.useSearch = question.use_search ?? store.useSearch
+  handleSend(question.content, [], { forceRefresh: true })
 }
 
 function askSuggestion(text) {
@@ -335,6 +352,8 @@ async function handleFeedback(msg, { rating, comment }) {
 
 onMounted(() => {
   chatInputRef.value?.focus()
+  // 返回对话页时恢复待处理的中断任务提示
+  if (!auth.isGuest) store.refreshCheckpoints()
 
   // 游客模式下拉取管理员配置的最新免费次数
   if (auth.isGuest) {
@@ -353,6 +372,16 @@ onMounted(() => {
 
 <style scoped>
 .stop-generation { display: block; margin: 0 auto 10px; padding: 8px 20px; border: 1px solid #8b7355; border-radius: 8px; background: transparent; color: inherit; cursor: pointer; }
+.checkpoint-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 auto 10px; max-width: 760px; width: 100%; padding: 10px 14px; background: #fdf6ec; border: 1px solid #e8d5b5; border-radius: 10px; }
+.checkpoint-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.checkpoint-title { font-size: 13px; font-weight: 700; color: var(--color-text); }
+.checkpoint-query { font-size: 12px; color: var(--color-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.checkpoint-hint { font-size: 11px; color: var(--color-text-secondary); }
+.checkpoint-actions { display: flex; gap: 8px; flex-shrink: 0; }
+.checkpoint-btn { padding: 6px 16px; border-radius: 8px; font-size: 13px; cursor: pointer; border: 1px solid var(--color-border); background: #fff; color: var(--color-text); }
+.checkpoint-btn.primary { background: var(--color-primary, #c98a4b); border-color: var(--color-primary, #c98a4b); color: #fff; }
+.checkpoint-btn.primary:hover { opacity: .9; }
+.checkpoint-btn.ghost:hover { border-color: #c0392b; color: #c0392b; }
 .back-to-latest { display: block; margin: 0 auto 8px; background: #fffdf9; border: 1px solid var(--color-border); border-radius: 18px; padding: 6px 16px; font-size: 12px; color: var(--color-primary); cursor: pointer; }
 
 .message-anchor { border-radius: 10px; }
@@ -541,75 +570,7 @@ onMounted(() => {
   to { transform: rotate(360deg); }
 }
 
-/* Agent（复杂度分流）执行过程面板 */
-.agent-panel {
-  margin: 4px 0 16px 44px;
-  padding: 10px 12px;
-  border: 1px dashed #e0cdb2;
-  border-radius: 10px;
-  background: #fffdf9;
-  font-size: 12.5px;
-  color: #4a3f35;
-}
-.agent-block + .agent-block {
-  margin-top: 8px;
-  padding-top: 8px;
-  border-top: 1px solid #f0e4d2;
-}
-.agent-block-title {
-  font-size: 11px;
-  font-weight: 600;
-  color: #c98a4b;
-  margin-bottom: 4px;
-  letter-spacing: 0.5px;
-}
-.agent-plan-list {
-  margin: 0;
-  padding-left: 18px;
-}
-.agent-plan-list li {
-  margin: 2px 0;
-  line-height: 1.6;
-}
-.agent-plan-text {
-  margin-left: 6px;
-}
-.agent-thought {
-  margin: 2px 0;
-  line-height: 1.6;
-  color: #5c5145;
-}
-.agent-tag {
-  display: inline-block;
-  padding: 1px 7px;
-  font-size: 10.5px;
-  color: #fff;
-  background: #c98a4b;
-  border-radius: 999px;
-}
-.agent-tool-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin: 3px 0;
-}
-.agent-tool-row.failed .agent-tag {
-  background: #b05555;
-}
-.agent-tool-query {
-  color: #6b5a48;
-  max-width: 45%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.agent-tool-state {
-  margin-left: auto;
-  color: var(--color-text-secondary);
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
+/* Agent 过程区已抽为 AgentProcessPanel 组件（灰色可折叠，答案呈现时自动收缩） */
 
 /* Input section */
 .input-section {

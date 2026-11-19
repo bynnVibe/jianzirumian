@@ -22,18 +22,26 @@ def cli(name):
 
 @pytest.mark.parametrize("source", ["docker-compose.yml", "docker-images/docker-compose.yml"])
 @pytest.mark.parametrize("password_present", [True, False])
-def test_compose_with_synthetic_environment(tmp_path, source, password_present):
+@pytest.mark.parametrize("tools_overlay", [True, False])
+def test_compose_with_synthetic_environment(tmp_path, source, password_present, tools_overlay):
     config = tmp_path / "docker-compose.yml"
     config.write_bytes((ROOT / source).read_bytes())
     env_file = tmp_path / "backend/.env"
     env_file.parent.mkdir()
-    env_file.write_text("GRAFANA_ADMIN_PASSWORD=Synthetic-Only-2026!\n" if password_present else "")
+    env_file.write_text(("GRAFANA_ADMIN_PASSWORD=Synthetic-Only-2026!\n" if password_present else "") +
+                        "TOOL_CREDENTIAL_MASTER_KEY_HOST_FILE=./synthetic-master\n"
+                        "SANDBOX_WORKER_TOKEN_HOST_FILE=./synthetic-control-token\n")
+    files = ["-f", str(config)]
+    if tools_overlay:
+        overlay = tmp_path / "docker-compose.tools.yml"
+        overlay.write_bytes((ROOT / Path(source).parent / "docker-compose.tools.yml").read_bytes())
+        files += ["-f", str(overlay)]
     # Docker Desktop 的用户级插件发现依赖 HOME；优先直接调用已安装的 Compose。
     executable = shutil.which("docker-compose")
     command = [executable] if executable else [cli("docker"), "compose"]
     result = subprocess.run(command + [
         "--project-directory", str(tmp_path),
-        "--env-file", str(env_file), "-f", str(config), "-p", "ab-static",
+        "--env-file", str(env_file), *files, "-p", "ab-static",
         "config", "--format", "json",
     ], env={"PATH": os.environ["PATH"], "HOME": str(tmp_path), "DOCKER_CONFIG": str(tmp_path / "docker")},
         capture_output=True, text=True, timeout=30)
@@ -58,6 +66,13 @@ def test_compose_with_synthetic_environment(tmp_path, source, password_present):
     assert "--no-proxy-headers" in services["llm-proxy"]["command"]
     assert services["grafana"]["environment"]["GF_SECURITY_ADMIN_PASSWORD"] == "Synthetic-Only-2026!"
     assert services["frontend"]["networks"]["jianziruyang-net"]["ipv4_address"] == "172.30.0.10"
+    if tools_overlay:
+        agent = services["agent"]
+        assert agent["environment"]["SANDBOX_PYTHON_ENABLED"] == "false"
+        assert {s["source"] for s in agent["secrets"]} == {"tool_credential_master", "sandbox_control_token"}
+        assert not any(s.get("secrets") for name, s in services.items() if name != "agent")
+        for service in services.values():
+            assert not any("sock" in str(v.get("source", "")) for v in service.get("volumes", []))
 
 
 def test_nginx_substitution_keeps_runtime_variables(tmp_path):

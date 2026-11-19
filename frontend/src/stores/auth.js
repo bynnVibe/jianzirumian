@@ -25,7 +25,10 @@ export const useAuthStore = defineStore('auth', () => {
   const isGuest = computed(() => isGuestMode.value && !token.value && !user.value)
 
   // ---- 初始化（仅从 localStorage 同步恢复，不阻塞 UI） ----
+  let initialized = false
   function init() {
+    if (initialized) return
+    initialized = true
     const savedToken = localStorage.getItem('auth_token')
     const savedUser = localStorage.getItem('auth_user')
     const savedGuest = localStorage.getItem('guest_mode')
@@ -148,6 +151,8 @@ export const useAuthStore = defineStore('auth', () => {
     localStorage.removeItem('auth_token')
     localStorage.removeItem('auth_user')
     localStorage.removeItem('guest_mode')
+    // 重置安全告警一次性弹窗标记：下次登录若仍有未确认事件再提示一次
+    sessionStorage.removeItem('sec_alert_shown_session')
   }
 
   return {

@@ -23,7 +23,9 @@ REWRITE_SYSTEM_PROMPT = (
     "例如「红枣枸杞的功效」「高血压吃什么好」「今天深圳天气」。\n"
     "   - personal：涉及用户个人数据/记忆/偏好/档案，或第一人称具体处境，答案因人而异。"
     "例如「根据我的体质该怎么调理」「我上次的笔记里提到的方子」「适合我的运动强度」。\n\n"
-    "只输出 JSON，形如：{\"query\": \"改写后的检索查询\", \"scope\": \"public\"}，"
+    "3) freshness：static（无需实时数据的独立通用定义或静态知识）、dynamic（时间敏感或依赖外部状态）、unknown（无法确定）。"
+    "涉及个人决策、最新进展、价格、天气、新闻、可用性时不得判为 static。\n"
+    "只输出 JSON，形如：{\"query\": \"改写后的检索查询\", \"scope\": \"public\", \"freshness\": \"static\"}，"
     "不要输出任何解释、前后缀或代码块标记。\n\n"
     "示例：\n"
     "用户：我上次看到笔记里说那个什么红枣枸杞的，对睡眠好，能再说说吗？\n"
@@ -47,6 +49,7 @@ def _parse_intent_output(raw: str, fallback_query: str) -> dict:
         text = text[: -len("/no_think")].strip()
     scope = "personal"  # 安全默认：解析不确定时不公共共享
     query = ""
+    freshness = "unknown"
     # 剔除可能的 ```json 围栏
     text = re.sub(r"^```(?:json)?|```$", "", text, flags=re.M).strip()
     m = _JSON_OBJ_RE.search(text)
@@ -58,6 +61,8 @@ def _parse_intent_output(raw: str, fallback_query: str) -> dict:
                 s = str(obj.get("scope") or "").strip().lower()
                 if s in ("public", "personal"):
                     scope = s
+                if obj.get("freshness") in ("static", "dynamic", "unknown"):
+                    freshness = obj["freshness"]
         except Exception:
             query = ""
     if not query:
@@ -65,7 +70,7 @@ def _parse_intent_output(raw: str, fallback_query: str) -> dict:
         query = text
     if not query or len(query) > 100:
         query = fallback_query
-    return {"query": query, "scope": scope}
+    return {"query": query, "scope": scope, "freshness": freshness}
 
 
 async def analyze_intent(query: str, llm_provider: str = None) -> dict:

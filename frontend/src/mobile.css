@@ -1,0 +1,171 @@
+/*
+ * 见字如面 - 全局移动端友好适配（≤768px）
+ *
+ * 统一兜底各视图在小屏下的可用性：表格横滚、多列网格收单列、头部/工具栏自动换行、
+ * 标签栏横滚、模态近全屏、触控目标与边距收敛、代码块横滚。
+ * 已有自有 media 规则的视图（ChatView/ManagementView/BookmarksView/AdminConsoleLayout 等）
+ * 保留其更细粒度规则，本表只做全局兜底与缺适配视图的补偿。
+ */
+
+/* ---- 基础防护（全尺寸生效）：媒体内容不撑破容器 ---- */
+img,
+video {
+  max-width: 100%;
+}
+
+@media (max-width: 768px) {
+  /* 1) 表格统一变为横向滚动容器，避免宽表撑破页面布局；
+        已包在专用滚动容器内的表保持原布局，避免双层滚动条 */
+  table {
+    display: block;
+    max-width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .user-table-wrap table,
+  .md-table-wrap table {
+    display: table;
+    overflow-x: visible;
+  }
+
+  /* 2) 多列网格收单列；统计卡类保留两列自适应网格 */
+  .feature-grid,
+  .form-grid,
+  .settings-grid,
+  .detail-grid,
+  .two-col,
+  .dash-cols,
+  .overview-grid,
+  .mode-grid,
+  .switch-grid,
+  .card-grid,
+  .market-grid,
+  .list-grid,
+  .assert-grid,
+  .bookmark-grid,
+  .kb-grid,
+  .config-sections {
+    grid-template-columns: 1fr !important;
+  }
+
+  .stat-grid,
+  .mini-grid,
+  .metric-grid {
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)) !important;
+  }
+
+  /* 3) 头部/工具栏/操作区自动换行（flex-wrap 仅对 flex 容器生效，安全兜底） */
+  [class*="header"],
+  [class*="toolbar"],
+  [class*="head-actions"],
+  [class*="panel-head"],
+  [class*="page-head"],
+  [class*="actions"],
+  [class*="filter"] {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  /* 4) 标签栏横向滚动替代换行（隐藏滚动条，触控滑动） */
+  .tab-bar,
+  [class*="tab-bar"],
+  [class*="tabs"] {
+    overflow-x: auto;
+    flex-wrap: nowrap;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+
+  .tab-bar::-webkit-scrollbar,
+  [class*="tab-bar"]::-webkit-scrollbar,
+  [class*="tabs"]::-webkit-scrollbar {
+    display: none;
+  }
+
+  .tab-item {
+    flex-shrink: 0;
+    padding: 10px 12px;
+  }
+
+  /* 5) 模态/钻取面板近全屏，避免小屏下内容被裁切 */
+  .upload-mask {
+    padding: 0;
+  }
+
+  .upload-modal {
+    width: 100vw !important;
+    height: 100vh !important;
+    height: 100dvh !important;
+    max-height: 100dvh;
+    border-radius: 0;
+  }
+
+  .drill-panel {
+    width: 96vw !important;
+    max-width: 96vw;
+    max-height: 88dvh;
+  }
+
+  /* 6) 常见容器边距与标题收敛 */
+  .detail-header,
+  .skills-header {
+    padding-left: 16px;
+    padding-right: 16px;
+  }
+
+  .tab-bar {
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+
+  .kb-title-row h1 {
+    max-width: 58vw;
+    font-size: 17px;
+  }
+
+  .doc-paper {
+    padding: 24px 16px;
+    max-width: 100%;
+    border-radius: 0;
+  }
+
+  /* 7) 触控目标与代码块横滚 */
+  .icon-btn {
+    min-width: 32px;
+    min-height: 32px;
+  }
+
+  .link-btn {
+    min-height: 32px;
+  }
+
+  pre,
+  code {
+    max-width: 100%;
+    overflow-x: auto;
+  }
+
+  /* 8) Skill 卡片改上下结构：主信息在上、状态与操作在下 */
+  .card-inner {
+    flex-direction: column;
+    gap: 10px;
+    padding: 14px;
+  }
+
+  .card-side {
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    min-width: 0;
+    border-left: none;
+    border-top: 1px dashed var(--color-border);
+    padding: 10px 0 0;
+  }
+
+  /* 9) 悬浮入口收窄，减少对小屏内容的遮挡 */
+  .assistant-fab {
+    padding: 10px 6px;
+  }
+}

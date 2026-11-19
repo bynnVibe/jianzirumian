@@ -77,6 +77,9 @@
       <template v-if="!inputText.trim()">（可直接发送，也可补一句你想问的）</template>
     </p>
 
+    <p v-if="activeCommand" class="command-hint">本次能力添加将联网查找资料，不改变普通聊天的联网开关。</p>
+    <p v-if="commandError" class="command-error" role="alert">{{ commandError }}</p>
+
     <!-- 输入框 (参考 DeepSeek) -->
     <div
       class="input-wrapper"
@@ -86,7 +89,14 @@
       @drop.prevent="handleDrop"
       @paste="handlePaste"
     >
-      <button class="btn-attach" type="button" :disabled="disabled" @click="triggerFilePicker" title="添加图片/文档附件（也可直接粘贴截图）">
+      <div v-if="showCommands" id="chat-command-menu" class="command-menu" role="listbox" aria-label="添加个人能力">
+        <button v-for="(item, index) in commandOptions" :id="`chat-command-${index}`" :key="item.command"
+          type="button" role="option" :aria-selected="index === commandIndex" :class="{ selected: index === commandIndex }"
+          @pointerdown.prevent @click="selectCommand(item)">
+          <strong>{{ item.label }} <small>@{{ item.command }}</small></strong><span>{{ item.description }}</span>
+        </button>
+      </div>
+      <button class="btn-attach" type="button" :disabled="disabled || !!activeCommand" @click="triggerFilePicker" title="添加图片/文档附件（也可直接粘贴截图）">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
           <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
         </svg>
@@ -110,6 +120,13 @@
         @focus="isFocused = true"
         @blur="isFocused = false"
         @keydown="handleKeydown"
+        @compositionstart="composing = true"
+        @compositionend="compositionEnd"
+        aria-label="输入问题或使用 @ 添加个人能力"
+        aria-autocomplete="list"
+        :aria-expanded="showCommands"
+        :aria-controls="showCommands ? 'chat-command-menu' : undefined"
+        :aria-activedescendant="showCommands ? `chat-command-${commandIndex}` : undefined"
       ></textarea>
       <button
         class="btn-send"
@@ -141,6 +158,35 @@ const isDragOver = ref(false)
 const textareaRef = ref(null)
 const fileInputRef = ref(null)
 const attachments = ref([]) // [{ id, file, name, kind }]
+const composing = ref(false)
+const commandIndex = ref(0)
+const commandsDismissed = ref(false)
+const commandError = ref('')
+let compositionEndedAt = 0
+const commands = [
+  { label: 'Skills', command: 'skills', description: '查找、适配并确认添加个人 Skill' },
+  { label: 'Tools', command: 'tool', description: '添加只读 API 或隔离计算工具' },
+]
+const commandOptions = computed(() => {
+  if (!/^@[a-z]*$/i.test(inputText.value)) return []
+  const word = inputText.value.slice(1).toLowerCase()
+  return commands.filter(item => item.command.startsWith(word) || (word === 'tools' && item.command === 'tool'))
+})
+const showCommands = computed(() => isFocused.value && !props.disabled && !composing.value && !commandsDismissed.value && commandOptions.value.length > 0)
+const activeCommand = computed(() => {
+  const match = inputText.value.match(/^@(skills|tools?)(?=\s|$)/i)
+  return match ? (match[1].toLowerCase() === 'skills' ? 'skills' : 'tool') : ''
+})
+watch(inputText, () => { commandIndex.value = 0; commandsDismissed.value = false; commandError.value = '' })
+
+function compositionEnd() { composing.value = false; compositionEndedAt = Date.now() }
+async function selectCommand(item) {
+  if (!item) return
+  inputText.value = `@${item.command} `
+  await nextTick()
+  autoResize()
+  textareaRef.value?.focus()
+}
 
 const ACCEPTED_IMAGE_EXTS = ['.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.webp']
 const ACCEPTED_DOC_EXTS = { '.docx': 'word', '.pdf': 'pdf', '.md': 'markdown', '.markdown': 'markdown' }
@@ -154,7 +200,7 @@ const placeholder = computed(() => {
   if (store.isGenerating) return '正在生成回答...'
   if (hasPastedImage.value) return '可直接发送：将识别截图文字并检索知识库；也可补一句你想问的...'
   if (attachments.value.length) return '给附件补充一句说明，如“帮我识别”“上传到知识库”“总结要点”...'
-  return '输入你的问题，关于健康、养生、中医...（可直接粘贴截图检索）'
+  return '输入问题，或输入 @ 添加 Skill / 工具（也可粘贴截图）'
 })
 
 const canSend = computed(() => !!inputText.value.trim() || attachments.value.length > 0)
@@ -254,6 +300,8 @@ watch(useKnowledgeLocal, (val) => {
 watch(useSearchLocal, (val) => {
   store.useSearch = val
 })
+watch(() => store.useKnowledge, val => { useKnowledgeLocal.value = val })
+watch(() => store.useSearch, val => { useSearchLocal.value = val })
 
 // 出网模型下拉：仅列匹配路由规则（chat_answer 绑定 → 默认规则）的上游模型，
 // 选不了其他规则的模型；选中即按该模型出网，留空由网关在规则内解析。
@@ -264,6 +312,7 @@ const modelLocal = ref(store.selectedModel)
 watch(modelLocal, (val) => {
   store.selectedModel = val
 })
+watch(() => store.selectedModel, val => { modelLocal.value = val })
 const defaultModelLabel = computed(() => {
   if (pinnedModel.value) return `默认（${pinnedModel.value}）`
   return '默认（自动均衡）'
@@ -351,6 +400,20 @@ function autoResize() {
 }
 
 function handleKeydown(e) {
+  if (composing.value || e.isComposing || e.keyCode === 229 || Date.now() - compositionEndedAt < 80) return
+  if (showCommands.value) {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault()
+      commandIndex.value = (commandIndex.value + (e.key === 'ArrowDown' ? 1 : -1) + commandOptions.value.length) % commandOptions.value.length
+      return
+    }
+    if ((e.key === 'Enter' || e.key === 'Tab') && !e.shiftKey) {
+      e.preventDefault()
+      selectCommand(commandOptions.value[commandIndex.value])
+      return
+    }
+    if (e.key === 'Escape') { e.preventDefault(); commandsDismissed.value = true; return }
+  }
   // Enter 发送 (Shift+Enter 换行)
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault()
@@ -359,10 +422,20 @@ function handleKeydown(e) {
 }
 
 function handleSend() {
-  const text = inputText.value.trim()
-  if (!canSend.value || props.disabled) return
+  const text = inputText.value.trimEnd()
+  if (!canSend.value || props.disabled || composing.value) return
+  if (text === '@') { selectCommand(commands[commandIndex.value]); return }
+  const command = activeCommand.value
+  if (command && !text.replace(/^@(skills|tools?)(?=\s|$)/i, '').trim()) {
+    commandError.value = command === 'skills' ? '例如：@skills 添加一个文章总结技能，也可附来源链接' : '例如：@tool 查询指定城市的天气'
+    return
+  }
+  if (command && attachments.value.length) {
+    commandError.value = '添加能力请使用功能描述或来源链接，先移除附件再发送。'
+    return
+  }
   const files = attachments.value.map((a) => a.file)
-  emit('send', text, files)
+  emit('send', text, files, { command })
   inputText.value = ''
   attachments.value = []
   autoResize()
@@ -467,7 +540,15 @@ defineExpose({ focus })
 .channel-select select:focus { border-color: var(--color-primary); }
 .channel-select select:disabled { opacity: 0.5; cursor: not-allowed; }
 
+.command-hint, .command-error { font-size: 12px; line-height: 1.5; padding: 0 4px 8px; }
+.command-hint { color: #89765e; }
+.command-error { color: #a8322a; }
+.command-menu { position: absolute; bottom: calc(100% + 8px); left: 0; z-index: 30; width: min(360px, 100%); padding: 6px; border: 1px solid var(--color-border); border-radius: 12px; background: #fffdf9; box-shadow: 0 6px 24px #58452c20; }
+.command-menu button { display: flex; flex-direction: column; gap: 4px; width: 100%; border: 0; border-radius: 8px; background: transparent; padding: 12px; text-align: left; color: var(--color-text); cursor: pointer; }
+.command-menu button.selected, .command-menu button:hover { background: #f7eedf; }
+.command-menu small, .command-menu span { font-size: 12px; color: #89765e; font-weight: normal; }
 .input-wrapper {
+  position: relative;
   display: flex;
   align-items: flex-end;
   gap: 8px;
@@ -585,6 +666,7 @@ defineExpose({ focus })
 }
 
 .chat-textarea {
+  min-width: 0;
   flex: 1;
   border: none;
   outline: none;

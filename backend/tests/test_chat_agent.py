@@ -10,6 +10,8 @@
 import asyncio
 import json
 
+import pytest
+
 from app.services import chat_agent
 
 
@@ -89,11 +91,36 @@ def test_need_search_and_clarify_event_shape():
 # ============================================
 # ReAct
 # ============================================
+@pytest.mark.parametrize("mode", ["react", "plan_execute"])
+@pytest.mark.parametrize("refresh,failed", [(False, False), (True, False), (False, True)])
+def test_gap_request_identity_refresh_and_failure_filter(monkeypatch, mode, refresh, failed):
+    from app.services import capability_gap
+    responses = ([json.dumps({"steps": [{"tool": "web_search", "args": {"query": "天气"}}]})]
+                 if mode == "plan_execute" else [json.dumps({"action": "tool", "tool": "web_search", "args": {"query": "天气"}}), '{"action":"final"}'])
+    _setup(monkeypatch, responses + ["暂无天气数据。"])
+    calls = []
+    monkeypatch.setattr(capability_gap, "detect_scenario", lambda *a, **k: "realtime_weather")
+    monkeypatch.setattr(capability_gap, "record_gap", lambda **kw: calls.append(kw) or "")
+    if failed:
+        async def unavailable(query):
+            raise RuntimeError("temporary search failure")
+        monkeypatch.setattr(chat_agent, "web_search", unavailable)
+    events, result = _run(**_base(mode=mode, query="香港天气", use_knowledge=False, use_search=True,
+                                request_id="user-message-id", force_refresh=refresh))
+    assert result["status"] == "ok"
+    if refresh or failed:
+        assert calls == []
+    else:
+        assert calls[0]["request_id"] == "user-message-id" and calls[0]["user_id"] == "u1"
+    assert "error" not in _kinds(events)
+
+
 def test_react_final_answer_streams_and_emits_no_done(monkeypatch):
     _setup(monkeypatch, ['{"thought":"寒暄直接回答","action":"final"}', "你好，很高兴为你服务"])
     events, res = _run(**_base(query="你好"))
     kinds = _kinds(events)
-    assert "thought" in kinds
+    assert "thought" not in kinds
+    assert "寒暄直接回答" not in json.dumps(events, ensure_ascii=False)
     assert "token" in kinds
     assert "done" not in kinds  # Agent 不发 done
     assert res["status"] == "ok"

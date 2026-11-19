@@ -118,7 +118,7 @@ function modelsForRow(row) {
     const set = new Set()
     for (const u of upstreams.value) {
       if ((u.category || 'llm') !== cat) continue
-      for (const m of (u.models || [])) set.add(m)
+      for (const m of (row.role === 'tool_decision' ? (u.tool_models || []) : (u.models || []))) set.add(m)
     }
     return [...set].sort()
   }
@@ -130,7 +130,7 @@ function modelsForRow(row) {
   for (const uid of (rule.upstreams || [])) {
     const u = byId[uid]
     if (!u || (u.category || 'llm') !== cat) continue
-    for (const m of (upstreamModels.value[uid] || [])) set.add(m)
+    for (const m of (row.role === 'tool_decision' ? (u.tool_models || []) : (upstreamModels.value[uid] || []))) set.add(m)
   }
   return [...set].sort()
 }

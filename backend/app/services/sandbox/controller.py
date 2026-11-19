@@ -143,16 +143,22 @@ class SandboxController:
         self._executions: Dict[str, SandboxResult] = {}
 
     def list_profiles(self) -> List[dict]:
+        from app.services.sandbox import worker_client
         return [
             {"id": "fixed_adapter", "kind": "fixed_adapter",
              "available": True,
              "description": "受治理 CliRunner：无 shell/显式 argv/env 白名单/超时熔断/输出限额；"
                             "仅限预审核固定命令白名单。"},
             {"id": "isolated", "kind": "isolated",
-             "available": _isolated_runtime_ready(),
+             "available": False,
              "image_digest": "",
              "description": "一次性隔离执行环境（只读根/非 root/断网/资源限额）；"
                             "未配置隔离运行时时不可用，动态执行将被拒绝而非回退主机。"},
+            {"id": "isolated-python-1", "kind": "personal_tool",
+             "configured": worker_client.configured(), "available": False,
+             "runtime_profile": worker_client.runtime_profile(),
+             "description": "个人 Python 工具仅经 invoke_tool 和持久化版本审批执行；"
+                            "就绪需逐次核验 Worker 健康及隔离验收，配置存在不代表当前可用。"},
         ]
 
     def _resolve_profile(self, spec: ExecutionSpec) -> tuple[str, Optional[str]]:
@@ -182,6 +188,13 @@ class SandboxController:
             return res
 
         profile_id, _ = self._resolve_profile(spec)
+        if spec.executor_kind == "python_script":
+            return self._record(execution_id, "sandbox_unavailable", "sandbox_unavailable",
+                                "动态 Python 必须先安装为已审批的个人工具，经 invoke_tool 访问独立 Worker；旧合同不可直接执行",
+                                spec, "isolated")
+        if spec.executor_kind != "cli_spec" or profile_id not in ("fixed_adapter", "isolated"):
+            return self._record(execution_id, "blocked", "invalid_executor_profile",
+                                "未知执行器或运行配置，拒绝执行", spec, profile_id)
 
         # cli_spec：只允许已审核 spec_id + 白名单二进制；禁止模型指定任意 binary
         if spec.executor_kind == "cli_spec":

@@ -1,0 +1,21 @@
+# 可选叠加配置：仅给业务 Agent 注入文件 secret，不启动 Worker、不挂运行时 socket。
+# docker compose --env-file backend/.env -f docker-compose.yml -f docker-compose.tools.yml up -d
+# 两个文件必须由管理员在仓库外提供；主密钥与 Worker 控制令牌不得复用。
+services:
+  agent:
+    environment:
+      - TOOL_CREDENTIAL_MASTER_KEY_FILE=/run/secrets/tool_credential_master
+      - SANDBOX_WORKER_TOKEN_FILE=/run/secrets/sandbox_control_token
+      - SANDBOX_PYTHON_ENABLED=${SANDBOX_PYTHON_ENABLED:-false}
+      - SANDBOX_WORKER_URL=${SANDBOX_WORKER_URL:-}
+      - SANDBOX_PYTHON_IMAGE=${SANDBOX_PYTHON_IMAGE:-}
+      - SANDBOX_SECCOMP_SHA256=${SANDBOX_SECCOMP_SHA256:-}
+    secrets:
+      - tool_credential_master
+      - sandbox_control_token
+
+secrets:
+  tool_credential_master:
+    file: ${TOOL_CREDENTIAL_MASTER_KEY_HOST_FILE:?请设置仓库外主密钥文件路径}
+  sandbox_control_token:
+    file: ${SANDBOX_WORKER_TOKEN_HOST_FILE:?请设置仓库外Worker控制令牌文件路径}

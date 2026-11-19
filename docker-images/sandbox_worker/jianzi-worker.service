@@ -1,0 +1,20 @@
+# 安装为专用非 root 账户的 systemd --user 服务，不与业务后端共机。
+# 前置：rootless Podman、subuid/subgid、cgroup v2 的 cpu/memory/pids 委派。
+# TLS 反向代理只允许业务后端来源；本服务仅监听回环，不直接暴露公网。
+[Unit]
+Description=Jianzirumian Isolated Python Worker
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/jianzi-worker
+EnvironmentFile=%h/.config/jianzi-worker/worker.env
+ExecStart=%h/jianzi-worker/.venv/bin/uvicorn worker:app --host 127.0.0.1 --port 8093 --workers 1 --no-access-log
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=120
+UMask=0077
+Delegate=cpu memory pids
+
+[Install]
+WantedBy=default.target

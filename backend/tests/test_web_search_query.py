@@ -82,6 +82,20 @@ class _FakeSearcher:
         return self.responses.pop(0) if self.responses else []
 
 
+def test_search_failure_is_not_an_empty_success(monkeypatch):
+    calls = []
+    def failing(*args):
+        calls.append(args)
+        raise TimeoutError("isolated provider timeout")
+    async def no_wait(seconds):
+        return None
+    monkeypatch.setattr(ws.DuckDuckGoSearch, "_search_sync", staticmethod(failing))
+    monkeypatch.setattr(ws.asyncio, "sleep", no_wait)
+    with pytest.raises(RuntimeError, match="搜索服务暂时不可用"):
+        asyncio.run(ws.DuckDuckGoSearch().search("天气"))
+    assert len(calls) == 3
+
+
 def test_web_search_refines_query(monkeypatch):
     fake = _FakeSearcher([_health_results()])
     monkeypatch.setattr(ws.WebSearchFactory, "create", staticmethod(lambda provider=None: fake))

@@ -39,7 +39,7 @@ _OPEN_HEALTH_STATES = ("circuit_open", "down")
 # 业务角色清单（供前端下拉与校验）：凡经 create_for_role 出网的 role 都应在此登记，
 # 否则无法在「业务路由」中绑定规则/模型（如记忆抽取曾缺席导致只能走默认模型报 503）
 ROLES = (
-    "chat_answer", "assistant", "intent_rewrite", "evidence_check",
+    "chat_answer", "assistant", "intent_rewrite", "evidence_check", "tool_decision",
     "wiki_compile", "embed", "rerank", "ocr",
     "memory_extract", "session_summary", "knowledge_summarize", "text_polish",
     "content_polish", "kb_summary",
@@ -48,7 +48,7 @@ ROLES = (
 # role → 上游分类映射：select_upstreams 按此过滤候选上游 category，防跨类误选
 # （如 LLM 规则误选 embedding/rerank/ocr 上游，反之亦然）。未登记 role 归 llm。
 ROLE_CATEGORY = {
-    "chat_answer": "llm", "assistant": "llm", "intent_rewrite": "llm",
+    "chat_answer": "llm", "assistant": "llm", "intent_rewrite": "llm", "tool_decision": "llm",
     "evidence_check": "llm", "wiki_compile": "llm", "memory_extract": "llm",
     "session_summary": "llm", "knowledge_summarize": "llm", "text_polish": "llm",
     "content_polish": "llm", "kb_summary": "llm",
@@ -449,6 +449,86 @@ def _materialize(rule_row: dict, model: str = "",
     if model:
         ups = [u for u in ups if _upstream_supports(u, model)]
     return rule, _order_by_strategy(ups, rule_row.get("lb_strategy"), rule)
+
+
+def primary_backup_fallback_model(rule_row: dict, model: str,
+                                  category: Optional[str] = None) -> Optional[str]:
+    """primary_backup 失效切换后请求模型仅失效上游支持时，解析健康上游支持的兜底模型。
+
+    整改3 泛化：按「失效/健康」集合判定（不再只看 primary 字段）——
+    备升主持久化后旧主降为备且仍失效，请求模型若仅旧主支持，
+    同样需改写为健康上游支持的模型，避免后续请求重试失效上游。
+    健康上游仍支持请求模型时返回 None（无需改写）。
+    """
+    if (rule_row.get("lb_strategy") or "") != "primary_backup" or not model:
+        return None
+    # 兼容原始行（upstreams 为 JSON 字符串）与 _row_to_dict 产物（已解析为 list）
+    raw_ups = rule_row.get("upstreams")
+    up_ids = raw_ups if isinstance(raw_ups, list) else _parse_json(raw_ups, [])
+    by_id = {r["id"]: r for r in db.query("SELECT * FROM gateway_upstreams WHERE enabled=1")}
+    ups = [by_id[i] for i in up_ids if i in by_id]
+    if category:
+        ups = [u for u in ups if (u.get("category") or "llm") == category]
+    threshold = max(1, int(rule_row.get("failover_threshold") or 3))
+
+    def _failed(u: dict) -> bool:
+        return (int(u.get("fail_count") or 0) >= threshold
+                or (u.get("health") or "healthy") in _OPEN_HEALTH_STATES)
+
+    failed = [u for u in ups if _failed(u)]
+    healthy = [u for u in ups if not _failed(u)]
+    if not failed or not healthy:
+        return None
+    if any(_upstream_supports(h, model) for h in healthy):
+        return None
+    if not any(_upstream_supports(f, model) for f in failed):
+        return None
+    from app.services.gateway import settings as settings_svc
+    candidates = [(settings_svc.get_settings().get("default_model") or "").strip()]
+    for h in healthy:
+        candidates += [str(m).strip() for m in _parse_json(h.get("models"), [])]
+    for m in candidates:
+        if m and m != model and any(_upstream_supports(h, m) for h in healthy):
+            return m
+    return None
+
+
+def promote_failed_primary(rule_row: dict) -> Optional[dict]:
+    """整改3：主备规则的主路由失效且存在健康备时，把备升主并持久化到 gateway_rules。
+
+    升主后后续请求直接以新主领衔，不再对旧主重试；rowcount 防并发重复升主。
+    返回 {rule_id, rule_name, old_primary, new_primary}；无需升主返回 None。
+    """
+    if (rule_row.get("lb_strategy") or "") != "primary_backup":
+        return None
+    primary_id = str(rule_row.get("primary_upstream") or "")
+    if not primary_id:
+        return None
+    raw_ups = rule_row.get("upstreams")
+    up_ids = raw_ups if isinstance(raw_ups, list) else _parse_json(raw_ups, [])
+    by_id = {r["id"]: r for r in db.query("SELECT * FROM gateway_upstreams WHERE enabled=1")}
+    primary = by_id.get(primary_id)
+    if primary is None:
+        return None
+    threshold = max(1, int(rule_row.get("failover_threshold") or 3))
+    fails = int(primary.get("fail_count") or 0)
+    down = (primary.get("health") or "healthy") in _OPEN_HEALTH_STATES
+    if not (fails >= threshold or down):
+        return None
+    healthy_backups = [by_id[i] for i in up_ids
+                       if i in by_id and i != primary_id
+                       and (by_id[i].get("health") or "healthy") not in _OPEN_HEALTH_STATES]
+    if not healthy_backups:
+        return None
+    new_primary = healthy_backups[0]
+    n = db.execute("UPDATE gateway_rules SET primary_upstream=? WHERE id=? AND primary_upstream=?",
+                   (new_primary["id"], rule_row["id"], primary_id))
+    if not n:
+        return None
+    logger.warning("主备路由·备升主（已持久化）: rule=%s 旧主「%s」→ 新主「%s」",
+                   rule_row.get("id"), primary.get("name"), new_primary.get("name"))
+    return {"rule_id": rule_row["id"], "rule_name": rule_row.get("model_pattern") or "",
+            "old_primary": dict(primary), "new_primary": dict(new_primary)}
 
 
 def select_upstreams(model: str, role: Optional[str] = None,

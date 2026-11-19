@@ -39,13 +39,15 @@ def build_request(channel: dict, body: dict, mapped_model: str, stream: bool,
     api_key = channel.get("api_key") or ""
 
     if protocol == "ollama":
-        payload = {"model": mapped_model, "messages": body.get("messages") or [], "stream": stream}
+        if body.get("tools") and body.get("tool_choice", "auto") not in (None, "auto", "none"):
+            raise ValueError("Ollama 协议不支持该 tool_choice，不能静默忽略")
+        payload = {"model": mapped_model, "messages": _ollama_messages(body.get("messages") or []), "stream": stream}
         options = {}
         if body.get("temperature") is not None:
             options["temperature"] = body["temperature"]
         if body.get("top_p") is not None:
             options["top_p"] = body["top_p"]
-        if body.get("tools"):
+        if body.get("tools") and body.get("tool_choice") != "none":
             payload["tools"] = body["tools"]
         if options:
             payload["options"] = options
@@ -65,6 +67,15 @@ def build_request(channel: dict, body: dict, mapped_model: str, stream: bool,
             payload["temperature"] = body["temperature"]
         if body.get("tools"):
             payload["tools"] = [_openai_tool_to_anthropic(t) for t in body["tools"]]
+            choice = body.get("tool_choice", "auto")
+            if isinstance(choice, dict):
+                payload["tool_choice"] = {"type": "tool", "name": (choice.get("function") or {}).get("name", "")}
+            elif choice in ("auto", "required", "none"):
+                payload["tool_choice"] = {"type": "any" if choice == "required" else choice}
+            else:
+                raise ValueError("无效的 tool_choice")
+            if body.get("parallel_tool_calls") is False and choice != "none":
+                payload["tool_choice"]["disable_parallel_tool_use"] = True
         headers = {"x-api-key": api_key, "anthropic-version": _ANTHROPIC_VERSION,
                    "content-type": "application/json"}
         return headers, payload
@@ -115,17 +126,56 @@ def _build_rerank_request(channel: dict, body: dict, mapped_model: str) -> tuple
 
 def _split_anthropic_messages(messages: list) -> tuple[list, str]:
     """Anthropic 的 system 独立于 messages：抽取 system 消息，其余转为 {role,content} 文本。"""
-    system_parts = []
-    out = []
+    from app.core.json_schema import parse_object
+    system_parts, out = [], []
     for m in messages:
         role = m.get("role")
         content = m.get("content")
-        text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+        text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False) if content else ""
         if role == "system":
             system_parts.append(text)
+            continue
+        blocks = [{"type": "text", "text": text}] if text else []
+        if role == "tool":
+            if not m.get("tool_call_id"):
+                raise ValueError("工具结果缺少 tool_call_id")
+            role, blocks = "user", [{"type": "tool_result", "tool_use_id": m["tool_call_id"], "content": text}]
+        elif role == "assistant":
+            for call in m.get("tool_calls") or []:
+                fn = call.get("function") or {}
+                blocks.append({"type": "tool_use", "id": call["id"], "name": fn["name"],
+                               "input": parse_object(fn.get("arguments", "{}"))})
+        elif role != "user":
+            raise ValueError("不支持的消息角色")
+        if not blocks:
+            continue
+        if out and out[-1]["role"] == role:
+            out[-1]["content"].extend(blocks)
         else:
-            out.append({"role": "user" if role not in ("user", "assistant") else role, "content": text})
+            out.append({"role": role, "content": blocks})
     return out, "\n\n".join(system_parts)
+
+
+def _ollama_messages(messages):
+    from app.core.json_schema import parse_object
+    out, names = [], {}
+    for message in messages:
+        current = dict(message)
+        calls = []
+        for call in message.get("tool_calls") or []:
+            fn = call["function"]
+            names[call["id"]] = fn["name"]
+            calls.append({"function": {"name": fn["name"], "arguments": parse_object(fn.get("arguments", "{}"))}})
+        if calls:
+            current["tool_calls"] = calls
+            current["content"] = current.get("content") or ""
+        if message.get("role") == "tool":
+            identifier = current.pop("tool_call_id", "")
+            if identifier not in names:
+                raise ValueError("工具结果未匹配到调用 ID")
+            current["tool_name"] = names[identifier]
+        out.append(current)
+    return out
 
 
 def _openai_tool_to_anthropic(tool: dict) -> dict:
@@ -202,16 +252,17 @@ def _ollama_to_openai(channel: dict, raw: dict) -> dict:
     pt = int(raw.get("prompt_eval_count") or 0)
     ct = int(raw.get("eval_count") or 0)
     choice = {"index": 0, "message": {"role": "assistant", "content": msg.get("content") or ""},
-              "finish_reason": "stop"}
+              "finish_reason": "length" if raw.get("done_reason") == "length" else "stop"}
     if msg.get("tool_calls"):
         choice["message"]["tool_calls"] = [
-            {"id": f"call_{i}", "type": "function",
+            {"id": f"call_{uuid.uuid4().hex}", "type": "function",
              "function": {"name": tc.get("function", {}).get("name", ""),
                           "arguments": json.dumps(tc.get("function", {}).get("arguments", {}),
                                                   ensure_ascii=False)}}
             for i, tc in enumerate(msg["tool_calls"])
         ]
-        choice["finish_reason"] = "tool_calls"
+        if choice["finish_reason"] != "length":
+            choice["finish_reason"] = "tool_calls"
     return {
         "id": f"chatcmpl-{uuid.uuid4().hex[:12]}", "object": "chat.completion",
         "created": int(time.time()), "model": raw.get("model") or channel.get("name", ""),
@@ -243,7 +294,7 @@ def _anthropic_to_openai(channel: dict, raw: dict) -> dict:
         "id": raw.get("id") or f"chatcmpl-{uuid.uuid4().hex[:12]}", "object": "chat.completion",
         "created": int(time.time()), "model": raw.get("model") or channel.get("name", ""),
         "choices": [{"index": 0, "message": message,
-                     "finish_reason": "tool_calls" if tool_calls else "stop"}],
+                     "finish_reason": _anthropic_finish(raw.get("stop_reason"), bool(tool_calls))}],
         "usage": {"prompt_tokens": pt, "completion_tokens": ct, "total_tokens": pt + ct,
                   "prompt_tokens_details": {"cached_tokens": cached}},
     }
@@ -268,6 +319,7 @@ async def iter_openai_sse(channel: dict, aiter_lines) -> AsyncGenerator[str, Non
 async def iter_ollama_sse(channel: dict, aiter_lines) -> AsyncGenerator[str, None]:
     """ollama 协议：NDJSON 行 → OpenAI SSE 块。"""
     cid = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+    call_count = 0
     async for line in aiter_lines:
         line = line.strip()
         if not line:
@@ -284,16 +336,18 @@ async def iter_ollama_sse(channel: dict, aiter_lines) -> AsyncGenerator[str, Non
             delta["content"] = msg["content"]
         if msg.get("tool_calls"):
             delta["tool_calls"] = [
-                {"index": i, "id": f"call_{i}", "type": "function",
+                {"index": call_count + i, "id": f"{cid}_call_{call_count + i}", "type": "function",
                  "function": {"name": tc.get("function", {}).get("name", ""),
                               "arguments": json.dumps(tc.get("function", {}).get("arguments", {}),
                                                       ensure_ascii=False)}}
                 for i, tc in enumerate(msg["tool_calls"])
             ]
+            call_count += len(msg["tool_calls"])
         obj = {"id": cid, "object": "chat.completion.chunk", "created": int(time.time()),
                "model": chunk.get("model") or channel.get("name", ""), "choices": [{"index": 0, "delta": delta}]}
         if chunk.get("done"):
-            obj["choices"][0]["finish_reason"] = "tool_calls" if msg.get("tool_calls") else "stop"
+            obj["choices"][0]["finish_reason"] = ("length" if chunk.get("done_reason") == "length"
+                                                      else "tool_calls" if call_count else "stop")
             pt = int(chunk.get("prompt_eval_count") or 0)
             ct = int(chunk.get("eval_count") or 0)
             obj["usage"] = {"prompt_tokens": pt, "completion_tokens": ct, "total_tokens": pt + ct}
@@ -303,9 +357,22 @@ async def iter_ollama_sse(channel: dict, aiter_lines) -> AsyncGenerator[str, Non
             return
 
 
+def _anthropic_finish(reason, has_tools=False):
+    if reason in ("max_tokens", "model_context_window_exceeded"):
+        return "length"
+    if reason == "refusal":
+        return "content_filter"
+    if reason == "tool_use":
+        return "tool_calls"
+    if reason in ("end_turn", "stop_sequence"):
+        return "tool_calls" if has_tools else "stop"
+    return "incomplete"
+
+
 async def iter_anthropic_sse(channel: dict, aiter_lines) -> AsyncGenerator[str, None]:
     """anthropic 协议：SSE 事件 → OpenAI SSE 块（提取 content_block_delta / message_delta）。"""
     cid = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+    blocks, usage_total = {}, {}
     async for line in aiter_lines:
         line = line.strip()
         if not line or not line.startswith("data:"):
@@ -317,27 +384,46 @@ async def iter_anthropic_sse(channel: dict, aiter_lines) -> AsyncGenerator[str, 
         etype = ev.get("type")
         delta: dict = {}
         obj: Optional[dict] = None
-        if etype == "content_block_delta":
+        if etype == "content_block_start":
+            block = ev.get("content_block") or {}
+            if block.get("type") == "tool_use":
+                index = len(blocks)
+                blocks[ev["index"]] = {"index": index, "input": block.get("input") or {}, "partial": False}
+                obj = _chunk(cid, channel, {"tool_calls": [{"index": index, "id": block["id"],
+                    "type": "function", "function": {"name": block["name"], "arguments": ""}}]})
+            elif block.get("type") == "text" and block.get("text"):
+                obj = _chunk(cid, channel, {"content": block["text"]})
+        elif etype == "content_block_delta":
             d = ev.get("delta") or {}
             if d.get("type") == "text_delta" and d.get("text"):
                 delta["content"] = d["text"]
                 obj = _chunk(cid, channel, delta)
             elif d.get("type") == "input_json_delta" and d.get("partial_json"):
-                delta["content"] = d["partial_json"]
-                obj = _chunk(cid, channel, delta)
+                block = blocks.get(ev.get("index"))
+                if block is None:
+                    raise ValueError("工具参数增量缺少对应的工具块")
+                block["partial"] = True
+                obj = _chunk(cid, channel, {"tool_calls": [{"index": block["index"],
+                    "function": {"arguments": d["partial_json"]}}]})
+        elif etype == "content_block_stop":
+            block = blocks.get(ev.get("index"))
+            if block and not block["partial"]:
+                obj = _chunk(cid, channel, {"tool_calls": [{"index": block["index"],
+                    "function": {"arguments": json.dumps(block["input"], ensure_ascii=False)}}]})
         elif etype == "message_start":
             obj = _chunk(cid, channel, {"role": "assistant"})
             usage = (ev.get("message") or {}).get("usage") or {}
-            obj["usage"] = {"prompt_tokens": int(usage.get("input_tokens") or 0),
-                            "completion_tokens": int(usage.get("output_tokens") or 0),
-                            "prompt_tokens_details": {
-                                "cached_tokens": int(usage.get("cache_read_input_tokens") or 0)}}
+            usage_total = {"prompt_tokens": int(usage.get("input_tokens") or 0),
+                           "completion_tokens": int(usage.get("output_tokens") or 0),
+                           "prompt_tokens_details": {"cached_tokens": int(usage.get("cache_read_input_tokens") or 0)}}
         elif etype == "message_delta":
             usage = (ev.get("usage") or {})
-            obj = _chunk(cid, channel, {}, finish_reason="stop")
+            obj = _chunk(cid, channel, {}, finish_reason=_anthropic_finish(
+                (ev.get("delta") or {}).get("stop_reason"), bool(blocks)))
             if usage.get("output_tokens") is not None:
-                obj["usage"] = {"prompt_tokens": 0, "completion_tokens": int(usage["output_tokens"]),
-                                "total_tokens": int(usage["output_tokens"])}
+                usage_total["completion_tokens"] = int(usage["output_tokens"])
+            obj["usage"] = {**usage_total, "total_tokens": usage_total.get("prompt_tokens", 0)
+                            + usage_total.get("completion_tokens", 0)}
         elif etype == "message_stop":
             yield "data: [DONE]\n\n"
             return

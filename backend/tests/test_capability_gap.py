@@ -291,30 +291,260 @@ def test_execute_solution_missing_gap(isolated_db):
 
 def test_frequency_suggestions_reaches_threshold(isolated_db):
     for i in range(cg.SEDIMENT_THRESHOLD):
-        cg.record_gap(query=f"查询今天香港的天气{i}", scenario="realtime_weather")
-    out = cg.frequency_suggestions()
+        cg.record_gap(user_id="alice", request_id=f"request-{i}", query=f"查询今天香港的天气{i}", scenario="realtime_weather")
+    out = cg.frequency_suggestions(user_id="alice")
     assert len(out["suggestions"]) == 1
     s = out["suggestions"][0]
     assert s["scenario"] == "realtime_weather"
     assert s["count"] == cg.SEDIMENT_THRESHOLD
     assert s["suggested_name"] == "auto_realtime_weather"
     assert s["suggested_kind"] == "skill"
-    assert "沉淀" in s["message"]
+    assert "独立请求" in s["message"] and "草稿" in s["message"]
 
 
 def test_frequency_suggestions_below_threshold(isolated_db):
-    cg.record_gap(query="今天天气", scenario="realtime_weather")
-    cg.record_gap(query="今天天气2", scenario="realtime_weather")
-    out = cg.frequency_suggestions()
+    for owner in ("alice", "bob"):
+        for i in range(2):
+            cg.record_gap(user_id=owner, request_id=str(i), query="今天天气", scenario="realtime_weather")
+    out = cg.frequency_suggestions(user_id="alice")
     assert out["suggestions"] == []
-    # 降低阈值即可命中
     out2 = cg.frequency_suggestions(threshold=2)
-    assert len(out2["suggestions"]) == 1
+    assert out2["threshold"] == 3 and out2["suggestions"] == []
 
 
 # ============================================
 # SSE 事件（需求5 HITL 前端协议）
 # ============================================
+
+def _requests(owner="alice", query="香港今天天气", scenario="realtime_weather", count=3, prefix="r"):
+    return [cg.record_gap(user_id=owner, query=query, scenario=scenario, request_id=f"{prefix}-{i}")
+            for i in range(count)]
+
+
+def _suggestion(owner="alice"):
+    return cg.frequency_suggestions(user_id=owner, include_cooldown=True)["suggestions"][0]["id"]
+
+
+def test_governance_migration_preserves_legacy_and_is_independent():
+    import sqlite3
+    from app.core.skill_schema import migrate
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.execute("CREATE TABLE schema_migrations(version TEXT PRIMARY KEY,applied_at TEXT)")
+        conn.execute("INSERT INTO schema_migrations VALUES('skill_packages_v1','old')")
+        conn.execute("CREATE TABLE capability_gaps(id TEXT,user_id TEXT,created_at TEXT)")
+        conn.execute("INSERT INTO capability_gaps VALUES('legacy','alice','old')")
+        migrate(conn)
+        migrate(conn)
+        assert conn.execute("SELECT id,request_key FROM capability_gaps").fetchall() == [("legacy", "")]
+        # 四个独立迁移各登记一次：预置 skill_packages_v1 保留，治理／依赖／验收各自独立版本；二次 migrate 幂等不重复。
+        versions = {r[0] for r in conn.execute("SELECT version FROM schema_migrations")}
+        assert versions == {"skill_packages_v1", "capability_suggestions_v2",
+                            "skill_tool_dependencies_v1", "capability_acceptance_v1"}
+    finally:
+        conn.close()
+
+
+def test_frequency_deduplicates_requests_and_separates_intents(isolated_db):
+    _requests(count=2)
+    _requests(count=2)
+    assert not cg.frequency_suggestions(user_id="alice")["suggestions"]
+    _requests(count=1, prefix="new")
+    _requests(query="香港明天天气", prefix="forecast")
+    _requests(query="香港天气预警", prefix="alert")
+    result = cg.frequency_suggestions(user_id="alice")["suggestions"]
+    assert {s["count"] for s in result} == {3}
+    assert {s["missing_capability"] for s in result} == {"weather_current_api", "weather_forecast_api", "weather_alert_api"}
+    assert not cg.frequency_suggestions(user_id="bob")["suggestions"]
+
+
+@pytest.mark.parametrize("excluded", ["failed", "resolved", "old", "legacy"])
+def test_frequency_excludes_failures_resolved_old_and_legacy(isolated_db, excluded):
+    gaps = _requests()
+    if excluded == "failed":
+        cg.record_gap(user_id="alice", query="香港今天天气", scenario="realtime_weather",
+                      request_id="r-0", failure_reason="upstream_timeout")
+    elif excluded == "resolved":
+        db.execute("UPDATE capability_gaps SET status='resolved' WHERE id=?", (gaps[0],))
+    elif excluded == "old":
+        db.execute("UPDATE capability_gaps SET created_at=? WHERE id=?",
+                   ((datetime.now() - timedelta(days=31)).isoformat(), gaps[0]))
+    else:
+        db.execute("UPDATE capability_gaps SET request_key='' WHERE id=?", (gaps[0],))
+    assert not cg.frequency_suggestions(user_id="alice")["suggestions"]
+
+
+@pytest.mark.parametrize("query", ["@skills 天气", "@tool 新闻", "@tools 海拔", "请添加天气工具"])
+def test_addition_requests_do_not_record_gaps(isolated_db, query):
+    assert cg.record_gap(user_id="alice", request_id="x", query=query, scenario="no_tool") == ""
+    assert db.query("SELECT * FROM capability_gaps") == []
+
+
+def test_aggregate_is_anonymous_and_counts_unique_owners(isolated_db):
+    _requests(query="香港金价", scenario="realtime_general", prefix="a")
+    _requests(query="北京金价", scenario="realtime_general", prefix="b")
+    _requests(owner="bob", query="上海金价", scenario="realtime_general")
+    assert len(cg.frequency_suggestions(user_id="alice")["suggestions"]) == 2
+    aggregate = cg.frequency_suggestions()
+    assert aggregate["scope"] == "aggregate"
+    item = aggregate["suggestions"][0]
+    assert item["owners"] == 2 and item["count"] == 9
+    assert item["sample_query"] == item["intent"] == item["id"] == item["draft_id"] == ""
+    assert all(value not in json.dumps(aggregate, ensure_ascii=False) for value in ("alice", "bob", "香港", "北京", "上海"))
+
+
+def test_seen_and_dismiss_cooldown_and_owner_isolation(isolated_db):
+    from fastapi import HTTPException
+    _requests()
+    key = _suggestion()
+    assert cg.mark_suggestions_seen("bob", [key])["ids"] == []
+    assert cg.mark_suggestions_seen("alice", [key, key])["ids"] == [key]
+    assert cg.mark_suggestions_seen("alice", [key])["ids"] == []
+    assert not cg.frequency_suggestions(user_id="alice")["suggestions"]
+    with pytest.raises(HTTPException) as error:
+        cg.dismiss_suggestion("bob", key)
+    assert error.value.status_code == 404
+    cg.dismiss_suggestion("alice", key)
+    assert db.query_one("SELECT status FROM capability_suggestions")["status"] == "dismissed"
+    db.execute("UPDATE capability_suggestions SET last_prompted_at=?", ((datetime.now() - timedelta(days=8)).isoformat(),))
+    assert cg.frequency_suggestions(user_id="alice")["suggestions"]
+
+
+@pytest.fixture
+def suggestion_flow(isolated_db, monkeypatch):
+    from app.services import chat, skill_workflow, skill_drafts
+    service = chat.ChatService()
+    monkeypatch.setattr(chat, "chat_service", service)
+    async def build(owner, session, message, query):
+        draft, error = skill_drafts.propose(owner, session, "测试能力", "测试草稿", "请引用资料并注明时间。", message_id=message)
+        assert not error
+        return draft
+    monkeypatch.setattr(skill_workflow, "build_draft", build)
+    _requests()
+    return service, _suggestion(), build
+
+
+def test_accept_creates_only_draft_is_idempotent_and_preserves_round(suggestion_flow):
+    from app.services import skill_drafts
+    service, key, _ = suggestion_flow
+    cg.mark_suggestions_seen("alice", [key])
+    first = asyncio.run(cg.accept_suggestion("alice", key))
+    second = asyncio.run(cg.accept_suggestion("alice", key))
+    assert first == second
+    assert first["draft"]["status"] == "pending"
+    assert db.query("SELECT * FROM user_skills WHERE owner_id='alice'") == []
+    session = service.get_session(first["session_id"])
+    assert first["draft"]["message_id"] == session.messages[-1].message_id
+    assert skill_drafts.history(session.session_id, "alice")[0]["id"] == first["draft"]["id"]
+    assert service._active_tasks == {}
+    skill_drafts.confirm(first["draft"]["id"], "alice")
+    assert db.query_one("SELECT status FROM capability_suggestions")["status"] != "resolved"
+
+
+def test_accept_concurrency_and_other_owner_are_blocked(suggestion_flow, monkeypatch):
+    from fastapi import HTTPException
+    from app.services import skill_workflow
+    service, key, build = suggestion_flow
+    async def run():
+        entered, release = asyncio.Event(), asyncio.Event()
+        async def waiting(*args):
+            entered.set()
+            await release.wait()
+            return await build(*args)
+        monkeypatch.setattr(skill_workflow, "build_draft", waiting)
+        task = asyncio.create_task(cg.accept_suggestion("alice", key))
+        await entered.wait()
+        for owner, code in (("alice", 409), ("bob", 404)):
+            with pytest.raises(HTTPException) as error:
+                await cg.accept_suggestion(owner, key)
+            assert error.value.status_code == code
+        with pytest.raises(HTTPException) as error:
+            cg.dismiss_suggestion("alice", key)
+        assert error.value.status_code == 409
+        release.set()
+        await task
+    asyncio.run(run())
+    assert len(db.query("SELECT * FROM skill_drafts")) == 1 and not service._active_tasks
+
+
+@pytest.mark.parametrize("delete,swallow", [(False, False), (True, False), (True, True)])
+def test_accept_cancel_and_deleted_session_never_resurrect(suggestion_flow, monkeypatch, delete, swallow):
+    from app.services import skill_workflow
+    service, key, build = suggestion_flow
+    async def run():
+        entered = asyncio.Event()
+        async def waiting(*args):
+            entered.set()
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                if not swallow:
+                    raise
+            return await build(*args)
+        monkeypatch.setattr(skill_workflow, "build_draft", waiting)
+        task = asyncio.create_task(cg.accept_suggestion("alice", key))
+        await entered.wait()
+        session_id = db.query_one("SELECT session_id FROM capability_suggestions")["session_id"]
+        if delete:
+            service.delete_session(session_id, user_id="alice")
+        else:
+            task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    asyncio.run(run())
+    assert not service._active_tasks
+    assert not db.query("SELECT * FROM skill_drafts WHERE status='pending'")
+    assert db.query_one("SELECT status FROM capability_suggestions")["status"] == "open"
+    if delete:
+        assert not db.query("SELECT * FROM chat_sessions") and not db.query("SELECT * FROM chat_messages")
+    else:
+        assert db.query_one("SELECT interrupted FROM chat_messages WHERE role='assistant'")["interrupted"]
+
+
+@pytest.mark.parametrize("stage", ["create", "discover", "response_lost"])
+def test_accept_failure_releases_lease_and_recovers_saved_draft(suggestion_flow, monkeypatch, stage):
+    from app.services import skill_workflow
+    service, key, build = suggestion_flow
+    original_create = service.create_session
+    async def failing(*args):
+        if stage == "response_lost":
+            await build(*args)
+        raise RuntimeError("isolated failure")
+    if stage == "create":
+        monkeypatch.setattr(service, "create_session", lambda **kw: (_ for _ in ()).throw(RuntimeError("isolated failure")))
+    else:
+        monkeypatch.setattr(skill_workflow, "build_draft", failing)
+    with pytest.raises(RuntimeError):
+        asyncio.run(cg.accept_suggestion("alice", key))
+    assert db.query_one("SELECT status FROM capability_suggestions")["status"] == "open"
+    monkeypatch.setattr(service, "create_session", original_create)
+    monkeypatch.setattr(skill_workflow, "build_draft", build)
+    result = asyncio.run(cg.accept_suggestion("alice", key))
+    assert result["draft"]["status"] == "pending"
+    assert len(db.query("SELECT * FROM skill_drafts")) == 1
+    assert db.query_one("SELECT status FROM capability_suggestions")["status"] == "drafted"
+
+
+def test_suggestion_api_restores_only_owned_unexpired_drafts(suggestion_flow):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from app.api.skills import router
+    from app.api.deps import get_current_user
+    _, key, _ = suggestion_flow
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[get_current_user] = lambda: {"id": "alice"}
+    with TestClient(app) as client:
+        result = client.post(f"/api/skills/suggestions/{key}/accept").json()
+        assert result["draft"]["status"] == "pending"
+        assert client.get("/api/skills/suggestions").json()["drafts"][0]["id"] == result["draft"]["id"]
+        app.dependency_overrides[get_current_user] = lambda: {"id": "bob"}
+        assert client.get("/api/skills/suggestions").json()["drafts"] == []
+        assert client.post(f"/api/skills/suggestions/{key}/accept").status_code == 404
+        app.dependency_overrides[get_current_user] = lambda: {"id": "alice"}
+        db.execute("UPDATE skill_drafts SET expires_at='2000-01-01'")
+        assert client.get("/api/skills/suggestions").json()["drafts"] == []
+
 
 def test_capability_gap_sse_event_shape():
     from app.services import chat_agent

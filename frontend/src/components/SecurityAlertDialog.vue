@@ -1,6 +1,7 @@
 <template>
   <!-- 全局安全风险弹窗：任意页面轮询未确认且达阈值的风险事件（仅 admin/ops）；
-       每批告警仅提示一次，支持手动关闭，关闭后存量告警不再弹窗（安全审计中心仍可处理） -->
+       每个登录会话仅自动弹窗一次，关闭后本会话不再重复弹（安全审计中心仍可处理）；
+       重新登录后若仍有未确认事件再提示一次 -->
   <div v-if="auth.canOps && auth.isAuthenticated && alertQueue.length" class="sec-modal-mask">
     <div class="sec-modal" :class="`sev-${alertCurrent.risk_level}`">
       <div class="sec-modal-head">
@@ -78,6 +79,8 @@ function formatTime(iso) {
 // 提示水位：手动关闭/确认完毕/去处理后记录时间，早于水位的未确认事件不再弹窗，
 // 仅新产生的事件提示一次（localStorage 持久，刷新/重开页面不重复打扰）
 const NOTIFY_WM_KEY = 'sec_alert_notify_watermark'
+// 登录会话级一次性弹窗标记：关闭后本次登录期间不再自动弹（sessionStorage，登出清除）
+const SESSION_KEY = 'sec_alert_shown_session'
 function notifyWatermark() {
   const t = Date.parse(localStorage.getItem(NOTIFY_WM_KEY) || '')
   return Number.isNaN(t) ? 0 : t
@@ -88,11 +91,15 @@ function markNotified() { localStorage.setItem(NOTIFY_WM_KEY, new Date().toISOSt
 async function pollAlerts() {
   if (!auth.canOps || !auth.isAuthenticated) return
   if (alertQueue.value.length) return // 已有弹窗在处理，跳过本轮
+  if (sessionStorage.getItem(SESSION_KEY)) return // 本登录会话已弹过，关闭后不重复打扰
   try {
     const res = await listGatewaySecurityEvents({ alert_only: true, limit: 20 })
     const wm = notifyWatermark()
     const list = (res.data.events || []).filter(e => Date.parse(e.created_at) > wm)
-    if (list.length) { alertQueue.value = list; alertIndex.value = 0 }
+    if (list.length) {
+      sessionStorage.setItem(SESSION_KEY, '1')
+      alertQueue.value = list; alertIndex.value = 0
+    }
   } catch (e) {
     // 轮询失败静默
   }

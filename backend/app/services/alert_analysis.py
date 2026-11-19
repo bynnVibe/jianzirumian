@@ -45,6 +45,8 @@ METRIC_LABELS = {
     "online_quality": "在线评测均分",
     "empty_answer_rate": "空回答率",
     "agent_task_completion": "Agent 任务完成均分",
+    "generation_timeout": "生成整体超时",
+    "failover_promotion": "主备路由·备升主",
 }
 
 
@@ -346,21 +348,81 @@ async def _llm_analysis(rule: dict) -> dict:
 # ---------------------------------------------------------------------------
 # 告警生命周期
 # ---------------------------------------------------------------------------
-def _create_alert(rule: dict, analysis: dict) -> str:
+def _create_alert(rule: dict, analysis: dict, fingerprint: Optional[str] = None,
+                  window: Optional[str] = None) -> str:
     alert_id = str(uuid.uuid4())
     db.execute(
         "INSERT INTO obs_alerts (id, type, metric, severity, status, fingerprint, value,"
         " threshold, window, evidence, analysis, analyzed_at, created_at)"
         " VALUES (?,?,?,?, 'open', ?,?,?,?,?,?,?,?)",
         (alert_id, rule["type"], rule["metric"], rule["severity"],
-         f"{rule['type']}:{rule['metric']}", float(rule["value"]), float(rule["threshold"]),
-         f"{_SCAN_DAYS}d",
+         fingerprint or f"{rule['type']}:{rule['metric']}", float(rule["value"]), float(rule["threshold"]),
+         window or f"{_SCAN_DAYS}d",
          json.dumps(_redact_obj(rule.get("evidence") or {}), ensure_ascii=False)[:8000],
          json.dumps(_redact_obj(analysis), ensure_ascii=False)[:4000],
          _now(), _now()))
     logger.info("[告警分析] 新建告警 %s %s=%s（阈值 %s）",
                 rule["type"], rule["metric"], rule["value"], rule["threshold"])
     return alert_id
+
+
+def record_generation_timeout(session_id: str, user_id: str = "", message_id: str = "",
+                              elapsed_seconds: float = 0.0, query: str = "") -> Optional[str]:
+    """业务兜底告警：单次生成整体超预算（默认 5 分钟），会话生成任务已自动停止。
+
+    事件类告警：按请求（session+message）去重；规则化结论不做 LLM 分析；
+    不参与指标扫描自动恢复，需人工 ack/resolve。
+    """
+    fp = f"event:generation_timeout:{session_id}:{message_id or '-'}"
+    if db.query_one("SELECT id FROM obs_alerts WHERE fingerprint=? AND status IN ('open','acked')", (fp,)):
+        return None
+    threshold = float(settings.CHAT_REQUEST_TIMEOUT)
+    rule = {
+        "type": "event", "metric": "generation_timeout", "severity": "high",
+        "value": round(float(elapsed_seconds), 1), "threshold": threshold,
+        "evidence": {"session_id": session_id, "user_id": user_id or "-",
+                     "message_id": message_id or "-", "query": (query or "")[:120],
+                     "elapsed_seconds": round(float(elapsed_seconds), 1),
+                     "budget_seconds": threshold,
+                     "action": "已自动停止该会话所有生成任务"},
+    }
+    analysis = {
+        "cause": f"单次生成整体耗时 {rule['value']}s 超过预算 {threshold:.0f}s（默认 5 分钟），"
+                 "系统已自动停止该会话所有生成任务并中断响应。",
+        "suggestions": ["检查模型网关上游健康度与主备路由切换配置，避免重试放大消耗预算",
+                        "打开该请求 trace 明细，核对检索/故障切换/重试各阶段耗时分布",
+                        "如长文本生成为业务常态，评估调高 CHAT_REQUEST_TIMEOUT 后放量"],
+        "degraded": True,
+    }
+    return _create_alert(rule, analysis, fingerprint=fp, window="event")
+
+
+def record_failover_promotion(*, rule_id: str, rule_name: str = "", old_primary: str = "",
+                              new_primary: str = "", role: str = "", user_id: str = "") -> Optional[str]:
+    """整改3：主备切换·备升主显性化（事件告警，按 rule+新主 去重）。
+
+    切换已持久化到路由规则；告警告知用户旧主失效、新主领衔，后续不再重试旧主。
+    """
+    fp = f"event:failover_promotion:{rule_id}:{new_primary}"
+    if db.query_one("SELECT id FROM obs_alerts WHERE fingerprint=? AND status IN ('open','acked')", (fp,)):
+        return None
+    rule = {
+        "type": "event", "metric": "failover_promotion", "severity": "medium",
+        "value": 1, "threshold": 0,
+        "evidence": {"rule_id": rule_id, "rule_name": rule_name or "-",
+                     "old_primary": old_primary, "new_primary": new_primary,
+                     "role": role or "-", "user_id": user_id or "-",
+                     "action": "备已升主并持久化到路由规则，后续请求不再重试旧主"},
+    }
+    analysis = {
+        "cause": f"路由规则「{rule_name or rule_id}」的主路由「{old_primary}」连续失败达阈值或熔断，"
+                 f"系统已将健康备「{new_primary}」升为主并持久化，后续请求直接走新主。",
+        "suggestions": ["核查旧主上游的配置与可用性，恢复后如需回切请在路由规则中手动调整主上游",
+                        "切换已持久化：后续请求不再对旧主重试，避免重复消耗故障切换预算",
+                        "如需自动回切策略，评估 failover_threshold 与上游健康检查配置"],
+        "degraded": True,
+    }
+    return _create_alert(rule, analysis, fingerprint=fp, window="event")
 
 
 def scan_once_sync() -> dict:

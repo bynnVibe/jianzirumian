@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { after, test } from 'node:test'
-import { consumeChatStream, createTextPresenter, groupKnowledgeSources, mergeChatAction } from './chatStream.js'
+import { consumeChatStream, createTextPresenter, groupKnowledgeSources, mergeChatAction, configureChatMarkdown } from './chatStream.js'
+import MarkdownIt from 'markdown-it'
 import vue from '@vitejs/plugin-vue'
 import { createSSRApp } from 'vue'
 import { renderToString } from 'vue/server-renderer'
@@ -67,7 +68,7 @@ const server = await createServer({
       if (id === '@/utils/urlArticles') return fileURLToPath(new URL('./urlArticles.js', import.meta.url))
     },
     load(id) {
-      if (id === '\0chat-test-api') return ['sendChatMessage', 'sendChatMessageWithFiles', 'createSession', 'listSessions', 'deleteSession', 'switchSession', 'getChatHistory', 'clearChatHistory', 'createBookmark', 'getImageUrl', 'getAttachmentFileUrl', 'getUrlSnapshot']
+      if (id === '\0chat-test-api') return ['sendChatMessage', 'sendChatMessageWithFiles', 'createSession', 'listSessions', 'deleteSession', 'switchSession', 'getChatHistory', 'clearChatHistory', 'createBookmark', 'getImageUrl', 'getAttachmentFileUrl', 'getUrlSnapshot', 'stopChatGeneration', 'listCheckpoints', 'abandonCheckpoint']
         .map(name => `export const ${name} = (...args) => globalThis.__chatTestApi.${name}(...args);`).join('\n')
     },
   }],
@@ -81,6 +82,9 @@ function store() {
     createSession: async () => ({ data: { session_id: 'new' } }),
     switchSession: async () => ({}), getChatHistory: async () => ({ data: { messages: [] } }),
     clearChatHistory: async () => ({}),
+    stopChatGeneration: async () => ({ data: { ok: true } }),
+    listCheckpoints: async () => ({ data: { checkpoints: [] } }),
+    abandonCheckpoint: async () => ({ data: { success: true } }),
   }
   return useChatStore()
 }
@@ -96,13 +100,15 @@ const tick = () => new Promise(resolve => setTimeout(resolve, 10))
 test('停止保留部分文本，新会话不被旧流污染', async () => {
   const chat = store()
   chat.currentSessionId = 'old'
-  let signal
+  let signal, stoppedSession = null
   globalThis.__chatTestApi.sendChatMessage = (_, s) => { signal = s; return blockedFetch(s) }
+  globalThis.__chatTestApi.stopChatGeneration = async (id) => { stoppedSession = id; return { data: { ok: true } } }
   const pending = chat.sendMessage('问题')
   await tick()
   assert.equal(chat.currentResponse, '部分内容')
   chat.stopGeneration()
   assert.equal(signal.aborted, true)
+  assert.equal(stoppedSession, 'old')  // 停止同时通知后端取消生成
   assert.equal(chat.messages.at(-1).interrupted, true)
   assert.match(chat.messages.at(-1).content, /部分内容/)
   await chat.newSession()
@@ -169,6 +175,18 @@ test('文档级新响应保留完整片段及回填预览字段', () => {
   assert.deepEqual(doc.citation_indices, [1])
 })
 
+test('引用仅改文本，不污染链接属性、图片替代文本或代码', () => {
+  const md = configureChatMarkdown(new MarkdownIt({ html: false, linkify: true }))
+  const html = md.render('[工具来源 1]\n\n[x](https://example.com "[来源 2]")\n\n![来源 3](https://example.com/a.png)\n\n`[来源 4]`\n\n<script>alert(1)</script>')
+  assert.equal((html.match(/class="source-citation"/g) || []).length, 1)
+  assert.match(html, /title="\[来源 2\]"/)
+  assert.match(html, /alt="来源 3"/)
+  assert.match(html, /<code>\[来源 4\]<\/code>/)
+  assert.doesNotMatch(html, /<script>/)
+  assert.doesNotMatch(md.render('[x](javascript:alert(1))'), /href="javascript:/)
+  assert.match(md.render('|列|\n|-|\n|值|'), /md-table-wrap/)
+})
+
 test('知识来源默认收起，数量按文档统计', async () => {
   const { default: ChatMessage } = await server.ssrLoadModule('/src/components/ChatMessage.vue')
   const html = await renderToString(createSSRApp(ChatMessage, {
@@ -229,12 +247,15 @@ test('done 等待展示排空再保存完整消息', async () => {
 test('排队展示期间停止并切会话，旧文本不能污染新会话', async () => {
   const chat = store()
   chat.currentSessionId = 's'
+  let stoppedSession = null
+  globalThis.__chatTestApi.stopChatGeneration = async (id) => { stoppedSession = id; return { data: { ok: true } } }
   globalThis.__chatTestApi.sendChatMessage = async () => new Response(
     `data: ${JSON.stringify({ event: 'token', content: '旧会话'.repeat(200) })}\n\ndata: {"event":"done"}\n\n`,
   )
   const pending = chat.sendMessage('问题')
   await tick()
   chat.stopGeneration()
+  assert.equal(stoppedSession, 's')
   assert.equal(chat.messages.at(-1).interrupted, true)
   await chat.newSession()
   await pending
