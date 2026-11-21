@@ -1,6 +1,6 @@
 <template>
   <section class="tool-draft" aria-label="个人工具草稿">
-    <header><strong>{{ draft.spec?.name || '个人工具' }}</strong><span>{{ statusText }}</span></header>
+    <header><strong>{{ draft.spec?.name || '个人工具' }}</strong><code v-if="draft.spec?.function_name" class="fn" title="功能名标识（聊天调用名）">{{ draft.spec.function_name }}</code><span>{{ statusText }}</span></header>
     <ToolSpecDetails v-if="draft.spec" :spec="draft.spec" :review="draft.review" />
     <p v-if="readonly" class="hint">原 Skill 草稿已失效，关联工具不能从此卡片继续确认。</p>
     <template v-if="draft.status === 'awaiting_confirmation' && !readonly">
@@ -13,8 +13,9 @@
       </div>
     </template>
     <template v-else-if="draft.status === 'installed'">
-      <p>{{ draft.tool?.status === 'ready' ? '本版本样例测试通过，可在聊天中按需调用。' : '配置已保存，工具尚未就绪或已关闭。请到个人工具管理查看测试与配置要求。' }}</p>
-      <router-link to="/skills">打开个人能力管理 →</router-link>
+      <p>{{ installedText }}</p>
+      <router-link v-if="auth.canOps" :to="{ path: '/admin/tools', query: draft.tool_id ? { focus: draft.tool_id } : {} }">前往工具治理中心查看进度与结果 →</router-link>
+      <p v-else class="hint">后续审批、评测与启用由管理员在系统管理·工具治理中心跟进。</p>
     </template>
     <p v-if="error" class="error" role="alert">{{ error }}</p>
     <button class="refresh" :disabled="busy" @click="refresh">刷新状态</button>
@@ -24,7 +25,9 @@
 <script setup>
 import { computed, ref, watch } from 'vue'
 import { confirmToolDraft, cancelToolDraft, getToolDraft } from '@/api'
+import { useAuthStore } from '@/stores/auth'
 import ToolSpecDetails from './ToolSpecDetails.vue'
+const auth = useAuthStore()
 const props = defineProps({ draft: { type: Object, required: true }, readonly: { type: Boolean, default: false } })
 const emit = defineEmits(['update'])
 const busy = ref(false)
@@ -34,6 +37,14 @@ const allowSameName = ref(false)
 const sameNameConflict = ref(false)
 watch(() => props.draft.content_hash, () => { acceptTerms.value = false; allowSameName.value = false; sameNameConflict.value = false })
 const statusText = computed(() => ({ awaiting_confirmation: '待确认', installed: '已保存配置', cancelled: '已取消', expired: '已过期', testing: '测试中' }[props.draft.status] || '状态待核验'))
+const installedText = computed(() => {
+  const tool = props.draft.tool
+  if (tool?.status !== 'ready') return '配置已保存，工具尚未就绪或已关闭。请到工具治理中心补齐审批、凭据或隔离配置后重新测试。'
+  if (tool.eval_status === 'passed') return '本版本样例测试通过，标准化评测全部用例通过，已加入工具注册表，可在聊天中按需调用。'
+  if (tool.eval_status === 'running') return '本版本样例测试通过，标准化评测进行中；可在工具治理中心查看逐用例进度，全部通过后自动加入工具注册表。'
+  if (tool.eval_status === 'failed') return '样例测试通过，但标准化评测未全部通过，暂未进入工具注册表。请到工具治理中心查看逐用例结果，修复后复跑评测。'
+  return '本版本样例测试通过，等待进入标准化评测；可在工具治理中心查看进度。'
+})
 async function perform(action) {
   busy.value = true
   error.value = ''
@@ -52,6 +63,7 @@ function refresh() { return perform(() => getToolDraft(props.draft.id)) }
 <style scoped>
 .tool-draft { margin: 14px 0; padding: 16px; background: #fffaf1; border: 1px solid #dfd3be; border-radius: 12px; min-width: 0; color: #51483e; font-size: 13px; }
 header { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; }
+header .fn { background: #f4ead8; padding: 1px 6px; border-radius: 4px; font-size: 12px; color: #6b5031; }
 header span, .hint { color: #82725c; }
 label { display: flex; align-items: flex-start; gap: 7px; margin: 12px 0; line-height: 1.6; }
 input { margin-top: 4px; }

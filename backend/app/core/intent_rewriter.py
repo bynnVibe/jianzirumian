@@ -9,6 +9,7 @@ import json
 import logging
 import re
 
+from app.core import call_context
 from app.core.llm import LLMFactory
 
 logger = logging.getLogger("jianziruyang.intent_rewriter")
@@ -40,6 +41,18 @@ REWRITE_SYSTEM_PROMPT = (
 
 # 从模型输出中提取 JSON 对象（容忍代码块围栏与前后噪声）
 _JSON_OBJ_RE = re.compile(r"\{.*\}", re.S)
+
+# 实时/时效信号词：模型未给出 freshness 时的确定性兜底（宁判 dynamic 不误判 static，
+# static 会放行语义缓存复用，实时问题误判 static 会复用过期答案）
+_REALTIME_HINT_RE = re.compile(
+    r"天气|气温|温度|新闻|股价|行情|汇率|今天|今日|现在|当前|实时|最新|最近|明天|未来|本周|this week|today|now|latest|real.?time|weather|news",
+    re.I,
+)
+
+
+def _freshness_hint(query: str) -> str:
+    """freshness 缺失/unknown 时的兜底：命中时效信号词→dynamic，否则 unknown。"""
+    return "dynamic" if _REALTIME_HINT_RE.search(query or "") else "unknown"
 
 
 def _parse_intent_output(raw: str, fallback_query: str) -> dict:
@@ -73,21 +86,23 @@ def _parse_intent_output(raw: str, fallback_query: str) -> dict:
     return {"query": query, "scope": scope, "freshness": freshness}
 
 
-async def analyze_intent(query: str, llm_provider: str = None) -> dict:
+async def analyze_intent(query: str, llm_provider: str = None, user_id: str = "") -> dict:
     """意图识别：一次 LLM 调用同时产出「改写检索查询」与「公共/个人」缓存域标签。
 
     Args:
         query: 用户原始问题
         llm_provider: 已废弃（保留兼容）；模型统一由网关 intent_rewrite 业务路由解析
+        user_id: 发起用户（出网凭据归属）；缺省时取请求级调用上下文
 
     Returns:
-        {"query": 改写后的检索查询, "scope": "public"|"personal"}；失败回落原句 + personal。
+        {"query": 改写后的检索查询, "scope": "public"|"personal", "freshness": ...}；
+        失败回落原句 + personal + freshness 兜底。
     """
     if not query or not query.strip():
-        return {"query": query, "scope": "personal"}
+        return {"query": query, "scope": "personal", "freshness": "unknown"}
 
     try:
-        llm = LLMFactory.create_for_role("intent_rewrite")
+        llm = LLMFactory.create_for_role("intent_rewrite", user_id or call_context.current_user_id())
         messages = [
             {"role": "system", "content": REWRITE_SYSTEM_PROMPT},
             # /no_think：Qwen3 系模型跳过思考链直接输出（其他模型忽略该指令）
@@ -98,12 +113,14 @@ async def analyze_intent(query: str, llm_provider: str = None) -> dict:
             collected += chunk
 
         result = _parse_intent_output(collected, query.strip())
-        logger.info("意图识别: %r → query=%r scope=%s",
-                    query[:50], result["query"][:50], result["scope"])
+        if result.get("freshness") == "unknown":
+            result["freshness"] = _freshness_hint(query)
+        logger.info("意图识别: %r → query=%r scope=%s freshness=%s",
+                    query[:50], result["query"][:50], result["scope"], result["freshness"])
         return result
     except Exception as e:
         logger.warning("意图识别失败，使用原句 + personal: %s", e)
-        return {"query": query.strip(), "scope": "personal"}
+        return {"query": query.strip(), "scope": "personal", "freshness": _freshness_hint(query)}
 
 
 async def rewrite_query(query: str, llm_provider: str = None) -> str:

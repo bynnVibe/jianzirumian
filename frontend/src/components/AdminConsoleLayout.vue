@@ -88,6 +88,19 @@
           回归评测
         </router-link>
 
+        <!-- 工具治理（管理员/运维）：个人工具生命周期工作流／评测／审批 -->
+        <router-link
+          v-if="auth.canOps"
+          to="/admin/tools"
+          class="console-item"
+          :class="{ active: route.name === 'ToolGovernance' }"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="console-item-icon">
+            <path d="M14.7 6.3a4.5 4.5 0 0 0-6 6L3 18l3 3 5.7-5.7a4.5 4.5 0 0 0 6-6L14 13l-3-3 3.7-3.7z"/>
+          </svg>
+          工具治理
+        </router-link>
+
         <!-- Agent 可观测性（管理员/运维） -->
         <router-link
           v-if="auth.canOps"
@@ -219,6 +232,7 @@ const TITLE_MAP = {
   EvalDataset: '回归评测 · 评测集详情',
   EvalPromptSkill: '回归评测 · Prompt / Skill',
   Observability: 'Agent 可观测性',
+  ToolGovernance: '工具治理',
 }
 const currentTitle = computed(() => TITLE_MAP[route.name] || '系统管理')
 

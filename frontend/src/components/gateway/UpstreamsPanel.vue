@@ -204,6 +204,7 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted } from 'vue'
+import { useQueryCacheStore } from '@/stores/queryCache'
 import {
   listGatewayUpstreams, createGatewayUpstream, updateGatewayUpstream,
   deleteGatewayUpstream, cloneGatewayUpstream, testGatewayUpstream,
@@ -249,16 +250,25 @@ const importSelected = ref([])
 function tierLabel(t) { return { paid: '付费', free: '免费', subscription: '订阅' }[t] || t }
 function healthLabel(h) { return { healthy: '正常', degraded: '降级', down: '不可用' }[h] || h }
 
-async function load() {
+const queryCache = useQueryCacheStore()
+
+function applyUpstreams(data) {
+  upstreams.value = data.upstreams || []
+  protocols.value = data.protocols || ['openai']
+  tiers.value = data.tiers || ['paid', 'free', 'subscription']
+  categories.value = data.categories || ['llm', 'ocr', 'embedding', 'rerank']
+  categoryLabels.value = data.category_labels || categoryLabels.value
+}
+
+// 列表经统一查询缓存：热切换先展示缓存，写操作后 force 重拉
+async function load(force = 0) {
   loading.value = true
   errorMsg.value = ''
   try {
-    const res = await listGatewayUpstreams()
-    upstreams.value = res.data.upstreams || []
-    protocols.value = res.data.protocols || ['openai']
-    tiers.value = res.data.tiers || ['paid', 'free', 'subscription']
-    categories.value = res.data.categories || ['llm', 'ocr', 'embedding', 'rerank']
-    categoryLabels.value = res.data.category_labels || categoryLabels.value
+    const data = await queryCache.cachedGet('gateway', { kind: 'upstreams' },
+      async () => (await listGatewayUpstreams()).data,
+      { force: !!force, onRevalidate: applyUpstreams })
+    applyUpstreams(data)
   } catch (e) {
     errorMsg.value = e.response?.data?.detail || '加载上游失败'
   } finally {
@@ -310,7 +320,7 @@ async function onSave() {
     if (editing.value) await updateGatewayUpstream(editing.value, payload)
     else await createGatewayUpstream(payload)
     showModal.value = false
-    await load()
+    await load(1)
   } catch (e) {
     formError.value = e.response?.data?.detail || '保存失败'
   } finally {
@@ -322,25 +332,25 @@ async function onWeightChange(u, ev) {
   const w = Math.max(1, Number(ev.target.value) || 1)
   try {
     await updateGatewayUpstream(u.id, { weight: w })
-    await load()
+    await load(1)
   } catch (e) {
     errorMsg.value = e.response?.data?.detail || '权重更新失败'
   }
 }
 
 async function onToggleEnabled(u) {
-  try { await updateGatewayUpstream(u.id, { enabled: !u.enabled }); await load() }
+  try { await updateGatewayUpstream(u.id, { enabled: !u.enabled }); await load(1) }
   catch (e) { errorMsg.value = e.response?.data?.detail || '操作失败' }
 }
 
 async function onClone(u) {
-  try { await cloneGatewayUpstream(u.id); await load() }
+  try { await cloneGatewayUpstream(u.id); await load(1) }
   catch (e) { errorMsg.value = e.response?.data?.detail || '克隆失败' }
 }
 
 async function onDelete(u) {
   if (!confirm(`确认删除上游「${u.name}」？相关路由规则将自动移除该上游。`)) return
-  try { await deleteGatewayUpstream(u.id); await load() }
+  try { await deleteGatewayUpstream(u.id); await load(1) }
   catch (e) { errorMsg.value = e.response?.data?.detail || '删除失败' }
 }
 
@@ -349,7 +359,7 @@ async function onTest(u) {
   try {
     const res = await testGatewayUpstream(u.id)
     testResults.value = { ...testResults.value, [u.id]: res.data }
-    await load()
+    await load(1)
   } catch (e) {
     testResults.value = {
       ...testResults.value,
@@ -361,7 +371,7 @@ async function onTest(u) {
 }
 
 async function onResetHealth(u) {
-  try { await resetGatewayUpstreamHealth(u.id); await load() }
+  try { await resetGatewayUpstreamHealth(u.id); await load(1) }
   catch (e) { errorMsg.value = e.response?.data?.detail || '重置失败' }
 }
 
@@ -395,7 +405,7 @@ async function onImport() {
       remark: '从 OpenRouter 免费列表导入',
     })
     showImport.value = false
-    await load()
+    await load(1)
   } catch (e) {
     formError.value = e.response?.data?.detail || '导入失败'
   } finally {
@@ -403,7 +413,7 @@ async function onImport() {
   }
 }
 
-onMounted(load)
+onMounted(() => load())
 </script>
 
 <style scoped>

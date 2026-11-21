@@ -1,8 +1,8 @@
 """个人工具生命周期：版本不可变、确认幂等、真实测试、属主隔离和统一执行。"""
 import asyncio
 import json
+import logging
 import os
-import re
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -13,6 +13,8 @@ from app.core.json_schema import validate
 from app.services import personal_tool_specs as specs, tool_credentials, tool_http, tool_result_cache
 from app.services.tools.base import BaseTool, ToolContext, ToolResult
 from app.services.sandbox import worker_client
+
+logger = logging.getLogger("jianziruyang.personal_tools")
 
 _RUNNING = {}
 
@@ -37,20 +39,39 @@ def _load(conn, owner, tool_id):
     return dict(row)
 
 
+def _blocked_users(row):
+    """按工具的用户黑名单（默认空＝全员可调用）；兼容 dict 与 sqlite Row。"""
+    try:
+        raw = row["blocked_users"]
+    except (KeyError, IndexError):
+        return []
+    try:
+        value = json.loads(raw or "[]")
+    except (ValueError, TypeError):
+        return []
+    return [u for u in value if isinstance(u, str)] if isinstance(value, list) else []
+
+
 def _public(row):
     blockers = _blockers(row)
     if "invalid_stored_spec" in blockers:
         return {**{k: row[k] for k in ("id", "name", "version", "function_name", "created_at", "updated_at")},
                 "status": "rejected", "enabled": False, "approved": False, "blockers": blockers,
-                "spec": {}, "review": {}, "credential_configured": False, "terms_accepted": False, "runtime_profile": {}}
+                "spec": {}, "review": {}, "credential_configured": False, "terms_accepted": False, "runtime_profile": {},
+                "owner_id": row["owner_id"], "blocked_users": _blocked_users(row)}
     return {**{k: row[k] for k in ("id", "name", "status", "enabled", "version", "function_name", "created_at", "updated_at")},
             "blockers": blockers,
+            "owner_id": row["owner_id"],
+            "blocked_users": _blocked_users(row),
             "status": "needs_config" if blockers else row["status"],
             "enabled": bool(row["enabled"] and not blockers),
             "spec": json.loads(row["spec_json"]), "review": json.loads(row["review_json"]),
             "approved": bool(row["approved_by"] and "admin_review_required" not in blockers and "version_changed" not in blockers),
             "credential_configured": bool(row["credential_id"]),
             "terms_accepted": bool(row["terms_accepted"]),
+            "eval_status": row.get("eval_status") or "",
+            "eval_dataset_id": row.get("eval_dataset_id") or "",
+            "eval_run_id": row.get("eval_run_id") or "",
             "runtime_profile": worker_client.runtime_profile() if json.loads(row["spec_json"])["executor"] == "python" else {}}
 
 
@@ -77,7 +98,7 @@ def listing(owner):
 
 def _draft_public(row):
     return {**{k: row[k] for k in ("id", "session_id", "message_id", "tool_id", "status", "error", "content_hash",
-                                  "created_at", "updated_at", "expires_at")},
+                                  "created_at", "updated_at", "expires_at", "parent_skill_draft_id")},
             "spec": json.loads(row["spec_json"]), "review": json.loads(row["review_json"])}
 
 
@@ -150,6 +171,26 @@ def propose(owner, spec, session_id="", message_id="", tool_id="", *, parent_ski
     return draft(owner, identifier)
 
 
+def _unique_function_name(conn, base, tool_id):
+    """功能名全局唯一（内置注册表 + 其他个人工具当前版本）；冲突追加确定数字后缀，不引入随机码。"""
+    from app.services.tools import base as tools_base
+    if not tools_base.all_tools():
+        try:
+            from app.services.tools import bootstrap_registry
+            bootstrap_registry()
+        except Exception:
+            pass
+    used = {t["name"] for t in tools_base.registry_snapshot()}
+    used.update(r["function_name"] for r in conn.execute(
+        "SELECT v.function_name FROM personal_tools t JOIN personal_tool_versions v "
+        "ON v.owner_id=t.owner_id AND v.tool_id=t.id AND v.version=t.current_version WHERE t.id<>?", (tool_id,)))
+    name, suffix = base[:60], 1
+    while name in used:
+        suffix += 1
+        name = f"{base[:56]}_{suffix}"
+    return name
+
+
 def _blockers(row):
     try:
         spec = json.loads(row["spec_json"])
@@ -202,6 +243,7 @@ async def confirm(owner, draft_id, expected_hash, *, accept_terms=False, allow_s
         tool_id, created = row["tool_id"], now()
         spec = current["spec"]
         version = assessment["version"]
+        base = None
         if not tool_id:
             duplicate = conn.execute("SELECT t.id FROM personal_tools t WHERE t.owner_id=? AND t.current_version=?",
                                      (owner, version)).fetchone()
@@ -217,6 +259,7 @@ async def confirm(owner, draft_id, expected_hash, *, accept_terms=False, allow_s
             tool_id = uuid.uuid4().hex
             conn.execute("INSERT INTO personal_tools(id,owner_id,name,current_version,status,terms_accepted,created_at,updated_at) "
                          "VALUES (?,?,?,?,'needs_config',?,?,?)", (tool_id, owner, spec["name"], version, int(accept_terms), created, created))
+            base = specs.derive_function_name(spec)
         else:
             existing = _load(conn, owner, tool_id)
             _not_running(conn, owner, tool_id)
@@ -224,7 +267,13 @@ async def confirm(owner, draft_id, expected_hash, *, accept_terms=False, allow_s
                 raise HTTPException(409, "当前版本仍在测试，不能并发切换版本")
             conn.execute("UPDATE personal_tools SET name=?,current_version=?,status='needs_config',enabled=0,credential_id='',terms_accepted=?,updated_at=? "
                          "WHERE id=? AND owner_id=?", (spec["name"], version, int(accept_terms), created, tool_id, owner))
-        function_name = "pt_" + tool_id + "_" + version[:16]
+            # 功能名跨版本稳定；仅历史随机码名在升级时改为功能名
+            base = existing["function_name"]
+            if specs.LEGACY_FUNCTION_NAME_RE.fullmatch(base):
+                base = specs.derive_function_name(spec)
+        if not base:
+            base = "http_api_reader" if spec["executor"] == "http" else "python_compute"
+        function_name = _unique_function_name(conn, base, tool_id)
         conn.execute("INSERT OR IGNORE INTO personal_tool_versions(tool_id,owner_id,version,function_name,spec_json,review_json,created_at) VALUES (?,?,?,?,?,?,?)",
                      (tool_id, owner, version, function_name, row["spec_json"], specs.canonical(assessment), created))
         conn.execute("UPDATE personal_tool_drafts SET status='installed',tool_id=?,updated_at=? WHERE id=?", (tool_id, created, draft_id))
@@ -241,13 +290,18 @@ def cancel_draft(owner, draft_id):
     return draft(owner, draft_id)
 
 
-def configure(owner, tool_id, *, enabled=None, accept_terms=None, credential=None):
+def configure(owner, tool_id, *, enabled=None, accept_terms=None, credential=None, blocked_users=None):
     require_owner(owner)
     with db.transaction() as conn:
         row = _load(conn, owner, tool_id)
         _not_running(conn, owner, tool_id)
         if row["status"] == "testing":
             raise HTTPException(409, "工具正在测试，暂不能修改配置")
+        if blocked_users is not None:
+            if not isinstance(blocked_users, list) or any(not isinstance(u, str) for u in blocked_users):
+                raise HTTPException(400, "blocked_users 须为用户 ID 字符串列表")
+            cleaned = sorted({u for u in blocked_users if u and u != owner})
+            conn.execute("UPDATE personal_tools SET blocked_users=? WHERE id=?", (json.dumps(cleaned), tool_id))
         if credential is not None:
             if not json.loads(row["spec_json"])["config"].get("auth"):
                 raise HTTPException(400, "此工具未声明凭据，不需要填写密钥")
@@ -327,7 +381,7 @@ async def test(owner, tool_id):
         blockers = _blockers(row)
         conn.execute("INSERT INTO personal_tool_tests(id,owner_id,tool_id,version,status,report_json,created_at) VALUES (?,?,?,?,?,?,?)",
                      (test_id, owner, tool_id, row["version"], "blocked" if blockers else "running", specs.canonical({"blockers": blockers}), now()))
-        conn.execute("UPDATE personal_tools SET status=?,enabled=0,updated_at=? WHERE id=?",
+        conn.execute("UPDATE personal_tools SET status=?,enabled=0,eval_status='',eval_run_id='',updated_at=? WHERE id=?",
                      ("needs_config" if blockers else "testing", now(), tool_id))
     if blockers:
         return get(owner, tool_id)
@@ -362,6 +416,10 @@ async def test(owner, tool_id):
                          (status, specs.canonical(report), now(), test_id))
             conn.execute("UPDATE personal_tools SET status=?,enabled=?,updated_at=? WHERE id=? AND owner_id=? AND current_version=? AND status='testing'",
                          ("ready" if status == "passed" else "needs_config", int(status == "passed"), now(), tool_id, owner, row["version"]))
+    if status == "passed":
+        # 测试通过 → 自动构建工具评测集并后台评测；全部用例通过才进标准化工具注册表
+        from app.services import tool_eval
+        tool_eval.schedule_after_test(owner, tool_id)
     return get(owner, tool_id)
 
 
@@ -374,37 +432,93 @@ def recover():
                      "AND CASE WHEN json_valid(v.spec_json) THEN json_extract(v.spec_json,'$.executor') END IN ('http','connector'))")
         conn.execute("UPDATE personal_tool_tests SET status='interrupted',finished_at=? WHERE status='running'", (now(),))
         conn.execute("UPDATE personal_tools SET status='needs_config',enabled=0 WHERE status='testing'")
+        conn.execute("UPDATE personal_tools SET eval_status='failed' WHERE eval_status='running'")
         conn.execute("UPDATE personal_tool_executions SET execution_status='interrupted',validation_status='failed',requirement_status='unmet',finished_at=? "
                      "WHERE execution_status='running'", (now(),))
 
 
-def resolve(owner, function_name, test_id=""):
-    if not re.fullmatch(r"pt_[a-f0-9]{32}_[a-f0-9]{16}", function_name or ""):
+def resolve(caller, function_name, test_id=""):
+    """执行门禁：默认全员可调用（跨属主），黑名单用户拒绝；属主自测不受黑名单影响。"""
+    if not specs.FUNCTION_NAME_RE.fullmatch(function_name or ""):
         return None
-    require_owner(owner)
+    require_owner(caller)
     with db.transaction() as conn:
-        row = _load(conn, owner, function_name[3:35])
+        found = conn.execute("SELECT t.*,v.version,v.function_name,v.spec_json,v.review_json,v.approved_by,v.approved_at "
+            "FROM personal_tools t JOIN personal_tool_versions v ON v.owner_id=t.owner_id AND v.tool_id=t.id "
+            "AND v.version=t.current_version WHERE v.function_name=?", (function_name,)).fetchone()
+        if not found:
+            return None
+        row = dict(found)
         if function_name != row["function_name"]:
             return None
+        owner = row["owner_id"]
         testing = bool(test_id and conn.execute("SELECT 1 FROM personal_tool_tests WHERE id=? AND owner_id=? AND tool_id=? AND version=? AND status='running'",
                                                 (test_id, owner, row["id"], row["version"])).fetchone())
+        if not testing and caller in _blocked_users(row):
+            return None
         if (not testing and (not row["enabled"] or row["status"] != "ready")) or _blockers(row):
             return None
     return PersonalTool(row, testing)
 
 
-def catalog(owner):
-    if not owner or owner in ("guest", "system", "-") or os.getenv("PERSONAL_TOOLS_ENABLED", "true").lower() != "true":
+def catalog(caller):
+    if not caller or caller in ("guest", "system", "-") or os.getenv("PERSONAL_TOOLS_ENABLED", "true").lower() != "true":
         return []
     result = []
-    for row in db.query("SELECT id FROM personal_tools WHERE owner_id=? AND enabled=1 AND status='ready'", (owner,)):
+    # 注册门禁：评测通过（eval_status='passed'）才进入聊天可调用目录，
+    # 与 standardized_registry 同口径；默认全员可见，黑名单用户除外。
+    for row in db.query("SELECT t.id, t.blocked_users, v.function_name FROM personal_tools t "
+                        "JOIN personal_tool_versions v ON v.owner_id=t.owner_id AND v.tool_id=t.id AND v.version=t.current_version "
+                        "WHERE t.enabled=1 AND t.status='ready' AND t.eval_status='passed'"):
+        if caller in _blocked_users(row):
+            continue
         try:
-            tool = resolve(owner, get(owner, row["id"])["function_name"])
+            tool = resolve(caller, row["function_name"])
             if tool:
                 result.append(tool.to_function_schema())
         except (ValueError, HTTPException, KeyError):
             continue
     return result
+
+
+def standardized_registry():
+    """评测通过（eval_status='passed'）且当前可用的个人工具 → 标准化注册表快照。
+
+    与内置工具 to_spec_dict 同构，附 source/owner/tool_id 供可观测性区分来源；
+    未通过评测或存在配置阻塞的工具一律不进入注册表。
+    """
+    rows = db.query(
+        "SELECT t.*, v.version, v.function_name, v.spec_json, v.review_json, v.approved_by FROM personal_tools t "
+        "JOIN personal_tool_versions v ON v.owner_id=t.owner_id AND v.tool_id=t.id "
+        "AND v.version=t.current_version "
+        "WHERE t.eval_status='passed' AND t.enabled=1 AND t.status='ready' ORDER BY t.created_at")
+    out = []
+    for row in rows:
+        try:
+            spec = json.loads(row["spec_json"])
+            if _blockers(row):
+                continue
+            out.append({
+                "name": row["function_name"],
+                "display_name": spec["name"],
+                "description": spec["name"] + "：" + spec["description"],
+                "namespace": "personal",
+                "tags": ["personal_tool", spec["executor"]],
+                "scenarios": [spec["description"]],
+                "parameters": spec.get("input_schema") or {"type": "object", "properties": {}},
+                "permissions": ["authenticated"],
+                "risk_level": "low",
+                "status": "active",
+                "requires_confirmation": False,
+                "source": "personal_tool",
+                "owner_id": row["owner_id"],
+                "tool_id": row["id"],
+                "eval_status": "passed",
+                "blocked_users": _blocked_users(row),
+            })
+        except (ValueError, TypeError, KeyError):
+            continue
+    return out
 
 
 class PersonalTool(BaseTool):
@@ -419,29 +533,34 @@ class PersonalTool(BaseTool):
         self.parameters = self.spec["input_schema"]
 
     async def run(self, ctx, **arguments):
-        if ctx.user_id != self.row["owner_id"] or not resolve(ctx.user_id, self.name, ctx.tool_test_id):
+        # 默认全员可调用；resolve 内含黑名单／启用／就绪门禁，凭据始终用属主的
+        if not resolve(ctx.user_id, self.name, ctx.tool_test_id):
             return ToolResult(self.name, False, error="permission_denied")
         specs.check_no_credentials(arguments)
         eid = uuid.uuid4().hex
+        owner = self.row["owner_id"]
         with db.transaction() as conn:
-            current = _load(conn, ctx.user_id, self.row["id"])
+            current = _load(conn, owner, self.row["id"])
             testing = bool(ctx.tool_test_id and conn.execute(
                 "SELECT 1 FROM personal_tool_tests WHERE id=? AND owner_id=? AND tool_id=? AND version=? AND status='running'",
-                (ctx.tool_test_id, ctx.user_id, current["id"], current["version"])).fetchone())
+                (ctx.tool_test_id, owner, current["id"], current["version"])).fetchone())
+            if not testing and ctx.user_id in _blocked_users(current):
+                return ToolResult(self.name, False, error="permission_denied")
             if (current["version"] != self.row["version"] or _blockers(current)
                     or (not testing and (current["status"] != "ready" or not current["enabled"]))):
                 return ToolResult(self.name, False, error="tool_configuration_changed")
             if self.spec["executor"] == "python":
-                _not_running(conn, ctx.user_id, current["id"])
+                _not_running(conn, owner, current["id"])
             self.row = current
-            conn.execute("INSERT INTO personal_tool_executions(id,owner_id,tool_id,version,session_id,message_id,test_id,args_hash,execution_status,validation_status,requirement_status,created_at) "
-                "VALUES (?,?,?,?,?,?,?,?,'running','unverified','unverified',?)", (eid, ctx.user_id, self.row["id"], self.row["version"],
-                ctx.session_id, ctx.message_id, ctx.tool_test_id, specs.fingerprint(arguments), now()))
+            conn.execute("INSERT INTO personal_tool_executions(id,owner_id,tool_id,version,session_id,message_id,test_id,args_hash,execution_status,validation_status,requirement_status,created_at,caller_id) "
+                "VALUES (?,?,?,?,?,?,?,?,'running','unverified','unverified',?,?)", (eid, owner, self.row["id"], self.row["version"],
+                ctx.session_id, ctx.message_id, ctx.tool_test_id, specs.fingerprint(arguments), now(), ctx.user_id))
         _RUNNING[eid] = asyncio.current_task()
         state, error, payload = "failed", "execution_failed", {}
+        error_detail = ""
         result_origin = "unknown"
         try:
-            secret = tool_credentials.load(ctx.user_id, self.row["id"], self.row["version"], self.row["credential_id"]) if self.spec["config"].get("auth") else ""
+            secret = tool_credentials.load(owner, self.row["id"], self.row["version"], self.row["credential_id"]) if self.spec["config"].get("auth") else ""
             payload = None if ctx.force_refresh or self.testing else tool_result_cache.get(self.row, self.spec, arguments)
             result_origin = "live" if payload is None else "cache"
             if payload is None:
@@ -465,15 +584,19 @@ class PersonalTool(BaseTool):
             error = exc.code
             if error == "sandbox_cleanup_unconfirmed":
                 state = "cleanup_failed"
-        except Exception:
+        except Exception as exc:
             error = "validation_or_execution_failed"
+            # 保留根因：错误码供前端分类，异常详情进日志与结果 extra，不再吞掉真实原因
+            logger.warning("个人工具执行异常 tool=%s eid=%s: %s", self.name, eid, exc, exc_info=True)
+            error_detail = f"{type(exc).__name__}: {exc}"[:300]
         finally:
             _RUNNING.pop(eid, None)
             db.execute("UPDATE personal_tool_executions SET execution_status=?,validation_status=?,requirement_status=?,error_code=?,finished_at=?,result_origin=? WHERE id=?",
                        (state, (payload or {}).get("validation_status", "failed"), (payload or {}).get("requirement_status", "unmet"), error,
                         "" if state in ("cancellation_requested", "cleanup_failed") else now(), result_origin, eid))
         return ToolResult(self.name, False, summary="个人工具执行未完成或结果验证失败", error=error,
-                          extra={"execution_status": state, "validation_status": "failed", "requirement_status": "unmet"})
+                          extra={"execution_status": state, "validation_status": "failed", "requirement_status": "unmet",
+                                 **({"error_detail": error_detail} if error == "validation_or_execution_failed" else {})})
 
 
 def executions(owner, tool_id):
@@ -481,26 +604,29 @@ def executions(owner, tool_id):
     return db.query("SELECT * FROM personal_tool_executions WHERE owner_id=? AND tool_id=? ORDER BY created_at DESC LIMIT 50", (owner, tool_id))
 
 
-async def reconcile_execution(owner, execution_id):
+async def reconcile_execution(user_id, execution_id):
+    # 属主或实际调用者均可核验终止；沙箱取消以属主身份发起
     row = db.query_one("SELECT e.*,v.spec_json FROM personal_tool_executions e JOIN personal_tool_versions v "
-                       "ON e.owner_id=v.owner_id AND e.tool_id=v.tool_id AND e.version=v.version WHERE e.owner_id=? AND e.id=?",
-                       (owner, execution_id))
+                       "ON e.owner_id=v.owner_id AND e.tool_id=v.tool_id AND e.version=v.version "
+                       "WHERE e.id=? AND (e.owner_id=? OR e.caller_id=?)",
+                       (execution_id, user_id, user_id))
     if not row or execution_id in _RUNNING or row["execution_status"] not in ("running", "cancellation_requested", "cleanup_failed"):
         return
     if json.loads(row["spec_json"])["executor"] == "python":
         try:
-            confirmed = await worker_client.cancel(owner, execution_id)
+            confirmed = await worker_client.cancel(row["owner_id"], execution_id)
         except Exception:
             return
         if confirmed:
-            db.execute("UPDATE personal_tool_executions SET execution_status='interrupted',validation_status='failed',requirement_status='unmet',finished_at=? WHERE id=? AND owner_id=?",
-                       (now(), execution_id, owner))
+            db.execute("UPDATE personal_tool_executions SET execution_status='interrupted',validation_status='failed',requirement_status='unmet',finished_at=? WHERE id=?",
+                       (now(), execution_id))
             return {"status": "interrupted"}
 
 
-def cancel_execution(owner, execution_id):
-    require_owner(owner)
-    row = db.query_one("SELECT execution_status FROM personal_tool_executions WHERE id=? AND owner_id=?", (execution_id, owner))
+def cancel_execution(user_id, execution_id):
+    require_owner(user_id)
+    row = db.query_one("SELECT execution_status FROM personal_tool_executions WHERE id=? AND (owner_id=? OR caller_id=?)",
+                       (execution_id, user_id, user_id))
     if not row:
         raise HTTPException(404, "执行记录不存在或无权访问")
     task = _RUNNING.get(execution_id)

@@ -86,6 +86,55 @@ def match_best(query_vec: List[float], entries: List[dict], threshold: float) ->
     return out
 
 
+# 高置信直放带：≥ 该值跳过 LLM 二次验证（实测 0.97+ 的同义改述曾被验证模型误拒，
+# 且每次验证额外消耗 2-4s）；[阈值, 高置信) 区间仍走等价性验证防误命中。
+HIGH_CONFIDENCE = 0.95
+
+
+def key_score(entry: dict, raw_vec: List[float], rw_vec: List[float]) -> float:
+    """双键最大相似度：原始问↔原始问、归一化↔归一化、归一化↔原始问交叉。"""
+    scores = []
+    emb = entry.get("embedding") or []
+    remb = entry.get("query_embedding") or []
+    if raw_vec and emb:
+        scores.append(_cosine(raw_vec, emb))
+    if rw_vec:
+        if remb:
+            scores.append(_cosine(rw_vec, remb))
+        if emb:
+            scores.append(_cosine(rw_vec, emb))
+    if raw_vec and remb:
+        scores.append(_cosine(raw_vec, remb))
+    return max(scores) if scores else 0.0
+
+
+def match_multi(entries: List[dict], raw_vec: List[float], rw_vec: List[float]) -> tuple:
+    """双键匹配：返回 (最佳条目带 score, 全局最高分)；无候选时 (None, 0.0)。"""
+    best, best_score = None, 0.0
+    for e in entries:
+        s = key_score(e, raw_vec, rw_vec)
+        if s > best_score:
+            best, best_score = e, s
+    if best is None:
+        return None, 0.0
+    return dict(best, score=round(best_score, 4)), best_score
+
+
+async def _confirm(hit: dict, question: str, user_id: str) -> bool:
+    """分层决策：高置信直放；中间带 LLM 等价性验证（验证不可用时高相似兜底）。"""
+    if hit.get("score", 0.0) >= HIGH_CONFIDENCE:
+        return True
+    return await cache_policy.equivalent(question, hit["question"], user_id, score=hit.get("score"))
+
+
+def _entry_valid(e: dict, user_id: str, cur_revs: dict) -> bool:
+    """条目有效性：新条目按文档级依赖精确失效；旧条目回退全局版本相等。"""
+    if e.get("deps"):
+        return (e["revisions"].get("permissions") == cur_revs.get("permissions")
+                and cache_policy.deps_valid(e["deps"], e["sources"], user_id))
+    return e["revisions"] == cur_revs
+
+
 # ---------------------------------------------------------------------------
 # 标签与阶梯 TTL
 # ---------------------------------------------------------------------------
@@ -161,12 +210,24 @@ def _parse_row(row: dict) -> dict:
         revs = json.loads(row.get("revisions") or "{}")
     except Exception:
         revs = {}
+    try:
+        qemb = json.loads(row.get("query_embedding") or "[]")
+    except Exception:
+        qemb = []
+    try:
+        deps = json.loads(row.get("deps") or "{}")
+    except Exception:
+        deps = {}
     return {
         "id": row.get("id"),
         "question": row.get("question"),
         "answer": row.get("answer"),
         "sources": srcs,
         "embedding": emb,
+        "search_query": row.get("search_query") or "",
+        "query_embedding": qemb,
+        "skills_hash": row.get("skills_hash") or "",
+        "deps": deps,
         "hit_count": row.get("hit_count", 0),
         "scope": row.get("scope") or "personal",
         "is_realtime": bool(row.get("is_realtime")),
@@ -204,21 +265,28 @@ async def lookup(user_id: str, question: str, threshold: Optional[float] = None,
         return None
     rows = db.query("SELECT * FROM semantic_cache_v2 WHERE user_id=? AND fingerprint=?",
                     (user_id, fingerprint))
-    # 整改：条目有效性改由「知识库版本 revisions 相等 + 自身证据完整性」保证，
-    # 不再要求与本轮检索证据快照严格相等（检索排序差异不应使缓存失效）。
+    try:
+        cur_revs = cache_policy.revisions()
+    except Exception:
+        return None
+    # 条目有效性 = 未过期 + 文档级依赖未变（旧条目回退全局版本相等）+ 自身证据完整。
     entries = [e for e in (_parse_row(r) for r in rows)
-               if not e["expired"] and e["revisions"] == contract["revisions"]
+               if not e["expired"] and _entry_valid(e, user_id, cur_revs)
                and cache_policy.digest(e["sources"]) == e["evidence_hash"]]
     if rows and not entries:
         record_event(user_id=user_id, hit=False, outcome="invalidated", reason="expired")
     hit = next((dict(e, score=1.0) for e in entries
                 if normalize_question(e["question"]) == normalize_question(question)), None)
+    rw = (contract.get("search_query") or "").strip()
+    if not hit and rw:
+        hit = next((dict(e, score=1.0) for e in entries
+                    if e["search_query"] and normalize_question(e["search_query"]) == normalize_question(rw)), None)
     if not hit and contract["decision"]["kind"] == "knowledge_semantic" and entries:
-        vec = await _embed(question)
+        raw_vec, rw_vec = await _embed_pair(question, rw)
+        cand, _best = match_multi(entries, raw_vec, rw_vec)
         thr = float(threshold) if threshold is not None else effective_threshold()
-        hit = match_best(vec, entries, thr)
-        if hit and not await cache_policy.equivalent(question, hit["question"], user_id):
-            hit = None
+        if cand and cand["score"] >= thr and await _confirm(cand, question, user_id):
+            hit = cand
     if not hit or not _eligible(user_id, contract, fingerprint):
         return None
     now = datetime.now(timezone.utc).isoformat()
@@ -232,14 +300,26 @@ async def lookup(user_id: str, question: str, threshold: Optional[float] = None,
     return hit
 
 
-async def probe(user_id: str, question: str, *, profile_hash: str = "") -> Optional[dict]:
-    """检索前探针（整改2 核心）：在检索/生成之前查个人域知识语义缓存。
+async def _embed_pair(question: str, rewrite: str) -> tuple:
+    """原始问与归一化改写并行 embedding；改写与原文相同或为空时复用/置空。"""
+    q = (question or "").strip()
+    rw = (rewrite or "").strip()
+    if not rw or rw == q:
+        vec = await _embed(q)
+        return vec, (vec if rw == q and rw else [])
+    raw_vec, rw_vec = await asyncio.gather(_embed(q), _embed(rw))
+    return raw_vec, rw_vec
 
-    命中则业务层直接复用缓存答案，跳过检索与上游 LLM，避免高相似重复提问
-    重复消耗检索/生成资源。不依赖合同指纹（跨轮历史/证据差异不影响命中）；
-    安全门禁：开关/合法用户/最小长度/个人化与指代信号/实时类一律旁路；
-    条目有效性 = 未过期 + revisions 与当前知识库版本相等 + 自身证据完整
-    + 常驻画像摘要一致（画像变更后旧条目不再命中）。
+
+async def probe(user_id: str, question: str, *, profile_hash: str = "",
+                skills_hash: str = "", search_query: str = "") -> Optional[dict]:
+    """意图改写后、检索前探针：命中直接复用缓存答案，跳过检索与上游 LLM。
+
+    双键匹配（原始问 + 归一化改写）取最大相似度；分层决策：≥0.95 直放，
+    [阈值, 0.95) 走 LLM 等价性验证。安全门禁：开关/合法用户/最小长度/
+    个人化与指代信号/实时类一律旁路；Skills 与画像属用户稳定上下文，
+    分别由 skills_hash/profile_hash 保证变更后旧条目不再命中。
+    条目有效性 = 未过期 + 文档级依赖未变 + 自身证据完整。
     """
     if not semantic_cache_enabled() or not _valid_user(user_id):
         return None
@@ -247,8 +327,10 @@ async def probe(user_id: str, question: str, *, profile_hash: str = "") -> Optio
     if len(q) < settings.SEMANTIC_CACHE_MIN_QUESTION_CHARS:
         return None
     if cache_policy._PERSONAL.search(q) or cache_policy._REFERENCE.search(q):
+        record_event(user_id=user_id, hit=False, outcome="bypass", reason="personalized_query", question=q)
         return None
     if cache_policy.detect_realtime(q):
+        record_event(user_id=user_id, hit=False, outcome="bypass", reason="dynamic_query", question=q)
         return None
     try:
         revs = cache_policy.revisions()
@@ -257,22 +339,36 @@ async def probe(user_id: str, question: str, *, profile_hash: str = "") -> Optio
     rows = db.query("SELECT * FROM semantic_cache_v2 WHERE user_id=? AND cache_kind='knowledge_semantic'",
                     (user_id,))
     entries = [e for e in (_parse_row(r) for r in rows)
-               if not e["expired"] and e["revisions"] == revs
+               if not e["expired"] and _entry_valid(e, user_id, revs)
                and cache_policy.digest(e["sources"]) == e["evidence_hash"]
-               and e.get("profile_hash", "") == profile_hash]
+               and e.get("profile_hash", "") == profile_hash
+               and e.get("skills_hash", "") == skills_hash]
     if not entries:
+        record_event(user_id=user_id, hit=False, outcome="miss", reason="no_valid_entries", question=q)
         return None
+    rw = (search_query or "").strip()
     hit = next((dict(e, score=1.0) for e in entries
                 if normalize_question(e["question"]) == normalize_question(q)), None)
+    if not hit and rw:
+        hit = next((dict(e, score=1.0) for e in entries
+                    if e["search_query"] and normalize_question(e["search_query"]) == normalize_question(rw)), None)
     if not hit:
-        vec = await _embed(q)
-        if not vec:
+        raw_vec, rw_vec = await _embed_pair(q, rw)
+        if not raw_vec and not rw_vec:
             return None
-        hit = match_best(vec, entries, effective_threshold())
-        if hit and not await cache_policy.equivalent(q, hit["question"], user_id, score=hit.get("score")):
-            hit = None
-    if not hit:
-        return None
+        cand, best_score = match_multi(entries, raw_vec, rw_vec)
+        thr = effective_threshold()
+        if not cand or cand["score"] < thr:
+            record_event(user_id=user_id, hit=False, outcome="miss", reason="below_threshold",
+                         score=round(best_score, 4), question=q)
+            logger.info("[网关语义缓存] 探针未命中: user=%s best=%.4f thr=%.2f q=%s",
+                        user_id, best_score, thr, q[:60])
+            return None
+        if not await _confirm(cand, q, user_id):
+            record_event(user_id=user_id, hit=False, outcome="miss", reason="not_equivalent",
+                         score=cand["score"], question=q)
+            return None
+        hit = cand
     now = datetime.now(timezone.utc).isoformat()
     n = db.execute("UPDATE semantic_cache_v2 SET hit_count=hit_count+1,last_used_at=? "
                    "WHERE id=? AND user_id=? AND expires_at>?", (now, hit["id"], user_id, now))
@@ -303,27 +399,38 @@ async def store(user_id: str, question: str, answer: str, sources: Optional[List
     if any(n < 1 or n > len(contract["sources"]) for n in references):
         return False
     try:
-        vec = await _embed(q) if contract["decision"]["kind"] == "knowledge_semantic" else []
-        if contract["decision"]["kind"] == "knowledge_semantic" and not vec:
-            return False
+        kind = contract["decision"]["kind"]
+        rw = (contract.get("search_query") or "").strip()
+        if kind == "knowledge_semantic":
+            raw_vec, rw_vec = await _embed_pair(q, rw)
+            if not raw_vec:
+                return False
+        else:
+            raw_vec, rw_vec = [], []
         if not _eligible(user_id, contract, fingerprint):
             return False
+        deps = cache_policy.source_deps(contract["sources"]) if kind == "knowledge_semantic" else {}
         now = datetime.now(timezone.utc)
         ttl = min(compute_ttl_seconds(False, 0), int(contract["decision"]["ttl_seconds"]))
         if ttl <= 0:
             return False
         db.execute(
             "INSERT INTO semantic_cache_v2 (id,user_id,question,question_norm,answer,sources,embedding,"
-            "cache_kind,fingerprint,evidence_hash,revisions,model,upstream_id,profile_hash,expires_at,created_at,last_used_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+            "cache_kind,fingerprint,evidence_hash,revisions,model,upstream_id,profile_hash,expires_at,created_at,last_used_at,"
+            "search_query,query_embedding,skills_hash,deps) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
             "ON CONFLICT(user_id,fingerprint,question_norm) DO UPDATE SET "
             "answer=excluded.answer,sources=excluded.sources,embedding=excluded.embedding,"
+            "search_query=excluded.search_query,query_embedding=excluded.query_embedding,"
+            "skills_hash=excluded.skills_hash,deps=excluded.deps,"
             "expires_at=excluded.expires_at,created_at=excluded.created_at,last_used_at=excluded.last_used_at",
             (str(uuid.uuid4()), user_id, q, normalize_question(q), a,
-             cache_policy.canonical(contract["sources"]), json.dumps(vec), contract["decision"]["kind"],
+             cache_policy.canonical(contract["sources"]), json.dumps(raw_vec), kind,
              fingerprint, contract["evidence_hash"], cache_policy.canonical(contract["revisions"]),
              contract["model"], upstream_id, contract.get("profile_hash", ""),
-             (now + timedelta(seconds=ttl)).isoformat(), now.isoformat(), now.isoformat()),
+             (now + timedelta(seconds=ttl)).isoformat(), now.isoformat(), now.isoformat(),
+             rw if kind == "knowledge_semantic" else "", json.dumps(rw_vec),
+             contract.get("skills_hash", ""), json.dumps(deps, ensure_ascii=False)),
         )
         _trim(user_id)
         return True

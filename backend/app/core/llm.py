@@ -442,9 +442,10 @@ class LLMFactory:
           （不选模型时在指定路由规则内均衡访问，而非固定首个）；
         - 未绑定业务路由的角色（记忆抽取/会话摘要等后台任务）自动回退全局默认规则
           并按上述顺序解析模型，避免「默认模型不在任何上游清单」导致选路 503；
-        - 出网凭据用系统内部密钥（keys.ensure_internal_key 自动创建，无限配额）；
-        - 通过 extra_body 注入 _gw_role/_gw_rule_id/_gw_user_id，供代理选路时
-          识别业务角色与授权用户（出网前被剥离）；
+        - 出网凭据按用户解析（绑定用户密钥 > 公共密钥 > 内部密钥兜底）；
+          显式 user_id 缺省时沿用请求级 CallContext，后台任务不丢失触发用户归属；
+        - 通过 extra_body 注入 _gw_role/_gw_rule_id 与签名调用上下文
+          （_gw_user_id/_gw_ctx/_gw_sig），供代理选路与归属识别（出网前被剥离）；
         - 网关未初始化（无任何启用上游/规则）时降级旧直连（assistant 走助手 LLM），
           保证新部署未配置网关时仍可用。
         """
@@ -457,6 +458,10 @@ class LLMFactory:
         from app.services.gateway import keys as key_svc
         from app.services.gateway import rules as rule_svc
         from app.services.gateway import settings as settings_svc
+        from app.core import call_context
+        # 归属用户：显式传入优先，缺省沿用请求级上下文（intent/OCR/memory/wiki
+        # 等未显式传 user_id 的调用点自动继承发起用户，不再计入系统内部）
+        resolved_user = str(user_id).strip() if user_id else call_context.current_user_id()
         explicit_model = (model or "").strip()
         model_name = explicit_model
         resolved_rule = (rule_id or "").strip()
@@ -504,7 +509,7 @@ class LLMFactory:
 
             def compatible(candidate_model):
                 chosen_rule, candidates = rule_svc.select_upstreams(
-                    candidate_model, role=role, rule_id=resolved_rule or None, user_id=user_id)
+                    candidate_model, role=role, rule_id=resolved_rule or None, user_id=resolved_user or None)
                 return (bool(chosen_rule) and (not resolved_rule or chosen_rule["id"] == resolved_rule)
                         and any(has_tools(up, candidate_model) for up in candidates))
 
@@ -527,14 +532,24 @@ class LLMFactory:
         extra = {"_gw_role": role}
         if resolved_rule:
             extra["_gw_rule_id"] = resolved_rule
-        if user_id:
-            extra["_gw_user_id"] = str(user_id)
-        # 出网密钥按用户解析：该用户绑定的用户密钥 > 公共密钥 > 系统内部密钥（兜底）。
-        # 用户密钥配额用尽时 resolve_outbound_key 自动降级公共密钥；代理侧另有每用户
-        # 日限额/流控兜底（公共额度用尽→429 提示联系管理员）。
+        # 签名调用上下文：代理验签通过才信任用户/trace 归属（防伪造 _gw_user_id）
         try:
-            outbound_key, key_type = key_svc.resolve_outbound_key(str(user_id) if user_id else "")
+            from app.core import gw_context
+            extra.update(gw_context.signed_extra(resolved_user, role, resolved_rule))
         except Exception as e:
+            logger.warning("[业务路由] 调用上下文签名失败（降级无签名提示）: role=%s err=%s", role, e)
+            if resolved_user:
+                extra["_gw_user_id"] = resolved_user
+        # 出网密钥按用户解析：绑定用户密钥 > 公共密钥 > 系统内部密钥（兜底）。
+        # 绑定即强制不降级：总配额用尽由代理鉴权层抛 KeyRejected(quota_exceeded)
+        # 明确报错；真实用户凭据解析失败不静默回退内部密钥（避免归属丢失）。
+        try:
+            outbound_key, key_type = key_svc.resolve_outbound_key(resolved_user)
+        except Exception as e:
+            if resolved_user:
+                logger.error("[业务路由] 用户出网密钥解析失败（不静默回退）: role=%s user=%s err=%s",
+                             role, resolved_user, e)
+                raise
             logger.warning("[业务路由] 出网密钥解析失败，回退内部密钥: role=%s err=%s", role, e)
             outbound_key, key_type = key_svc.ensure_internal_key(), "internal"
         logger.info("[业务路由] role=%s 出网密钥类型=%s", role, key_type)

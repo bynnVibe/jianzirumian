@@ -134,9 +134,9 @@ def _stub_pipeline(monkeypatch, ocr_text, rewrite_result="改写后检索式"):
         AsyncMock(return_value=(f"【聊天框附件处理结果】\n{ocr_text}", [_rec(text=ocr_text)])),
     )
 
-    async def fake_rewrite(q, provider=None):
+    async def fake_rewrite(q, provider=None, **kwargs):
         seen["rewrite_input"] = q
-        # chat.py 意图识别改用 analyze_intent（返回 {query, scope}）
+        # chat.py 意图识别改用 analyze_intent（返回 {query, scope}；新增 user_id 关键字透传）
         return {"query": rewrite_result, "scope": "personal"}
 
     def fake_retrieve(q, user_id):

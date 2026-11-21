@@ -103,10 +103,15 @@ def _score_via_gateway(query: str, texts: List[str]) -> Optional[List[float]]:
         if not candidates:
             return None
         url = f"{settings.GATEWAY_INTERNAL_URL}/reranks"
-        headers = {"Authorization": f"Bearer {key_svc.ensure_internal_key()}",
+        # 凭据按请求级归属用户解析（不冻结内部密钥）；签名上下文随请求新鲜签发
+        from app.core import call_context, gw_context
+        uid = call_context.current_user_id()
+        plain, _key_type = key_svc.resolve_outbound_key(uid)
+        headers = {"Authorization": f"Bearer {plain}",
                    "Content-Type": "application/json"}
         payload = {"model": model, "query": query, "documents": texts,
                    "top_n": len(texts), "_gw_role": "rerank"}
+        payload.update(gw_context.signed_extra(uid, "rerank"))
         resp = _get_http_client().post(url, json=payload, headers=headers)
         if resp.status_code != 200:
             logger.warning("[业务路由] rerank 网关返回 HTTP %s，回退直连: %s",

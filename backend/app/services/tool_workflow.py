@@ -13,22 +13,23 @@ from app.services.url_fetch import SafeFetcher
 
 async def build_draft(owner, session_id, message_id, description, *, parent_skill_draft_id="", skill_requirement=""):
     intent = await _model_json(owner,
-        '分析需要添加的工具，返回 JSON {"kind":"weather|elevation|news_search|http|python|unsupported",'
+        '分析需要添加的工具，返回 JSON {"kind":"weather|weather_forecast|geocode|elevation|news_search|http|python|unsupported",'
         '"read_only":true或false,"matches":true或false,"query":"资料检索词"}。'
         '首版只允许读取资料和无网络隔离计算；邮件发送、支付、删除、提交外部内容等为 unsupported。'
-        'weather 仅按用户已知坐标和时区读取当前天气，elevation 仅按坐标读取海拔，news_search 为新闻资料搜索，'
+        'weather 仅按用户已知坐标和时区读取当前天气，weather_forecast 按坐标读取未来数日天气预报，'
+        'geocode 按城市名解析候选坐标与时区，elevation 仅按坐标读取海拔，news_search 为新闻资料搜索，'
         '不得把不满足用户核心功能的内置连接器当成匹配。无法明确只读则 read_only=false。',
         {"request": description})
     if intent.get("read_only") is not True or intent.get("kind") == "unsupported":
         raise ValueError("首版仅开放只读 API 与隔离计算，不能添加发送、支付、删除等外部副作用工具")
     kind = intent.get("kind")
-    if kind not in ("weather", "elevation", "news_search", "http", "python"):
+    if kind not in ("weather", "weather_forecast", "geocode", "elevation", "news_search", "http", "python"):
         raise ValueError("无法确定可支持的只读工具类型，请补充输入与期望输出")
-    if kind in ("weather", "elevation", "news_search") and intent.get("matches") is not True:
+    if kind in ("weather", "weather_forecast", "geocode", "elevation", "news_search") and intent.get("matches") is not True:
         raise ValueError("现有连接器不满足该需求，请提供目标 API 文档；不会用近似功能冒充完成")
     materials, failures = [], []
     target = extract_url(description)
-    if kind in ("weather", "elevation", "news_search") and intent.get("matches") is True:
+    if kind in ("weather", "weather_forecast", "geocode", "elevation", "news_search") and intent.get("matches") is True:
         spec = specs.connector_spec(kind)
         urls = ([target] if target else []) + spec["sources"]
         if kind == "news_search":
@@ -57,12 +58,14 @@ async def build_draft(owner, session_id, message_id, description, *, parent_skil
         if kind == "http" and not materials:
             raise ValueError("未取得可核验的 API 文档，不能捏造接口；请提供公开官方文档链接")
         sample = specs.connector_spec("elevation")
-        sample.update(executor="python", config={"code": "def main(data):\n    return {'value': data['n'] * 2}"},
+        sample.update(executor="python", function_name="double_number",
+            config={"code": "def main(data):\n    return {'value': data['n'] * 2}"},
             input_schema=specs.object_schema({"n": {"type": "number"}}),
             output_schema=specs.object_schema({"value": {"type": "number"}}),
             tests=[{"input": {"n": 2}, "assertions": [{"path": "/value", "op": "equals", "value": 4}]}], sources=[])
         response = await _model_json(owner,
             '只生成个人工具声明 JSON {"spec":{...}}，不得声称已执行或可用。遵循样例字段结构。'
+            'function_name 必填：以功能命名的小写英文 snake_case 标识（如 get_stock_price、compute_bmi），不得用随机码或照抄样例。'
             'executor 为 http 或 python。http 的 config 仅含固定 https url、GET/只读查询 POST method、'
             'query/body 字段映射（每项 {"input":"输入字段"} 或 {"literal":"固定值"}）、'
             'output_map（字段到 JSON Pointer）、read_only_evidence；可选 auth {"kind":"bearer|header|query","name":"字段"}。'
@@ -82,8 +85,10 @@ async def build_draft(owner, session_id, message_id, description, *, parent_skil
     spec["provenance"] = [{k: m[k] for k in ("url", "content_hash", "fetched_at")} for m in materials]
     if failures:
         spec["limitations"] += "；发现提示：" + "；".join(failures)
-    if kind in ("weather", "elevation"):
-        spec["limitations"] += "；调用需要用户明确的经纬度（天气还需时区），不会猜测城市坐标。"
+    if kind in ("weather", "weather_forecast", "elevation"):
+        spec["limitations"] += "；调用需要用户明确的经纬度（天气类还需时区），不会猜测城市坐标。"
+    if kind == "geocode":
+        spec["limitations"] += "；同名地点返回多候选，需用户确认后才作为天气查询实体。"
     if asyncio.current_task().cancelling():
         raise asyncio.CancelledError()
     return personal_tools.propose(owner, spec, session_id, message_id,

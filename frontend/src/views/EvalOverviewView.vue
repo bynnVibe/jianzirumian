@@ -12,9 +12,12 @@
             <button class="domain-tab" :class="{ active: domain === 'agent' }" role="tab" :aria-selected="domain === 'agent'" @click="switchDomain('agent')">
               Agent 评测
             </button>
+            <button class="domain-tab" :class="{ active: domain === 'tool' }" role="tab" :aria-selected="domain === 'tool'" @click="switchDomain('tool')">
+              工具评测
+            </button>
           </nav>
         </div>
-        <div v-if="domain === 'rag'" class="toolbar">
+        <div v-if="domain !== 'agent'" class="toolbar">
           <input
             v-if="tab !== 'online' && tab !== 'badcases'"
             v-model.trim="keyword"
@@ -28,10 +31,10 @@
             </svg>
             刷新
           </button>
-          <button v-if="tab === 'datasets'" class="tool-btn" @click="openCandidates(null)">候选审核</button>
-          <button v-if="tab === 'datasets'" class="btn-primary-btn" @click="openCreateDataset">＋ 新建评测集</button>
-          <button v-else-if="tab === 'evaluators'" class="btn-primary-btn" @click="openCreateEvaluator">＋ 新建评估器</button>
-          <button v-else-if="tab === 'experiments'" class="btn-primary-btn" @click="openCreateRun">＋ 新建实验</button>
+          <button v-if="domain === 'rag' && tab === 'datasets'" class="tool-btn" @click="openCandidates(null)">候选审核</button>
+          <button v-if="domain === 'rag' && tab === 'datasets'" class="btn-primary-btn" @click="openCreateDataset">＋ 新建评测集</button>
+          <button v-else-if="domain === 'rag' && tab === 'evaluators'" class="btn-primary-btn" @click="openCreateEvaluator">＋ 新建评估器</button>
+          <button v-else-if="domain === 'rag' && tab === 'experiments'" class="btn-primary-btn" @click="openCreateRun">＋ 新建实验</button>
         </div>
       </div>
       <div class="subtab-row">
@@ -57,7 +60,7 @@
       <template v-if="tab === 'datasets'">
         <div v-if="loadingDatasets" class="mini-loading">加载中…</div>
         <div v-else-if="!filteredDatasets.length" class="empty-block">
-          <p>{{ datasets.length ? '没有匹配「' + keyword + '」的评测集' : '还没有评测集，创建第一个开始问答回归' }}</p>
+          <p>{{ ragDatasets.length ? '没有匹配「' + keyword + '」的评测集' : '还没有评测集，创建第一个开始问答回归' }}</p>
           <button class="outline-btn" @click="openCreateDataset">创建评测集</button>
         </div>
         <div v-else class="card-grid">
@@ -325,6 +328,42 @@
       </template>
       </template>
 
+      <!-- ============ 工具评测域（@tool 样例测试通过后自动派生评测集 → 评测通过进入标准化工具注册表） ============ -->
+      <template v-else-if="domain === 'tool'">
+        <div v-if="loadingDatasets" class="mini-loading">加载中…</div>
+        <div v-else-if="!filteredDatasets.length" class="empty-block">
+          <p>{{ datasets.some((d) => d.kind === 'tool') ? '没有匹配「' + keyword + '」的工具评测集' : '还没有工具评测集。管理员在聊天中 @tool 添加工具并通过只读样例测试后，会自动派生评测集并发起评测。' }}</p>
+        </div>
+        <div v-else class="card-grid">
+          <div v-for="d in filteredDatasets" :key="d.id" class="entry-card" :class="{ focused: d.id === focusedId }" @click="goDataset(d.id)">
+            <div class="entry-card-head">
+              <span class="entry-icon ds tool-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
+                  <path d="M14.7 6.3a4.5 4.5 0 0 0-6 6L3 18l3 3 5.7-5.7a4.5 4.5 0 0 0 6-6L14 13l-3-3 3.7-3.7Z" />
+                </svg>
+              </span>
+              <span class="entry-name">{{ d.name }}</span>
+            </div>
+            <p class="entry-desc">{{ d.description || '由工具版本声明自动派生的评测集' }}</p>
+            <div class="entry-tags">
+              <span class="tag-chip">{{ d.case_count }} 用例</span>
+              <span class="tag-chip" :class="runChipCls(d.last_run)">{{ runStatusText(d.last_run) }}</span>
+              <span v-if="d.last_run && d.last_run.summary && d.last_run.summary.pass_rate != null" class="tag-chip" :class="d.last_run.summary.pass_rate >= 1 ? 'ok' : 'bad'">通过率 {{ pct(d.last_run.summary.pass_rate) }}</span>
+            </div>
+            <div class="entry-foot">
+              <button class="run-btn" :disabled="startingRun || (d.last_run && d.last_run.status === 'running')" @click.stop="runToolEval(d)">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13">
+                  <polygon points="5 3 19 12 5 21 5 3" />
+                </svg>
+                {{ d.last_run && d.last_run.status === 'running' ? '评测中…' : '重新评测' }}
+              </button>
+              <button class="outline-btn sm" @click.stop="goDataset(d.id)">查看用例与结果</button>
+            </div>
+          </div>
+        </div>
+        <p class="empty-hint">工具评测集由工具版本声明自动派生，不支持手动增删用例；全部用例通过后工具进入「工具注册表」（工具治理中心 /tools 查看）。</p>
+      </template>
+
       <!-- ============ Agent 评测域 ============ -->
       <template v-else>
         <AgentEvalPanel v-if="tab === 'trajectory'" />
@@ -414,7 +453,7 @@
       <div class="modal-box">
         <h3 class="modal-title">{{ editingEvaluatorId ? '编辑评估器' : '新建评估器' }}</h3>
         <p v-if="!editingEvaluatorId" class="modal-sub">选择一个已有评测集作为数据源构建评测工作流；创建后可在页内一键运行并查看结果。</p>
-        <p v-if="!editingEvaluatorId && !datasets.length" class="modal-sub warn">还没有评测集，请先在「评测集」页签创建评测集并添加用例。</p>
+        <p v-if="!editingEvaluatorId && !ragDatasets.length" class="modal-sub warn">还没有评测集，请先在「评测集」页签创建评测集并添加用例。</p>
         <label class="field">
           <span class="field-label">评估器名称 <em>*</em></span>
           <input class="input" v-model.trim="evaluatorForm.name" placeholder="如：问答主链路回归工作流" />
@@ -423,7 +462,7 @@
           <span class="field-label">绑定评测集 <em>*</em></span>
           <select class="input" v-model="evaluatorForm.dataset_id" :disabled="!!editingEvaluatorId">
             <option value="" disabled>选择评测集</option>
-            <option v-for="d in datasets" :key="d.id" :value="d.id">{{ d.name }}（{{ d.case_count }} 用例）</option>
+            <option v-for="d in ragDatasets" :key="d.id" :value="d.id">{{ d.name }}（{{ d.case_count }} 用例）</option>
           </select>
         </label>
         <label class="field">
@@ -461,12 +500,12 @@
       <div class="modal-box">
         <h3 class="modal-title">新建实验</h3>
         <p class="modal-sub">选择评测集发起一次评测运行；发起后在「实验」页签查看进度，点击行进入逐用例结果。</p>
-        <p v-if="!datasets.length" class="modal-sub warn">还没有评测集，请先在「评测集」页签创建评测集并添加用例。</p>
+        <p v-if="!ragDatasets.length" class="modal-sub warn">还没有评测集，请先在「评测集」页签创建评测集并添加用例。</p>
         <label class="field">
           <span class="field-label">评测集 <em>*</em></span>
           <select class="input" v-model="runFormDatasetId">
             <option value="" disabled>选择评测集</option>
-            <option v-for="d in datasets" :key="d.id" :value="d.id">{{ d.name }}（{{ d.case_count }} 用例）</option>
+            <option v-for="d in ragDatasets" :key="d.id" :value="d.id">{{ d.name }}（{{ d.case_count }} 用例）</option>
           </select>
         </label>
         <div class="modal-actions">
@@ -511,27 +550,33 @@ const AGENT_TABS = [
   { key: 'online', label: '在线轨迹' },
   { key: 'prompt-skill', label: 'Prompt · Skill' },
 ]
+const TOOL_TABS = [
+  { key: 'datasets', label: '评测集' },
+]
 const RAG_KEYS = RAG_TABS.map((t) => t.key)
 const AGENT_KEYS = AGENT_TABS.map((t) => t.key)
+const TOOL_KEYS = TOOL_TABS.map((t) => t.key)
 
-function resolveDomain(q) { return q === 'agent' ? 'agent' : 'rag' }
+function resolveDomain(q) { return q === 'agent' || q === 'tool' ? q : 'rag' }
 function resolveTab(dom, q) {
-  const keys = dom === 'agent' ? AGENT_KEYS : RAG_KEYS
+  const keys = dom === 'agent' ? AGENT_KEYS : dom === 'tool' ? TOOL_KEYS : RAG_KEYS
   const def = dom === 'agent' ? 'trajectory' : 'datasets'
   return keys.includes(q) ? q : def
 }
 
 const domain = ref(resolveDomain(route.query.domain))
 const tab = ref(resolveTab(domain.value, route.query.tab))
-const currentTabs = computed(() => (domain.value === 'agent' ? AGENT_TABS : RAG_TABS))
+const currentTabs = computed(() => (domain.value === 'agent' ? AGENT_TABS : domain.value === 'tool' ? TOOL_TABS : RAG_TABS))
 const keyword = ref('')
 const focusedId = ref('')
 
 // 深链同步：?domain=&tab= 变化时校正本地状态（存量仅 ?tab= 默认 RAG 域）
 watch(() => [route.query.domain, route.query.tab], ([d, t]) => {
   const dom = resolveDomain(d)
+  const changed = dom !== domain.value
   domain.value = dom
   tab.value = resolveTab(dom, t)
+  if (changed && dom === 'tool') loadDatasets()
 })
 
 function syncQuery() {
@@ -543,6 +588,7 @@ function switchDomain(d) {
   tab.value = d === 'agent' ? 'trajectory' : 'datasets'
   keyword.value = ''
   syncQuery()
+  if (d === 'tool') loadDatasets()
 }
 function switchTab(t) {
   if (tab.value === t) return
@@ -551,6 +597,9 @@ function switchTab(t) {
 }
 
 const headerSub = computed(() => {
+  if (domain.value === 'tool') {
+    return '工具评测：管理员在聊天中 @tool 添加工具并通过只读样例测试后，自动按工具版本声明派生评测集并发起评测（真实调用 + 断言校验）。全部用例通过后工具进入「标准化工具注册表」；评测集不支持手动修改，可在详情页查看逐用例结果，或在此重新评测。'
+  }
   if (domain.value === 'agent') {
     return tab.value === 'trajectory'
       ? 'Agent 轨迹评测（离线）：对 kind=agent 评测集逐用例真实运行 Agent，按 AgentEvals 轨迹匹配（严格 / 无序 / 子集 / 超集）与 DeepEval 六指标（任务完成 / 步骤效率 / 工具正确 / 参数正确 / 规划质量 / 规划遵循）+ 整体轨迹评分量化。'
@@ -579,6 +628,7 @@ onMounted(reloadAll)
 onUnmounted(() => {
   stopPolling()
   stopRunsPolling()
+  stopToolPolling()
 })
 
 function errMsg(e, fallback) {
@@ -586,6 +636,7 @@ function errMsg(e, fallback) {
 }
 
 function reloadAll() {
+  if (domain.value === 'tool') { loadDatasets(); return }
   if (domain.value !== 'rag') return
   loadDatasets()
   loadEvaluators()
@@ -598,6 +649,7 @@ async function loadDatasets() {
   try {
     const res = await listEvalDatasets()
     datasets.value = res.data.datasets || []
+    if (domain.value === 'tool') manageToolPolling()
   } catch (e) {
     errorMsg.value = errMsg(e, '加载评测集失败')
   } finally {
@@ -623,8 +675,11 @@ async function loadEvaluators() {
 }
 
 const filteredDatasets = computed(() => {
-  if (!keyword.value) return datasets.value
-  return datasets.value.filter((d) => (d.name || '').toLowerCase().includes(keyword.value.toLowerCase()))
+  const base = domain.value === 'tool'
+    ? datasets.value.filter((d) => d.kind === 'tool')
+    : datasets.value.filter((d) => d.kind !== 'tool')
+  if (!keyword.value) return base
+  return base.filter((d) => (d.name || '').toLowerCase().includes(keyword.value.toLowerCase()))
 })
 const filteredEvals = computed(() => {
   if (!keyword.value) return evaluators.value
@@ -632,6 +687,8 @@ const filteredEvals = computed(() => {
   return evaluators.value.filter((e) =>
     (e.name || '').toLowerCase().includes(kw) || (e.dataset_name || '').toLowerCase().includes(kw))
 })
+// 工具评测集不参与 RAG 评估器 / 实验绑定
+const ragDatasets = computed(() => datasets.value.filter((d) => d.kind !== 'tool'))
 
 function goDataset(id) {
   focusedId.value = id
@@ -640,6 +697,40 @@ function goDataset(id) {
 
 function goPromptSkill() {
   router.push({ name: 'EvalPromptSkill' })
+}
+
+// ---- 工具评测（kind=tool 评测集自动派生；重新评测与实验同一入口，后台真实调用 + 断言） ----
+let toolPollTimer = null
+
+async function runToolEval(d) {
+  startingRun.value = true
+  errorMsg.value = ''
+  try {
+    await startEvalRun(d.id)
+    await loadDatasets()
+  } catch (e) {
+    errorMsg.value = e?.response?.status === 409
+      ? (e.response.data?.message || '已有评测任务在执行中，请等待其结束后再试')
+      : errMsg(e, '发起工具评测失败')
+  } finally {
+    startingRun.value = false
+  }
+}
+
+function manageToolPolling() {
+  const running = datasets.value.some((d) => d.kind === 'tool' && d.last_run?.status === 'running')
+  if (running && !toolPollTimer) {
+    toolPollTimer = setInterval(async () => { await loadDatasets() }, 3000)
+  } else if (!running && toolPollTimer) {
+    stopToolPolling()
+  }
+}
+
+function stopToolPolling() {
+  if (toolPollTimer) {
+    clearInterval(toolPollTimer)
+    toolPollTimer = null
+  }
 }
 
 // ---- 测试集构建（LLM 基于知识库生成 / 日志挖掘 → 候选待审池）+ 候选审核抽屉 ----
@@ -1252,6 +1343,7 @@ function statusLabel(st) {
   display: inline-flex; align-items: center; justify-content: center; color: #fff;
 }
 .entry-icon.ds { background: #f0762b; }
+.entry-icon.ds.tool-icon { background: #2e9e5b; }
 .entry-icon.ev { background: #2563eb; }
 .entry-name {
   flex: 1; min-width: 0; font-size: 14.5px; font-weight: 700;

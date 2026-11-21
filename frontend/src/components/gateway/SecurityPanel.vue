@@ -217,6 +217,7 @@
 <script setup>
 import { ref, reactive, computed, watch, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
+import { useQueryCacheStore, TTL_MONITOR } from '@/stores/queryCache'
 import {
   getGatewayRules, getGatewaySettings, saveGatewaySettings, gatewayScanPreview,
   listGatewaySecurityEvents, getGatewaySecurityEvent, suggestGatewaySecurityEvent,
@@ -369,17 +370,27 @@ async function onScan() {
 }
 
 // ---- 风险事件闭环 ----
-async function loadEvents() {
+const queryCache = useQueryCacheStore()
+
+function applyEvents(data) {
+  events.value = data.events || []
+  eventStats.pending = data.pending || 0
+  eventStats.unacked_alerts = data.unacked_alerts || 0
+  resolutions.value = data.resolutions || []
+  resolutionLabels.value = data.resolution_labels || {}
+  // 预填每条待处理事件的处理表单（默认动作：已排查处置）
+  events.value.forEach((ev) => { if (ev.status === 'pending') ensureResolveForm(ev.id) })
+}
+
+// 安全事件列表经统一查询缓存；安全配置表单（load）不缓存，避免草稿/版本冲突
+async function loadEvents(force = 0) {
   eventsLoading.value = true
   try {
-    const res = await listGatewaySecurityEvents({ status: eventStatusFilter.value, limit: 50 })
-    events.value = res.data.events || []
-    eventStats.pending = res.data.pending || 0
-    eventStats.unacked_alerts = res.data.unacked_alerts || 0
-    resolutions.value = res.data.resolutions || []
-    resolutionLabels.value = res.data.resolution_labels || {}
-    // 预填每条待处理事件的处理表单（默认动作：已排查处置）
-    events.value.forEach((ev) => { if (ev.status === 'pending') ensureResolveForm(ev.id) })
+    const params = { status: eventStatusFilter.value, limit: 50 }
+    const data = await queryCache.cachedGet('alerts', { kind: 'gw-events', ...params },
+      async () => (await listGatewaySecurityEvents(params)).data,
+      { ttl: TTL_MONITOR, force: !!force, onRevalidate: applyEvents })
+    applyEvents(data)
   } catch (e) {
     // 事件加载失败不阻断安全配置页
   } finally {
@@ -405,7 +416,7 @@ async function onResolve(ev) {
   try {
     const res = await resolveGatewaySecurityEvent(ev.id, { resolution: f.resolution, note: f.note })
     if (res.data.event) Object.assign(ev, res.data.event)
-    await loadEvents()
+    await loadEvents(1)
   } catch (e) {
     errorMsg.value = e.response?.data?.detail || '处理失败'
   } finally {
@@ -418,7 +429,7 @@ async function onReopen(ev) {
     const res = await reopenGatewaySecurityEvent(ev.id)
     if (res.data.event) Object.assign(ev, res.data.event)
     ensureResolveForm(ev.id)
-    await loadEvents()
+    await loadEvents(1)
   } catch (e) {
     errorMsg.value = e.response?.data?.detail || '重开失败'
   }
@@ -429,7 +440,7 @@ async function onDeleteEvent(ev) {
   try {
     await deleteGatewaySecurityEvent(ev.id)
     events.value = events.value.filter((x) => x.id !== ev.id)
-    await loadEvents()
+    await loadEvents(1)
   } catch (e) {
     errorMsg.value = e.response?.data?.detail || '删除失败'
   }
@@ -439,12 +450,12 @@ async function onDeleteEvent(ev) {
 async function focusEventFromRoute() {
   const id = route.query.event
   if (!id) return
-  await loadEvents()
+  await loadEvents(1)
   // 目标事件不在首页（数据量大或过滤掉）时：先切回全部，仍不在则单条取回置顶，保证深链必展开
   if (!events.value.some((ev) => ev.id === id)) {
     if (eventStatusFilter.value) {
       eventStatusFilter.value = ''
-      await loadEvents()
+      await loadEvents(1)
     }
     if (!events.value.some((ev) => ev.id === id)) {
       try {

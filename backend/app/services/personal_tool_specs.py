@@ -9,6 +9,11 @@ from app.core.json_schema import check_json, checked_schema, validate
 from app.services.url_fetch import normalize_url
 
 SCAN_VERSION = "personal-tools-2"
+# 功能名标识：小写英文 snake_case、以功能命名（拒绝随机码）；长度与 OpenAI function name 预算一致
+FUNCTION_NAME_RE = re.compile(r"[a-z][a-z0-9_]{2,63}")
+LEGACY_FUNCTION_NAME_RE = re.compile(r"pt_[a-f0-9]{32}_[a-f0-9]{16}")
+CONNECTOR_FUNCTION_NAMES = {"weather": "get_current_weather", "weather_forecast": "get_weather_forecast",
+                            "geocode": "geocode_city", "elevation": "get_elevation", "news_search": "search_news"}
 _SENSITIVE_FIELD = re.compile(r"(?:password|passwd|secret|authorization|cookie|(?:api|access|refresh|auth)[_-]?(?:key|token)|credential)", re.I)
 _SECRET_VALUE = re.compile(r"(?:\bBearer\s+[A-Za-z0-9._~-]{8,}|\bsk-[A-Za-z0-9_-]{16,}|-----BEGIN [A-Z ]*PRIVATE KEY-----)", re.I)
 
@@ -51,6 +56,17 @@ def version_fingerprint(spec):
     return fingerprint(versioned)
 
 
+def derive_function_name(spec):
+    """优先采用声明的功能标识；连接器用内置功能名；其余尝试名称的英文 slug，均不生成随机码。"""
+    fn = spec.get("function_name")
+    if isinstance(fn, str) and FUNCTION_NAME_RE.fullmatch(fn):
+        return fn
+    if spec.get("executor") == "connector":
+        return CONNECTOR_FUNCTION_NAMES.get((spec.get("config") or {}).get("connector"))
+    slug = re.sub(r"[^a-z0-9]+", "_", str(spec.get("name") or "").lower()).strip("_")
+    return slug if FUNCTION_NAME_RE.fullmatch(slug) else None
+
+
 def object_schema(properties, required=None):
     return {"type": "object", "properties": properties, "required": list(properties) if required is None else required,
             "additionalProperties": False}
@@ -60,7 +76,8 @@ def connector_spec(kind):
     coordinates = {"latitude": {"type": "number", "minimum": -90, "maximum": 90},
                    "longitude": {"type": "number", "minimum": -180, "maximum": 180}}
     if kind == "news_search":
-        return {"name": "新闻资料搜索", "description": "搜索新闻资料并提供来源；摘要不保证包含发布时间，不等同实时事实核验。",
+        return {"name": "新闻资料搜索", "function_name": CONNECTOR_FUNCTION_NAMES[kind],
+                "description": "搜索新闻资料并提供来源；摘要不保证包含发布时间，不等同实时事实核验。",
                 "executor": "connector", "config": {"connector": kind},
                 "input_schema": object_schema({"query": {"type": "string", "minLength": 2, "maxLength": 200}}),
                 "output_schema": object_schema({"results": {"type": "array", "minItems": 1, "maxItems": 5,
@@ -68,6 +85,41 @@ def connector_spec(kind):
                                              "snippet": {"type": "string"}, "published_at": {"type": ["string", "null"]}})}}),
                 "tests": [{"input": {"query": "科技 新闻"}, "assertions": [{"path": "/results/0/url", "op": "exists"}]}],
                 "sources": [], "limitations": "复用系统已配置搜索源；没有发布时间时明确未知。"}
+    if kind == "geocode":
+        return {"name": "城市坐标解析", "function_name": CONNECTOR_FUNCTION_NAMES[kind],
+                "description": "按城市名解析候选坐标与时区（Open-Meteo Geocoding）；同名地点返回多候选，不猜测唯一实体。",
+                "executor": "connector", "config": {"connector": kind},
+                "input_schema": object_schema({"name": {"type": "string", "minLength": 2, "maxLength": 80}}),
+                "output_schema": object_schema({"query": {"type": "string"},
+                    "candidates": {"type": "array", "maxItems": 5,
+                        "items": object_schema({"name": {"type": "string"}, "latitude": {"type": "number"},
+                            "longitude": {"type": "number"}, "timezone": {"type": "string"},
+                            "admin1": {"type": ["string", "null"]}, "country": {"type": ["string", "null"]}},
+                            required=["name", "latitude", "longitude", "timezone"])}},
+                    required=["query", "candidates"]),
+                "tests": [{"input": {"name": "深圳"}, "assertions": [{"path": "/query", "op": "input", "input": "/name"}]}],
+                "sources": ["https://open-meteo.com/en/docs/geocoding-api", "https://open-meteo.com/en/terms"],
+                "limitations": "Open-Meteo 免费接口仅限非商业用途，须遵守 CC-BY 4.0 署名和限额。候选为地理编码数据，同名城市需用户确认。"}
+    if kind == "weather_forecast":
+        coordinates["timezone"] = {"type": "string", "minLength": 3, "maxLength": 80}
+        output = object_schema({"latitude": {"type": "number"}, "longitude": {"type": "number"},
+            "timezone": {"type": "string"}, "unit": {"const": "°C"},
+            "days": {"type": "array", "minItems": 1, "maxItems": 7,
+                "items": object_schema({"date": {"type": "string", "minLength": 10},
+                    "temp_max": {"type": "number", "minimum": -100, "maximum": 70},
+                    "temp_min": {"type": "number", "minimum": -100, "maximum": 70},
+                    "weather_code": {"type": "integer", "minimum": 0, "maximum": 99},
+                    "precipitation_probability": {"type": ["integer", "null"], "minimum": 0, "maximum": 100}})}})
+        sample = {"latitude": 22.5431, "longitude": 114.0579, "timezone": "Asia/Shanghai"}
+        assertions = [{"path": "/unit", "op": "equals", "value": "°C"},
+                      {"path": "/timezone", "op": "input", "input": "/timezone"},
+                      {"path": "/days/0/date", "op": "exists"}]
+        return {"name": "天气预报", "function_name": CONNECTOR_FUNCTION_NAMES[kind],
+                "description": "按明确坐标读取未来数日天气预报（最高/最低温、天气代码、降水概率），保留单位和来源。",
+                "executor": "connector", "config": {"connector": kind}, "input_schema": object_schema(coordinates),
+                "output_schema": output, "tests": [{"input": sample, "assertions": assertions}],
+                "sources": ["https://open-meteo.com/en/docs", "https://open-meteo.com/en/terms"],
+                "limitations": "Open-Meteo 免费接口仅限非商业用途，须遵守 CC-BY 4.0 署名和限额。预报为模型数据，不冒充现场观测。"}
     if kind not in ("weather", "elevation"):
         raise ValueError("未审核的内置连接器")
     if kind == "weather":
@@ -85,7 +137,8 @@ def connector_spec(kind):
         sample = {"latitude": 22.5431, "longitude": 114.0579}
         assertions = [{"path": "/unit", "op": "equals", "value": "m"},
                       {"path": "/latitude", "op": "input", "input": "/latitude"}]
-    return {"name": "当前天气" if kind == "weather" else "坐标海拔", "description": "按明确坐标读取天气或地形高程，保留单位和来源。",
+    return {"name": "当前天气" if kind == "weather" else "坐标海拔", "function_name": CONNECTOR_FUNCTION_NAMES[kind],
+            "description": "按明确坐标读取天气或地形高程，保留单位和来源。",
             "executor": "connector", "config": {"connector": kind}, "input_schema": object_schema(coordinates),
             "output_schema": output, "tests": [{"input": sample, "assertions": assertions}],
             "sources": ["https://open-meteo.com/en/docs" if kind == "weather" else "https://open-meteo.com/en/docs/elevation-api",
@@ -124,13 +177,18 @@ def assert_result(output, arguments, assertions):
 def review(spec):
     check_json(spec, max_bytes=131072)
     if not isinstance(spec, dict) or set(spec) - {"name", "description", "executor", "config", "input_schema",
-            "output_schema", "tests", "sources", "limitations", "assertions", "provenance"}:
+            "output_schema", "tests", "sources", "limitations", "assertions", "provenance", "function_name"}:
         raise ValueError("工具声明包含未知字段")
     if _SECRET_VALUE.search(canonical(spec)):
         raise ValueError("检测到凭据内容，未保存工具声明")
     for key, limit in (("name", 60), ("description", 500), ("limitations", 2000)):
         if not isinstance(spec.get(key), str) or not 1 <= len(spec[key]) <= limit:
             raise ValueError("工具名称、说明与限制必须在长度预算内")
+    fn = spec.get("function_name")
+    if fn is not None and (not isinstance(fn, str) or not FUNCTION_NAME_RE.fullmatch(fn)):
+        raise ValueError("function_name 须为小写英文 snake_case 功能标识（如 get_stock_price），不得基于随机码")
+    if isinstance(fn, str) and LEGACY_FUNCTION_NAME_RE.fullmatch(fn):
+        raise ValueError("function_name 不得基于随机码生成，请以功能命名")
     for key in ("input_schema", "output_schema"):
         checked_schema(spec.get(key))
         if spec[key].get("type") != "object" or spec[key].get("additionalProperties") is not False or not spec[key].get("required"):
@@ -182,8 +240,12 @@ def review(spec):
         known = connector_spec(config.get("connector"))
         if config != known["config"] or any(spec[k] != known[k] for k in ("input_schema", "output_schema")):
             raise ValueError("内置连接器模板不允许改写")
+        if fn and fn != known["function_name"]:
+            raise ValueError("内置连接器的功能名标识不允许改写")
         approval = False
     elif executor == "http":
+        if not fn:
+            raise ValueError("HTTP 工具必须声明以功能命名的 function_name")
         if set(config) - {"url", "method", "query", "body", "output_map", "auth", "read_only_evidence"}:
             raise ValueError("HTTP 模板包含未许可配置")
         url = normalize_url(config.get("url"))
@@ -221,6 +283,8 @@ def review(spec):
             raise ValueError("凭据不能与模型可填查询字段重叠")
         reasons.append("待管理员核验真实 API 文档、只读语义及参数权限")
     elif executor == "python":
+        if not fn:
+            raise ValueError("Python 工具必须声明以功能命名的 function_name")
         if set(config) != {"code"} or not isinstance(config["code"], str) or not 1 <= len(config["code"].encode()) <= 65536:
             raise ValueError("脚本只能声明 Python 代码；镜像、挂载和网络由服务端控制")
         try:
@@ -242,5 +306,5 @@ def review(spec):
     else:
         raise ValueError("不支持的执行器类型；首版不支持外部副作用工具")
     return {"status": "needs_config" if approval else "checked", "requires_admin": approval,
-            "requires_terms": executor == "connector" and config["connector"] in ("weather", "elevation"),
+            "requires_terms": executor == "connector" and config["connector"] in ("weather", "elevation", "weather_forecast", "geocode"),
             "reasons": reasons, "scan_version": SCAN_VERSION, "version": version_fingerprint(spec)}

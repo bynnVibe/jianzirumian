@@ -156,6 +156,42 @@ async def execute(spec, arguments, secret=""):
                         entity={k: arguments[k] for k in ("latitude", "longitude")},
                         sources=[{"title": "Open-Meteo 天气模型数据 · CC-BY 4.0", "url": url}])
             ttl = min(300, cap)
+        elif connector == "geocode":
+            url = "https://geocoding-api.open-meteo.com/v1/search"
+            raw, _ = await request_json(url, params={"name": arguments["name"], "count": 5, "language": "zh", "format": "json"})
+            candidates = []
+            for r in (raw.get("results") or [])[:5]:
+                if not isinstance(r, dict) or not all(k in r for k in ("name", "latitude", "longitude", "timezone")):
+                    continue
+                candidates.append({"name": r["name"], "latitude": r["latitude"], "longitude": r["longitude"],
+                                   "timezone": r["timezone"], "admin1": r.get("admin1"), "country": r.get("country")})
+            output = {"query": arguments["name"], "candidates": candidates}
+            meta.update(entity=arguments["name"], sources=[{"title": "Open-Meteo Geocoding · CC-BY 4.0", "url": url}])
+        elif connector == "weather_forecast":
+            zone = ZoneInfo(arguments["timezone"])
+            url = "https://api.open-meteo.com/v1/forecast"
+            raw, cap = await request_json(url, params={**arguments,
+                "daily": "temperature_2m_max,temperature_2m_min,weather_code,precipitation_probability_max",
+                "temperature_unit": "celsius", "forecast_days": 3})
+            daily = raw.get("daily", {})
+            times = daily.get("time") or []
+            # 预报必须覆盖服务端时钟的「今天」且坐标/时区/单位与请求一致（时效校验）
+            if (raw.get("timezone") != arguments["timezone"] or len(times) != 3
+                    or times[0] != datetime.now(zone).date().isoformat()
+                    or raw.get("daily_units", {}).get("temperature_2m_max") != "°C"
+                    or abs(raw.get("latitude", 999) - arguments["latitude"]) > .25
+                    or abs(raw.get("longitude", 999) - arguments["longitude"]) > .25):
+                raise ToolExecutionError("data_mismatch")
+            probs = daily.get("precipitation_probability_max") or [None] * 3
+            days = [{"date": times[i], "temp_max": daily["temperature_2m_max"][i],
+                     "temp_min": daily["temperature_2m_min"][i], "weather_code": daily["weather_code"][i],
+                     "precipitation_probability": probs[i] if i < len(probs) else None} for i in range(3)]
+            output = {"latitude": raw["latitude"], "longitude": raw["longitude"],
+                      "timezone": raw["timezone"], "unit": "°C", "days": days}
+            meta.update(timezone=raw["timezone"], unit="°C",
+                        entity={k: arguments[k] for k in ("latitude", "longitude")},
+                        sources=[{"title": "Open-Meteo 天气预报模型数据 · CC-BY 4.0", "url": url}])
+            ttl = min(300, cap)
         elif connector == "elevation":
             url = "https://api.open-meteo.com/v1/elevation"
             raw, _ = await request_json(url, params=arguments)
@@ -175,6 +211,6 @@ async def execute(spec, arguments, secret=""):
         raise ToolExecutionError("credential_echo_blocked")
     meta["fetched_at"] = datetime.now(timezone.utc).isoformat()
     # HTTP 通用字段或搜索摘要通过 Schema 并不证明本轮需求已满足。
-    satisfaction = "satisfied" if kind == "connector" and config["connector"] in ("weather", "elevation") else "unverified"
+    satisfaction = "satisfied" if kind == "connector" and config["connector"] in ("weather", "elevation", "weather_forecast") else "unverified"
     return {"output": output, **meta, "cache_ttl": ttl, "execution_status": "completed",
             "validation_status": "passed", "requirement_status": satisfaction}

@@ -192,15 +192,16 @@ def registry_snapshot() -> List[dict]:
     )
 
 
-def schema_token_estimate(names: Optional[List[str]] = None) -> int:
+def schema_token_estimate(names: Optional[List[str]] = None, extra_schemas: Optional[List[dict]] = None) -> int:
     """估算工具 schema 注入 LLM 的 token 占用（供可观测性「工具 Schema Token」指标）。
 
     采用与 observability.estimate_tokens 同口径的轻量估算（CJK 1:1，其余 4 字符/token），
     在此内联实现以避免 base ↔ observability 的循环依赖。
+    extra_schemas：注册表之外的标准化工具 schema（如评测通过的个人工具）。
     """
     import math
 
-    text = json.dumps(function_schemas(names), ensure_ascii=False)
+    text = json.dumps(function_schemas(names) + list(extra_schemas or []), ensure_ascii=False)
     if not text:
         return 0
     cjk = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff" or "\u3000" <= ch <= "\u303f" or "\uff00" <= ch <= "\uffef")

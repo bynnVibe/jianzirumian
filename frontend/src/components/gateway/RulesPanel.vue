@@ -158,6 +158,7 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted } from 'vue'
+import { useQueryCacheStore } from '@/stores/queryCache'
 import {
   listGatewayRoutingRules, createGatewayRoutingRule, updateGatewayRoutingRule,
   deleteGatewayRoutingRule, listUsers,
@@ -194,14 +195,23 @@ function strategyLabel(s) {
 
 function tierLabel(t) { return { paid: '付费', free: '免费', subscription: '订阅' }[t] || t }
 
-async function load() {
+const queryCache = useQueryCacheStore()
+
+function applyRules(data) {
+  rules.value = data.rules || []
+  upstreams.value = data.upstreams || []
+  allModels.value = data.models || []
+}
+
+// 列表经统一查询缓存：热切换先展示缓存，写操作后 force 重拉
+async function load(force = 0) {
   loading.value = true
   errorMsg.value = ''
   try {
-    const res = await listGatewayRoutingRules()
-    rules.value = res.data.rules || []
-    upstreams.value = res.data.upstreams || []
-    allModels.value = res.data.models || []
+    const data = await queryCache.cachedGet('gateway', { kind: 'rules' },
+      async () => (await listGatewayRoutingRules()).data,
+      { force: !!force, onRevalidate: applyRules })
+    applyRules(data)
   } catch (e) {
     errorMsg.value = e.response?.data?.detail || '加载规则失败'
   } finally {
@@ -211,8 +221,10 @@ async function load() {
 
 async function loadUsers() {
   try {
-    const res = await listUsers()
-    users.value = res.data.users || res.data || []
+    const data = await queryCache.cachedGet('users', { kind: 'list' },
+      async () => (await listUsers()).data,
+      { onRevalidate: (d) => { users.value = d.users || d || [] } })
+    users.value = data.users || data || []
   } catch (e) {
     // 辅助数据加载失败不阻断规则管理
   }
@@ -269,7 +281,7 @@ async function onSave() {
     if (editing.value) await updateGatewayRoutingRule(editing.value, payload)
     else await createGatewayRoutingRule(payload)
     showModal.value = false
-    await load()
+    await load(1)
   } catch (e) {
     formError.value = e.response?.data?.detail || '保存失败'
   } finally {
@@ -279,7 +291,7 @@ async function onSave() {
 
 async function onDelete(r) {
   if (!confirm(`确认删除规则「${r.model_pattern}」？`)) return
-  try { await deleteGatewayRoutingRule(r.id); await load() }
+  try { await deleteGatewayRoutingRule(r.id); await load(1) }
   catch (e) { errorMsg.value = e.response?.data?.detail || '删除失败' }
 }
 

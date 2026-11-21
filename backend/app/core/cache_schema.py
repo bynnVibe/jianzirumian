@@ -69,3 +69,30 @@ def migrate_profile(conn):
     for event in ("insert", "update", "delete"):
         conn.execute(f"DROP TRIGGER IF EXISTS cache_revision_user_memories_{event}")
     conn.execute("INSERT INTO schema_migrations VALUES (?,?)", (version, datetime.now().isoformat()))
+
+
+def migrate_v3(conn):
+    """语义缓存 v3：归一化双键匹配 + 文档级依赖失效 + 用户稳定上下文哈希。
+
+    1) search_query/query_embedding：意图改写后的归一化查询及其向量，
+       与原始问题向量组成双键匹配（同义改述在归一化键上相似度显著更高）。
+    2) deps：写入时来源文档的版本指纹（upload_records.updated_at /
+       wiki_pages.updated_at+source_hash / 知识库可见性快照）。读侧仅当
+       被引用文档自身变更/删除/权限变化时失效，取代全局 knowledge 版本
+       与 FAISS 文件 mtime 耦合（任意上传不再清空全部缓存）。
+    3) skills_hash：用户 Skills+指令的稳定上下文哈希，取代「有 Skills
+       就整体旁路探针」的过严门禁（与 profile_hash 同理）。
+    """
+    version = "semcache_v3"
+    if conn.execute("SELECT 1 FROM schema_migrations WHERE version=?", (version,)).fetchone():
+        return
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(semantic_cache_v2)")}
+    for name, definition in {
+        "search_query": "TEXT NOT NULL DEFAULT ''",
+        "query_embedding": "TEXT NOT NULL DEFAULT '[]'",
+        "skills_hash": "TEXT NOT NULL DEFAULT ''",
+        "deps": "TEXT NOT NULL DEFAULT '{}'",
+    }.items():
+        if name not in cols:
+            conn.execute(f"ALTER TABLE semantic_cache_v2 ADD COLUMN {name} {definition}")
+    conn.execute("INSERT INTO schema_migrations VALUES (?,?)", (version, datetime.now().isoformat()))

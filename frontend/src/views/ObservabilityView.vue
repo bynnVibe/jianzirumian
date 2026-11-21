@@ -517,48 +517,12 @@
         <p v-if="!toolRouting.overview.total_calls" class="empty-hint">暂无工具调用记录（发起对话并触发知识库检索 / 联网搜索 / CLI 工具后会自动留痕）</p>
       </section>
 
-      <!-- ============ 标准化工具注册表（req1） ============ -->
-      <section class="panel" v-if="toolRegistry && toolRegistry.tools && toolRegistry.tools.length">
+      <!-- ============ 工具注册表已迁至工具治理中心（/admin/tools） ============ -->
+      <section class="panel">
         <div class="panel-head">
-          <span class="panel-title">标准化工具注册表（命名空间 · 标签 · 场景 · 参数 Schema · 权限 · 风险 · 状态）</span>
+          <span class="panel-title">标准化工具注册表</span>
         </div>
-        <div class="registry-scroll">
-        <table class="obs-table registry-table">
-          <colgroup>
-            <col style="width:150px" /><col style="width:100px" /><col style="width:186px" />
-            <col style="width:248px" /><col style="width:104px" /><col style="width:82px" />
-            <col style="width:64px" /><col style="width:206px" />
-          </colgroup>
-          <thead>
-            <tr><th>工具</th><th>命名空间</th><th>标签</th><th>适用场景</th><th>权限</th><th>风险等级</th><th>状态</th><th>参数</th></tr>
-          </thead>
-          <tbody>
-            <tr v-for="t in toolRegistry.tools" :key="t.name">
-              <td class="reg-name" :title="t.description">{{ t.name }}</td>
-              <td><span class="reg-chip ns">{{ t.namespace }}</span></td>
-              <td>
-                <span class="reg-tags">
-                  <em v-for="tag in (t.tags || []).slice(0, 4)" :key="tag" class="reg-chip">{{ tag }}</em>
-                  <em v-if="(t.tags || []).length > 4" class="reg-chip more" :title="(t.tags || []).join('、')">+{{ (t.tags || []).length - 4 }}</em>
-                  <em v-if="!(t.tags || []).length" class="reg-empty">-</em>
-                </span>
-              </td>
-              <td><span class="reg-scene" :title="(t.scenarios || []).join('；')">{{ (t.scenarios || []).join('；') || '-' }}</span></td>
-              <td><span class="reg-chip perm" :title="(t.permissions || []).join('、') || '公开'">{{ (t.permissions || []).join('、') || '公开' }}</span></td>
-              <td :title="`风险等级：${riskLabel(t.risk_level)}`"><span class="status-dot" :class="riskDotClass(t.risk_level)"></span>{{ riskLabel(t.risk_level) }}</td>
-              <td><span class="reg-status">{{ t.status === 'active' ? '可用' : t.status }}</span></td>
-              <td>
-                <span class="reg-tags" :title="schemaParamSummary(t.parameters)">
-                  <em v-for="p in schemaParams(t.parameters).slice(0, 3)" :key="p" class="reg-chip param">{{ p }}</em>
-                  <em v-if="schemaParams(t.parameters).length > 3" class="reg-chip more">+{{ schemaParams(t.parameters).length - 3 }}</em>
-                  <em v-if="!schemaParams(t.parameters).length" class="reg-empty">无参数</em>
-                </span>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-        </div>
-        <p class="empty-hint">共 {{ toolRegistry.tools.length }} 个工具 · function-calling schema {{ (toolRegistry.function_schemas || []).length }} 份 · Schema Token 估算 {{ formatNum(toolRegistry.schema_tokens) }}</p>
+        <p class="empty-hint">工具监控、评测、审批与注册表展示已集中到 <router-link v-if="auth.canOps" to="/admin/tools">工具治理中心</router-link><template v-else>工具治理中心（系统管理）</template>：仅标准化评测通过且启用就绪的个人工具才在注册表显示并可被聊天调用。</p>
       </section>
 
       <!-- ============ 按 trace 的工具调用链 ============ -->
@@ -791,6 +755,11 @@
         </template>
       </section>
       </template>
+
+      <!-- ============ 个人工具管理已迁至工具治理中心（/admin/tools） ============ -->
+      <section v-if="auth.isAuthenticated && !auth.isGuest" class="panel">
+        <p class="empty-hint">个人工具的添加确认、监控、评测、审批与注册展示已集中到 <router-link v-if="auth.canOps" to="/admin/tools">工具治理中心</router-link><template v-else>工具治理中心（系统管理，仅管理员/运维可见）</template>。</p>
+      </section>
     </div>
 
     <!-- ============ 图表 hover tooltip ============ -->
@@ -973,16 +942,18 @@
 </template>
 
 <script setup>
-import { ref, computed, nextTick, watch, onMounted } from 'vue'
+import { ref, computed, nextTick, watch, onMounted, onActivated } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
+import { useQueryCacheStore, TTL_MONITOR } from '@/stores/queryCache'
 import ObsDashboard from '@/components/observability/ObsDashboard.vue'
 import ObsLogs from '@/components/observability/ObsLogs.vue'
 import ObsAlerts from '@/components/observability/ObsAlerts.vue'
 import ObsCachePanel from '@/components/observability/ObsCachePanel.vue'
-import { getMyObservabilityMetrics, getMyContextOverview, getMyContextSessions, getObservabilityMetrics, getObservabilityTraces, getObservabilityTrace, getObservabilityTraceLogs, getSkillReviews, getToolRoutingMetrics, getToolRegistry, getSessionObservability, getSedimentSuggestions, getObsMonitor, getObsToolChains, getObsDrill, getMyMemoryDrill } from '@/api'
+import { getMyObservabilityMetrics, getMyContextOverview, getMyContextSessions, getObservabilityMetrics, getObservabilityTraces, getObservabilityTrace, getObservabilityTraceLogs, getSkillReviews, getToolRoutingMetrics, getSessionObservability, getSedimentSuggestions, getObsMonitor, getObsToolChains, getObsDrill, getMyMemoryDrill } from '@/api'
 
 const auth = useAuthStore()
+const queryCache = useQueryCacheStore()
 const route = useRoute()
 const router = useRouter()
 const canOps = computed(() => auth.canOps)
@@ -1005,7 +976,6 @@ const errorMsg = ref('')
 const metrics = ref(null)
 const skillReviews = ref(null)
 const toolRouting = ref(null)
-const toolRegistry = ref(null)
 const sediment = ref(null)
 // 需求1：记忆概览钻取弹窗（点击记忆指标/类型条查看明细）
 const memDrill = ref(null)
@@ -1063,16 +1033,53 @@ let logsRequestId = 0
 
 onMounted(() => { loadAll(0); applyRouteQuery() })
 
+// 按当前 Tab 按需加载（不再全量 Promise.all）：未加载/版本落后的 Tab 才发请求，
+// 热切换不重复拉相同 GET；KeepAlive 回页时按资源版本判断是否重验
+const loadedTabs = new Set()
+const tabVersions = {}
+function versionSig() {
+  const v = queryCache.versions
+  return `${v.usage || 0}|${v.alerts || 0}|${v.skills || 0}|${v.sessions || 0}`
+}
+const TAB_LOADERS = {
+  dashboard: (r) => Promise.all([loadMetrics(r), loadMonitor(r)]),
+  logs: () => Promise.resolve(), // ObsLogs 组件自行加载
+  metrics: (r) => Promise.all([loadMetrics(r), loadMonitor(r), loadSkillReviews(), loadToolRouting(r), loadSediment(), loadMyContext()]),
+  traces: (r) => Promise.all([loadTraces(), loadToolChains(r)]),
+}
+async function loadTab(tab, refresh = 0) {
+  const loader = TAB_LOADERS[tab]
+  if (!loader) return
+  await loader(refresh)
+  loadedTabs.add(tab)
+  tabVersions[tab] = versionSig()
+}
+watch(opsTab, (tab) => {
+  if (!canOps.value) return
+  if (!loadedTabs.has(tab) || tabVersions[tab] !== versionSig()) {
+    loadTab(tab).catch(() => {})
+  }
+})
+onActivated(() => {
+  if (canOps.value && loadedTabs.has(opsTab.value) && tabVersions[opsTab.value] !== versionSig()) {
+    loadTab(opsTab.value).catch(() => {})
+  }
+})
+
 async function loadAll(refresh = 0) {
   loading.value = true
   errorMsg.value = ''
   try {
     if (canOps.value) {
-      await Promise.all([loadMetrics(refresh), loadTraces(), loadSkillReviews(), loadToolRouting(refresh), loadToolRegistry(), loadSediment(), loadMyContext(), loadMonitor(refresh), loadToolChains(refresh)])
+      if (refresh) loadedTabs.clear() // 手动刷新/改时间范围：其余 Tab 切到时重拉
+      await loadTab(opsTab.value, refresh)
     } else {
       businessMetrics.value = null
-      const res = await getMyObservabilityMetrics(days.value, rangeMode.value)
-      businessMetrics.value = res.data
+      const data = await queryCache.cachedGet('sessions',
+        { kind: 'my-metrics', days: days.value, range: rangeMode.value },
+        async () => (await getMyObservabilityMetrics(days.value, rangeMode.value)).data,
+        { ttl: TTL_MONITOR, force: refresh === 1, onRevalidate: (d) => { businessMetrics.value = d } })
+      businessMetrics.value = data
       await loadMyContext()
     }
     // 时间范围切换后同步刷新已选对话的统一视图
@@ -1104,15 +1111,20 @@ async function loadMyContext() {
 
 async function loadMetrics(refresh = 0) {
   if (!canOps.value) return
-  const res = await getObservabilityMetrics(days.value, rangeMode.value, refresh)
-  metrics.value = res.data
+  const data = await queryCache.cachedGet('usage',
+    { kind: 'metrics', days: days.value, range: rangeMode.value },
+    async () => (await getObservabilityMetrics(days.value, rangeMode.value, refresh)).data,
+    { ttl: TTL_MONITOR, force: refresh === 1, onRevalidate: (d) => { metrics.value = d } })
+  metrics.value = data
 }
 
 async function loadSkillReviews() {
   if (!canOps.value) return
   try {
-    const res = await getSkillReviews(50)
-    skillReviews.value = res.data
+    const data = await queryCache.cachedGet('skills', { kind: 'reviews', limit: 50 },
+      async () => (await getSkillReviews(50)).data,
+      { ttl: TTL_MONITOR, onRevalidate: (d) => { skillReviews.value = d } })
+    skillReviews.value = data
   } catch {
     skillReviews.value = null  // 预审面板加载失败不阻断其余指标
   }
@@ -1130,8 +1142,11 @@ function reviewRiskLabel(risk) {
 async function loadToolRouting(refresh = 0) {
   if (!canOps.value) return
   try {
-    const res = await getToolRoutingMetrics(days.value, rangeMode.value, refresh)
-    toolRouting.value = res.data
+    const data = await queryCache.cachedGet('usage',
+      { kind: 'tool-routing', days: days.value, range: rangeMode.value },
+      async () => (await getToolRoutingMetrics(days.value, rangeMode.value, refresh)).data,
+      { ttl: TTL_MONITOR, force: refresh === 1, onRevalidate: (d) => { toolRouting.value = d } })
+    toolRouting.value = data
   } catch {
     toolRouting.value = null
   }
@@ -1141,8 +1156,11 @@ async function loadToolRouting(refresh = 0) {
 async function loadMonitor(refresh = 0) {
   if (!canOps.value) return
   try {
-    const res = await getObsMonitor(days.value, rangeMode.value, refresh)
-    monitor.value = res.data
+    const data = await queryCache.cachedGet('usage',
+      { kind: 'monitor', days: days.value, range: rangeMode.value },
+      async () => (await getObsMonitor(days.value, rangeMode.value, refresh)).data,
+      { ttl: TTL_MONITOR, force: refresh === 1, onRevalidate: (d) => { monitor.value = d } })
+    monitor.value = data
   } catch {
     monitor.value = null
   }
@@ -1152,8 +1170,11 @@ async function loadMonitor(refresh = 0) {
 async function loadToolChains(refresh = 0) {
   if (!canOps.value) return
   try {
-    const res = await getObsToolChains(days.value, rangeMode.value, 50, refresh)
-    toolChains.value = res.data.items || []
+    const data = await queryCache.cachedGet('usage',
+      { kind: 'tool-chains', days: days.value, range: rangeMode.value, limit: 50 },
+      async () => (await getObsToolChains(days.value, rangeMode.value, 50, refresh)).data,
+      { ttl: TTL_MONITOR, force: refresh === 1, onRevalidate: (d) => { toolChains.value = d.items || [] } })
+    toolChains.value = data.items || []
   } catch {
     toolChains.value = []
   }
@@ -1170,8 +1191,10 @@ const latestEvalText = computed(() => {
 async function loadSediment() {
   if (!canOps.value) return
   try {
-    const res = await getSedimentSuggestions(30, 3)
-    sediment.value = res.data
+    const data = await queryCache.cachedGet('usage', { kind: 'sediment', days: 30, min: 3 },
+      async () => (await getSedimentSuggestions(30, 3)).data,
+      { ttl: TTL_MONITOR, onRevalidate: (d) => { sediment.value = d } })
+    sediment.value = data
   } catch {
     sediment.value = null
   }
@@ -1230,17 +1253,6 @@ async function loadSessObs(traceId = '') {
   }
 }
 
-// 标准化工具注册表快照（req1）
-async function loadToolRegistry() {
-  if (!canOps.value) return
-  try {
-    const res = await getToolRegistry()
-    toolRegistry.value = res.data
-  } catch {
-    toolRegistry.value = null
-  }
-}
-
 // 拦截环节编码 → 中文（对应 hooks.py 钩子链）
 function blockedCodeLabel(code, status) {
   if (status === 'error' && !code) return '执行异常'
@@ -1260,22 +1272,6 @@ function riskLabel(risk) {
 }
 function riskDotClass(risk) {
   return { low: 'ok', medium: 'ok', high: 'running', critical: 'error' }[risk] || 'ok'
-}
-
-// 参数 Schema 摘要：列出属性名（必填加 *），供注册表「参数」列速览
-function schemaParamSummary(parameters) {
-  const props = parameters && parameters.properties
-  if (!props || !Object.keys(props).length) return '无参数'
-  const required = new Set((parameters && parameters.required) || [])
-  return Object.keys(props).map((k) => (required.has(k) ? k + '*' : k)).join('、')
-}
-
-/** 注册表参数 chip 列表（必填带 *） */
-function schemaParams(parameters) {
-  const props = parameters && parameters.properties
-  if (!props || !Object.keys(props).length) return []
-  const required = new Set((parameters && parameters.required) || [])
-  return Object.keys(props).map((k) => (required.has(k) ? k + '*' : k))
 }
 
 // ---- 指标钻取：数字点击 → 明细弹窗 ----
@@ -1313,14 +1309,17 @@ async function loadTraces() {
   if (!canOps.value) return
   loadingTraces.value = true
   try {
-    const res = await getObservabilityTraces({
+    const params = {
       agent: filterAgent.value,
       status: filterStatus.value,
       limit: 30,
       offset: offset.value,
-    })
-    traces.value = res.data.items || []
-    total.value = res.data.total || 0
+    }
+    const data = await queryCache.cachedGet('usage', { kind: 'traces', ...params },
+      async () => (await getObservabilityTraces(params)).data,
+      { ttl: TTL_MONITOR, onRevalidate: (d) => { traces.value = d.items || []; total.value = d.total || 0 } })
+    traces.value = data.items || []
+    total.value = data.total || 0
   } finally {
     loadingTraces.value = false
   }
@@ -1410,14 +1409,13 @@ function toggleSpan(id) {
   expandedSpans.value = next
 }
 
-// 图4：Trace 详情的最终 AI 回复（取最后一个有输出的 llm span，回退任意有输出 span）
+// 图4：Trace 详情的最终 AI 回复——只认真实最终回复 span（name="answer"，含直调模板答案）；
+// 不再倒序取任意 llm span（意图改写/证据校验等中间输出曾被误当「AI回复内容」）
 const traceFinalAnswer = computed(() => {
   const spans = traceDetail.value?.spans || []
   for (let i = spans.length - 1; i >= 0; i--) {
-    if (spans[i].kind === 'llm' && spans[i].output) return spans[i].output
-  }
-  for (let i = spans.length - 1; i >= 0; i--) {
-    if (spans[i].output) return spans[i].output
+    const s = spans[i]
+    if (s.kind === 'llm' && s.name === 'answer' && s.output) return s.output
   }
   return ''
 })
@@ -1479,7 +1477,7 @@ function formatTime(iso) {
 }
 
 function statusText(status) {
-  return { ok: '成功', error: '失败', running: '进行中', cancelled: '已取消', timeout: '超时', interrupted: '重启中断' }[status] || status
+  return { ok: '成功', error: '失败', running: '进行中', cancelled: '已取消', timeout: '超时', interrupted: '重启中断', skipped: '已跳过', blocked: '被阻止', partial: '部分完成', unverified: '未验证', hitl: '待用户确认' }[status] || status
 }
 
 function barHeight(count) {
@@ -1875,35 +1873,6 @@ function dayTipLines(row) {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-
-/* ---- 标准化工具注册表（防穿格：固定列宽 + 换行 + chip） ---- */
-.registry-scroll { overflow-x: auto; }
-.registry-table { table-layout: fixed; min-width: 1140px; }
-.registry-table th, .registry-table td {
-  white-space: normal;
-  word-break: break-word;
-  vertical-align: top;
-  line-height: 1.5;
-}
-.registry-table th { white-space: nowrap; }
-.reg-name { font-weight: 600; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; }
-.reg-tags { display: flex; flex-wrap: wrap; gap: 4px; }
-.reg-chip {
-  display: inline-block; font-style: normal; font-size: 10.5px; font-weight: 600;
-  background: #f0ece6; color: var(--color-text-secondary);
-  border-radius: 5px; padding: 1px 7px; line-height: 1.6; white-space: nowrap;
-  max-width: 100%; overflow: hidden; text-overflow: ellipsis;
-}
-.reg-chip.ns { background: #e3edfd; color: #1d4ed8; }
-.reg-chip.perm { background: #efe6fd; color: #7c3aed; }
-.reg-chip.param { background: #fdf0d8; color: #b5822a; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-.reg-chip.more { background: #ede6dc; }
-.reg-empty { font-style: normal; color: var(--color-text-secondary); font-size: 11px; }
-.reg-scene {
-  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
-  font-size: 11.5px; color: var(--color-text-secondary); line-height: 1.5;
-}
-.reg-status { font-size: 11.5px; font-weight: 600; color: #2e7d46; }
 
 /* ---- 指标钻取明细弹窗 ---- */
 .drill-box { width: min(860px, 94vw); }

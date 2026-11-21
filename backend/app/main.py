@@ -40,8 +40,10 @@ from app.api import gateway as gateway_api
 from app.api import gateway_proxy as gateway_proxy_api
 from app.api import me as me_api
 from app.api import instructions as instructions_api
+from app.api import sync as sync_api
 from app.api import skills as skills_api
 from app.api import personal_tools as personal_tools_api
+from app.api import tool_governance as tool_governance_api
 from app.api import capability as capability_api
 from app.services import auth as auth_service
 from app.config import settings
@@ -155,6 +157,12 @@ async def lifespan(app: FastAPI):
         gw_logs.purge_old(int(gw_settings.get_settings().get("log_retention_days") or 30))
     except Exception as e:
         logger.warning("模型网关过期日志清理失败: %s", e)
+    # 资源变更同步：清理超出 24h 补发窗口的变更事件（版本表保留当前水位）
+    try:
+        from app.services import sync_events
+        sync_events.purge_old()
+    except Exception as e:
+        logger.warning("资源变更事件清理失败: %s", e)
     # 模型网关：把系统设置里已配置的网络 OCR/Embedding/ReRank provider 幂等迁入网关上游
     # （「网关唯一来源」：多模态出网配置只存在于网关上游，存量配置不丢失）
     try:
@@ -289,8 +297,10 @@ app.include_router(gateway_api.router)
 app.include_router(gateway_proxy_api.router)
 app.include_router(me_api.router)
 app.include_router(instructions_api.router)
+app.include_router(sync_api.router)
 app.include_router(skills_api.router)
 app.include_router(personal_tools_api.router)
+app.include_router(tool_governance_api.router)
 app.include_router(capability_api.router)
 
 

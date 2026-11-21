@@ -58,6 +58,9 @@ _trace_started: contextvars.ContextVar[float] = contextvars.ContextVar("agent_tr
 _span_seq: contextvars.ContextVar[int] = contextvars.ContextVar("agent_span_seq", default=0)
 _trace_failed: contextvars.ContextVar[bool] = contextvars.ContextVar("agent_trace_failed", default=False)
 _trace_error: contextvars.ContextVar[str] = contextvars.ContextVar("agent_trace_error", default="")
+# 结构化失败归因（过程快照 v2 的 error.code/error.stage；旧调用只传 message 时为空）
+_trace_error_code: contextvars.ContextVar[str] = contextvars.ContextVar("agent_trace_error_code", default="")
+_trace_error_stage: contextvars.ContextVar[str] = contextvars.ContextVar("agent_trace_error_stage", default="")
 # LLM 层上报的真实 usage，由下一次 record_llm 消费
 _pending_usage: contextvars.ContextVar[Optional[tuple]] = contextvars.ContextVar("agent_pending_usage", default=None)
 # 本次请求累积的上下文各段 (segment, text, 估算token)，由 flush_segments 按真实口径落库
@@ -95,13 +98,23 @@ def note_usage(prompt_tokens: int, completion_tokens: int, cached_tokens: int = 
         pass
 
 
-def mark_failed(error: str = "") -> None:
-    """业务流内标记本次 trace 失败（如向前端 yield 了 error 事件但未抛异常）。"""
+def mark_failed(error: str = "", code: str = "", stage: str = "") -> None:
+    """业务流内标记本次 trace 失败（如向前端 yield 了 error 事件但未抛异常）。
+
+    code/stage 为结构化归因（错误码/失败阶段），供过程快照与观测界面定位失败步骤；
+    重复标记时保留首个非空归因（首个失败才是根因，后续阶段多为连带 skipped/blocked）；
+    先前的无 code 标记（如 record_llm(status="error")）允许由后续结构化标记补齐 code/stage。
+    """
     if not _trace_id.get():
         return
+    first = not _trace_failed.get()
     _trace_failed.set(True)
-    if error:
+    if error and (first or not _trace_error.get()):
         _trace_error.set(str(error)[:500])
+    if code and not _trace_error_code.get():
+        _trace_error_code.set(str(code)[:64])
+    if stage and not _trace_error_stage.get():
+        _trace_error_stage.set(str(stage)[:64])
 
 
 # ---------------------------------------------------------------------------
@@ -120,6 +133,8 @@ def start_trace(agent: str, user_id: str = "", input_text: str = "", session_id:
     _span_seq.set(0)
     _trace_failed.set(False)
     _trace_error.set("")
+    _trace_error_code.set("")
+    _trace_error_stage.set("")
     _pending_usage.set(None)
     _pending_segments.set(None)
     try:
@@ -268,6 +283,72 @@ def record_step(name: str, detail: str = "", t0: Optional[float] = None,
         "[AGENT] trace=%s step=%s status=%s latency=%dms %s",
         _trace_id.get() or "-", name or "-", status, latency, (detail or "").replace("\n", " ")[:200],
     )
+
+
+def record_skip(name: str, reason: str = "") -> None:
+    """记录一个被显式跳过的阶段（如实时直调跳过知识检索），不计入 trace 失败。
+
+    过程面板据此展示「跳过 + 原因」，而不是让阶段凭空消失。
+    """
+    _insert_span("step", name, reason or "", "", "skipped", "", 0, 0, 0)
+    logger.info("[AGENT] trace=%s step=%s skipped | %s",
+                _trace_id.get() or "-", name or "-", (reason or "").replace("\n", " ")[:200])
+
+
+# 可重试的失败错误码（过程快照 error.retryable 的判定依据）
+_RETRYABLE_ERROR_CODES = {
+    "request_timeout", "timeout", "rate_limited", "upstream_error",
+    "all_upstreams_failed", "upstream_circuit_open", "tool_execution_failed",
+    "daily_limit_exceeded",
+}
+
+
+def build_process_snapshot(*, intent: Optional[dict] = None, final_message_id: str = "",
+                           run_id: str = "", status: str = "") -> dict:
+    """构建 schema_version=2 的过程快照（随助手消息落库，灰色过程区历史可回看）。
+
+    steps 由本 trace 已落库的 spans 派生（stage/state/耗时/错误），与观测界面同源；
+    error 为结构化失败归因（code/stage/message/retryable），仅在 trace 已标记失败时携带。
+    可观测性不阻断主流程：任何读库失败都降级为空 steps。
+    """
+    tid = _trace_id.get()
+    steps: list = []
+    if tid:
+        try:
+            rows = db.query(
+                "SELECT seq, kind, name, status, error, latency_ms, input FROM agent_spans"
+                " WHERE trace_id=? ORDER BY seq LIMIT 200", (tid,))
+            for r in rows:
+                step = {"step_id": r["seq"], "stage": r["name"] or r["kind"],
+                        "kind": r["kind"], "state": r["status"] or "ok",
+                        "elapsed_ms": int(r["latency_ms"] or 0)}
+                if r["error"]:
+                    step["error"] = r["error"]
+                if r["status"] == "skipped" and r["input"]:
+                    step["detail"] = str(r["input"])[:200]
+                steps.append(step)
+        except Exception as e:
+            logger.warning("过程快照读取 spans 失败（降级为空）: %s", e)
+    snap = {
+        "schema_version": 2,
+        "trace_id": tid,
+        "run_id": run_id or tid,
+        "status": status or ("error" if _trace_failed.get() else "ok"),
+        "steps": steps,
+    }
+    if intent:
+        snap["intent"] = intent
+    if final_message_id:
+        snap["final_message_id"] = final_message_id
+    if _trace_failed.get():
+        code = _trace_error_code.get() or "unknown"
+        snap["error"] = {
+            "code": code,
+            "stage": _trace_error_stage.get() or "",
+            "message": _trace_error.get() or "",
+            "retryable": code in _RETRYABLE_ERROR_CODES,
+        }
+    return snap
 
 
 # ---------------------------------------------------------------------------

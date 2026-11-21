@@ -63,6 +63,52 @@ def evidence_snapshot(sources: list) -> list:
     return result
 
 
+def source_deps(sources: list) -> dict:
+    """来源文档级依赖指纹：被引用文档自身变更/删除/库权限变化才失效。
+
+    document_id 形如 document:<upload_records.id> / wiki:<wiki_pages.id> /
+    path:<image_path>；另快照各来源知识库的可见性与属主（权限收紧即失效）。
+    无法溯源的文档记 None 哨兵，读侧重算不一致即失效（安全优先）。
+    """
+    deps = {}
+    kbs = {}
+    for source in sources or []:
+        did = source.get("document_id") or ""
+        kind, _, ident = did.partition(":")
+        if kind == "document":
+            row = db.query_one("SELECT updated_at FROM upload_records WHERE id=?", (ident,))
+            deps[did] = row["updated_at"] if row else None
+        elif kind == "wiki":
+            row = db.query_one("SELECT updated_at, source_hash FROM wiki_pages WHERE id=?", (ident,))
+            deps[did] = [row["updated_at"], row["source_hash"]] if row else None
+        elif kind == "path":
+            row = db.query_one("SELECT updated_at FROM upload_records WHERE image_path=?", (ident,))
+            deps[did] = row["updated_at"] if row else None
+        else:
+            deps[did or f"unknown:{len(deps)}"] = None
+        kb_id = source.get("kb_id") or ""
+        if kb_id and kb_id not in kbs:
+            row = db.query_one("SELECT visibility, owner_id FROM knowledge_bases WHERE id=?", (kb_id,))
+            kbs[kb_id] = [row["visibility"], row["owner_id"]] if row else None
+    if kbs:
+        deps["_kb"] = kbs
+    return deps
+
+
+def deps_valid(entry_deps: dict, sources: list, user_id: str) -> bool:
+    """读侧重算依赖指纹并与写入快照比对；知识库还须对当前用户可见。"""
+    current = source_deps(sources)
+    if current != entry_deps:
+        return False
+    for kb_id, snap in (entry_deps.get("_kb") or {}).items():
+        if not snap:
+            return False
+        visibility, owner_id = snap
+        if visibility != "public" and owner_id != user_id:
+            return False
+    return True
+
+
 def decide(query: str, *, use_knowledge=False, use_search=False, freshness="unknown",
            has_history=False, has_memory=False, attachments=False, tool_executed=False,
            command="", evidence_sufficient=False, force_refresh=False) -> dict:
@@ -99,7 +145,8 @@ def request_hash(messages: list, model: str) -> str:
 
 def sign_contract(*, user_id: str, query: str, messages: list, model: str,
                   decision: dict, sources: list, revision: dict,
-                  use_knowledge=False, use_search=False, profile_hash: str = "") -> dict:
+                  use_knowledge=False, use_search=False, profile_hash: str = "",
+                  skills_hash: str = "", search_query: str = "") -> dict:
     key = signing_key()
     if not key:
         return {}
@@ -110,6 +157,10 @@ def sign_contract(*, user_id: str, query: str, messages: list, model: str,
         "revisions": revision,
         # 常驻画像摘要：同用户画像稳定时允许复用；画像变更后旧条目不再命中。
         "profile_hash": profile_hash,
+        # 用户 Skills+指令的稳定上下文哈希：内容变更后旧条目不再命中。
+        "skills_hash": skills_hash,
+        # 意图改写后的归一化检索查询：双键匹配的第二个键。
+        "search_query": search_query,
         "context_hash": digest({"history": messages[:-1],
                                 "answer_template": messages[-1]["content"].replace(query, "<current-question>", 1)}),
         "request_hash": request_hash(messages, model), "issued_at": int(time.time()),
@@ -163,6 +214,7 @@ def fingerprint(contract: dict, *, model: str, upstream: dict, rule: dict, body:
         "search": contract["use_search"], "model": model,
         "upstream": upstream, "rule": rule,
         "profile": contract.get("profile_hash", ""),
+        "skills": contract.get("skills_hash", ""),
         "generation": {k: v for k, v in body.items() if k not in ("messages", "stream") and not k.startswith("_gw_")},
     })
 

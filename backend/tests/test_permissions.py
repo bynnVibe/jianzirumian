@@ -1,8 +1,11 @@
 """会话归属与权限依赖测试"""
+import asyncio
+
 import pytest
 from fastapi import HTTPException
 
 from app.api import deps
+from app.core import call_context
 from app.core import db
 from app.services.chat import ChatService
 
@@ -55,15 +58,29 @@ def test_create_session_with_explicit_id_no_ghost(svc):
 
 def test_get_current_user_requires_token():
     with pytest.raises(HTTPException) as exc:
-        deps.get_current_user("")
+        asyncio.run(deps.get_current_user(""))
     assert exc.value.status_code == 401
 
 
 def test_get_current_user_rejects_invalid_token(monkeypatch):
     monkeypatch.setattr(deps.auth_service, "get_session_user", lambda t: None)
     with pytest.raises(HTTPException) as exc:
-        deps.get_current_user("Bearer invalid-token")
+        asyncio.run(deps.get_current_user("Bearer invalid-token"))
     assert exc.value.status_code == 401
+
+
+def test_get_current_user_activates_call_context(monkeypatch):
+    """登录依赖激活请求级调用上下文：API 路径出网调用归属登录用户。"""
+    monkeypatch.setattr(deps.auth_service, "get_session_user",
+                        lambda t: {"id": "u-ctx", "role": "user"})
+
+    async def run():
+        await deps.get_current_user("Bearer some-token")
+        return call_context.current()
+
+    ctx = asyncio.run(run())
+    assert ctx.actor_user_id == "u-ctx"
+    assert ctx.origin == "api"
 
 
 def test_require_admin_rejects_normal_user(monkeypatch):
@@ -72,7 +89,7 @@ def test_require_admin_rejects_normal_user(monkeypatch):
         lambda t: {"id": "u1", "role": "user"},
     )
     with pytest.raises(HTTPException) as exc:
-        deps.require_admin("Bearer some-token")
+        asyncio.run(deps.require_admin("Bearer some-token"))
     assert exc.value.status_code == 403
 
 
@@ -81,7 +98,7 @@ def test_require_admin_allows_admin(monkeypatch):
         deps.auth_service, "get_session_user",
         lambda t: {"id": "u1", "role": "admin"},
     )
-    user = deps.require_admin("Bearer some-token")
+    user = asyncio.run(deps.require_admin("Bearer some-token"))
     assert user["role"] == "admin"
 
 
@@ -95,7 +112,7 @@ def test_require_ops_rejects_normal_user(monkeypatch):
         lambda t: {"id": "u1", "role": "user"},
     )
     with pytest.raises(HTTPException) as exc:
-        deps.require_ops("Bearer some-token")
+        asyncio.run(deps.require_ops("Bearer some-token"))
     assert exc.value.status_code == 403
 
 
@@ -104,7 +121,7 @@ def test_require_ops_allows_ops(monkeypatch):
         deps.auth_service, "get_session_user",
         lambda t: {"id": "u1", "role": "ops"},
     )
-    user = deps.require_ops("Bearer some-token")
+    user = asyncio.run(deps.require_ops("Bearer some-token"))
     assert user["role"] == "ops"
 
 
@@ -113,7 +130,7 @@ def test_require_ops_allows_admin(monkeypatch):
         deps.auth_service, "get_session_user",
         lambda t: {"id": "u1", "role": "admin"},
     )
-    user = deps.require_ops("Bearer some-token")
+    user = asyncio.run(deps.require_ops("Bearer some-token"))
     assert user["role"] == "admin"
 
 
@@ -127,7 +144,7 @@ def test_require_ops_only_rejects_normal_user(monkeypatch):
         lambda t: {"id": "u1", "role": "user"},
     )
     with pytest.raises(HTTPException) as exc:
-        deps.require_ops_only("Bearer some-token")
+        asyncio.run(deps.require_ops_only("Bearer some-token"))
     assert exc.value.status_code == 403
 
 
@@ -137,7 +154,7 @@ def test_require_ops_only_rejects_admin(monkeypatch):
         lambda t: {"id": "u1", "role": "admin"},
     )
     with pytest.raises(HTTPException) as exc:
-        deps.require_ops_only("Bearer some-token")
+        asyncio.run(deps.require_ops_only("Bearer some-token"))
     assert exc.value.status_code == 403
 
 
@@ -146,5 +163,5 @@ def test_require_ops_only_allows_ops(monkeypatch):
         deps.auth_service, "get_session_user",
         lambda t: {"id": "u1", "role": "ops"},
     )
-    user = deps.require_ops_only("Bearer some-token")
+    user = asyncio.run(deps.require_ops_only("Bearer some-token"))
     assert user["role"] == "ops"

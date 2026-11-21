@@ -14,8 +14,8 @@ def key(row, arguments):
 
 
 def permitted(spec):
-    # 海拔响应不含稳定数据集版本，搜索源缺少供应商有效期，暂不启用其结果缓存。
-    return spec["executor"] == "connector" and spec["config"].get("connector") == "weather"
+    # 海拔响应不含稳定数据集版本，搜索源/地理编码缺少供应商有效期，暂不启用其结果缓存。
+    return spec["executor"] == "connector" and spec["config"].get("connector") in ("weather", "weather_forecast")
 
 
 def get(row, spec, arguments):

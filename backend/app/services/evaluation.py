@@ -785,6 +785,10 @@ def start_run(dataset_id: str, user: dict, llm_provider: str = None,
     if not dataset:
         raise ValueError("评测集不存在")
 
+    if (dataset.get("kind") or "rag") == "tool":
+        from app.services import tool_eval
+        return tool_eval.start_tool_run(dataset_id, user.get("id") or user.get("username") or "")
+
     cases = db.query(
         "SELECT * FROM eval_cases WHERE dataset_id = ? ORDER BY created_at, rowid",
         (dataset_id,),

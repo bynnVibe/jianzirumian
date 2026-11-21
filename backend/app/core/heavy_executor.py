@@ -13,6 +13,7 @@
 - 两池隔离后，后台任务再多也只影响自身队列，不侵占交互请求的线程资源。
 """
 import asyncio
+import contextvars
 import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
@@ -52,13 +53,19 @@ def get_heavy_executor() -> ThreadPoolExecutor:
 
 
 async def run_in_heavy_pool(fn: Callable, /, *args, **kwargs):
-    """在重活池执行同步函数（替代后台任务里的 asyncio.to_thread）"""
+    """在重活池执行同步函数（替代后台任务里的 asyncio.to_thread）。
+
+    显式复制调用方 contextvars（run_in_executor 不会自动传播），
+    使后台流水线内的 embedding/OCR/摘要等出网调用继承触发用户的
+    CallContext 归属，不计入系统内部调用。
+    """
     loop = asyncio.get_running_loop()
     if kwargs:
         from functools import partial
 
         fn = partial(fn, **kwargs)
-    return await loop.run_in_executor(get_heavy_executor(), fn, *args)
+    ctx = contextvars.copy_context()
+    return await loop.run_in_executor(get_heavy_executor(), ctx.run, fn, *args)
 
 
 def get_interactive_executor() -> ThreadPoolExecutor:

@@ -136,8 +136,9 @@ def test_token_analysis_forbidden_for_regular_user(mem_db, monkeypatch):
     import httpx
     from app.api import deps
     app = _gw_app()
-    monkeypatch.setattr(deps, "get_current_user",
-                        lambda authorization="": {"id": "u1", "role": "user"})
+    async def _fake_user(authorization=""):
+        return {"id": "u1", "role": "user"}
+    monkeypatch.setattr(deps, "get_current_user", _fake_user)
 
     async def run():
         transport = httpx.ASGITransport(app=app)
@@ -224,8 +225,9 @@ def test_token_requests_forbidden_for_regular_user(mem_db, monkeypatch):
     import httpx
     from app.api import deps
     app = _gw_app()
-    monkeypatch.setattr(deps, "get_current_user",
-                        lambda authorization="": {"id": "u1", "role": "user"})
+    async def _fake_user(authorization=""):
+        return {"id": "u1", "role": "user"}
+    monkeypatch.setattr(deps, "get_current_user", _fake_user)
 
     async def run():
         transport = httpx.ASGITransport(app=app)

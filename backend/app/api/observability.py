@@ -297,14 +297,22 @@ async def get_tool_routing(
 @router.get("/tool-registry")
 async def get_tool_registry(_admin: dict = Depends(require_ops)):
     """标准化工具注册表快照（req1）：命名空间/标签/场景/参数 Schema/权限/风险等级/可用状态，
-    附 function-calling schema 与 Schema Token 估算。"""
+    附 function-calling schema 与 Schema Token 估算。
+    评测通过的个人工具（eval_status='passed'）并入注册表，来源标记 personal_tool。"""
     from app.services.tools import base as tools_base
+    from app.services import personal_tools
 
+    personal = personal_tools.standardized_registry()
+    personal_schemas = [
+        {"type": "function", "function": {"name": p["name"], "description": p["description"],
+                                          "parameters": p["parameters"]}}
+        for p in personal
+    ]
     return {
         "success": True,
-        "tools": tools_base.registry_snapshot(),
-        "function_schemas": tools_base.function_schemas(),
-        "schema_tokens": tools_base.schema_token_estimate(),
+        "tools": tools_base.registry_snapshot() + personal,
+        "function_schemas": tools_base.function_schemas() + personal_schemas,
+        "schema_tokens": tools_base.schema_token_estimate(extra_schemas=personal_schemas),
     }
 
 

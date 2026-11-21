@@ -48,6 +48,11 @@ const routes = [
     component: () => import('@/views/SkillsView.vue'),
     meta: { requiresAuth: true, allowGuest: false },
   },
+  // 旧路径兼容重定向（系统管理与工具治理均已迁移到 /admin 控制台）
+  {
+    path: '/tools',
+    redirect: '/admin/tools',
+  },
   {
     path: '/ingest-detail/:recordId',
     name: 'IngestDetail',
@@ -161,6 +166,13 @@ const routes = [
         component: () => import('@/views/ObservabilityView.vue'),
         meta: { requiresAuth: true, requiresOps: true },
       },
+      {
+        // 工具治理中心：个人工具生命周期工作流／评测／审批，仅管理员与运维可见
+        path: 'tools',
+        name: 'ToolGovernance',
+        component: () => import('@/views/ToolGovernanceView.vue'),
+        meta: { requiresAuth: true, requiresOps: true },
+      },
     ],
   },
   // 旧运维/管理扁平路径兼容重定向
@@ -183,7 +195,7 @@ const router = createRouter({
 // 运维角色（role==='ops'）可访问的路由白名单：
 // CI/CD 流水线 + 模型网关 + 回归评测 + 可观测性 + 认证相关页（登录/注册/忘记密码/指南）
 const OPS_ALLOWED_ROUTES = [
-  'Pipeline', 'Gateway', 'EvalOverview', 'EvalDataset', 'EvalPromptSkill', 'Observability',
+  'Pipeline', 'Gateway', 'EvalOverview', 'EvalDataset', 'EvalPromptSkill', 'Observability', 'ToolGovernance',
   'Login', 'Register', 'ForgotPassword', 'Guide',
 ]
 

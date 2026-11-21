@@ -1816,12 +1816,16 @@ def init_db(conn: sqlite3.Connection):
     migrate_cache(conn)
     from app.core.cache_schema import migrate_profile as migrate_cache_profile
     migrate_cache_profile(conn)
+    from app.core.cache_schema import migrate_v3 as migrate_cache_v3
+    migrate_cache_v3(conn)
     from app.core.skill_schema import migrate as migrate_skills
     migrate_skills(conn)
     from app.core.gateway_tool_schema import migrate as migrate_gateway_tools
     migrate_gateway_tools(conn)
     from app.core.personal_tool_schema import migrate as migrate_personal_tools
     migrate_personal_tools(conn)
+    from app.core.attribution_schema import migrate as migrate_attribution
+    migrate_attribution(conn)
     conn.commit()
 
 

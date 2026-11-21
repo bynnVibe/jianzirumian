@@ -444,7 +444,7 @@
                 max="0.99"
                 step="0.01"
               />
-              <span class="toggle-hint">0.5 ~ 0.99，越低越容易命中（默认 0.90）</span>
+              <span class="toggle-hint">0.5 ~ 0.99，越低越容易命中（默认 0.70）；≥0.95 直放，其余需 LLM 等价验证</span>
             </div>
           </div>
 

@@ -304,7 +304,8 @@ export const useAssistantStore = defineStore('assistant', () => {
   /** 拉取当前用户的历史会话列表（倒序） */
   async function loadSessions() {
     const res = await listAssistantSessions()
-    sessions.value = res?.sessions || []
+    // api 拦截器返回原始 axios response，须解包 .data 才能拿到 sessions
+    sessions.value = res?.data?.sessions || []
     return sessions.value
   }
 
@@ -323,7 +324,7 @@ export const useAssistantStore = defineStore('assistant', () => {
     historyLoading.value = true
     try {
       const res = await getAssistantSessionMessages(id)
-      historyMessages.value = (res?.messages || []).map(_replayMessage)
+      historyMessages.value = (res?.data?.messages || []).map(_replayMessage)
       viewingSessionId.value = id
       isViewingHistory.value = true
       historyDrawerOpen.value = false

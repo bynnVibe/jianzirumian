@@ -163,6 +163,20 @@ export const approvePersonalTool = (id, ownerId, expectedHash, profileHash = '')
   owner_id: ownerId, expected_hash: expectedHash, expected_profile_hash: profileHash, verified_read_only: true,
 })
 
+// 工具治理中心：安装后的监控／评测／审批／配置统一入口（系统管理 /admin/tools 页，仅管理员/运维）
+export const getToolGovernanceOverview = () => api.get('/tool-governance/overview')
+export const getToolGovernanceRegistry = () => api.get('/tool-governance/registry')
+export const getToolMonitoring = (id) => api.get(`/tool-governance/tools/${encodeURIComponent(id)}/monitoring`)
+export const governanceTestTool = (id) => api.post(`/tool-governance/tools/${encodeURIComponent(id)}/test`, {}, { timeout: 130000 })
+export const governanceRunWorkflow = (id) => api.post(`/tool-governance/tools/${encodeURIComponent(id)}/workflow`, {}, { timeout: 150000 })
+export const governanceReevalTool = (id) => api.post(`/tool-governance/tools/${encodeURIComponent(id)}/reeval`, {}, { timeout: 60000 })
+export const governanceConfigureTool = (id, body) => api.patch(`/tool-governance/tools/${encodeURIComponent(id)}`, body)
+export const governanceSetCredential = (id, value) => api.put(`/tool-governance/tools/${encodeURIComponent(id)}/credential`, { value })
+export const governanceApproveTool = (id, ownerId, expectedHash, profileHash = '') => api.post(`/tool-governance/tools/${encodeURIComponent(id)}/approve`, {
+  owner_id: ownerId, expected_hash: expectedHash, expected_profile_hash: profileHash, verified_read_only: true,
+})
+export const governanceCancelExecution = (id) => api.post(`/tool-governance/executions/${encodeURIComponent(id)}/cancel`, {}, { timeout: 40000 })
+
 export function getChatHistory(sessionId) {
   return api.get(`/chat/history/${sessionId}`)
 }
@@ -1323,14 +1337,6 @@ export function getSessionObservability(sessionId, params = {}) {
  */
 export function getSedimentSuggestions(days = 30, threshold = 3) {
   return api.get('/observability/sediment-suggestions', { params: { days, threshold } })
-}
-
-/**
- * 执行能力缺口候选方案（需求5，HITL）：高风险方案需 confirmed=true 二次确认，沙箱运行
- * @param {object} body { gap_id, solution_id, confirmed, url }
- */
-export function executeCapabilityGap(body) {
-  return api.post('/capability-gap/execute', body)
 }
 
 /**

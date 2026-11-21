@@ -11,7 +11,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from app.core import db
-from app.services import personal_tools as tools, personal_tool_specs as specs, tool_http, tool_credentials, tool_result_cache
+from app.services import personal_tools as tools, personal_tool_specs as specs, tool_http, tool_credentials, tool_result_cache, tool_eval
 from app.services.tools import hooks
 from app.services.tools.base import ToolContext
 from app.services.tools.invoke import invoke_tool
@@ -49,15 +49,33 @@ def upstream(monkeypatch):
     return calls
 
 
+async def _drain_eval():
+    while tool_eval._BG_TASKS:
+        await asyncio.gather(*list(tool_eval._BG_TASKS))
+
+
 def install(kind="elevation", owner="u1", accept_terms=True):
-    proposal = tools.propose(owner, specs.connector_spec(kind))
-    accepted = asyncio.run(tools.confirm(owner, proposal["id"], proposal["content_hash"], accept_terms=accept_terms))
+    async def run():
+        proposal = tools.propose(owner, specs.connector_spec(kind))
+        accepted = await tools.confirm(owner, proposal["id"], proposal["content_hash"], accept_terms=accept_terms)
+        await _drain_eval()
+        return accepted, proposal
+    accepted, proposal = asyncio.run(run())
     return tools.get(owner, accepted["tool_id"]), proposal
+
+
+def confirm_and_settle(owner, draft_id, content_hash, **kw):
+    async def run():
+        accepted = await tools.confirm(owner, draft_id, content_hash, **kw)
+        await _drain_eval()
+        return accepted
+    return asyncio.run(run())
 
 
 def http_spec():
     spec = specs.connector_spec("elevation")
-    spec.update(executor="http", name="只读样例 API", input_schema=specs.object_schema({"n": {"type": "integer"}}),
+    spec.update(executor="http", name="只读样例 API", function_name="read_sample_api",
+                input_schema=specs.object_schema({"n": {"type": "integer"}}),
                 output_schema=specs.object_schema({"value": {"type": "integer"}}),
                 config={"url": "https://example.com/data", "method": "GET", "query": {"n": {"input": "n"}},
                         "output_map": {"value": "/result/value"}, "read_only_evidence": "文档说明此端点仅查询，无外部写入"},
@@ -68,16 +86,24 @@ def http_spec():
 def test_confirm_real_shape_owner_version_idempotence(upstream, isolated):
     tool, proposal = install()
     assert tool["status"] == "ready" and tool["enabled"]
-    assert len(upstream) == 1
+    # 样例测试 1 次 + 通过后自动评测再真实调用 1 次
+    assert len(upstream) == 2
     assert tools.catalog("u1")[0]["function"]["name"] == tool["function_name"]
-    assert tools.catalog("u2") == []
+    # 默认全员可调用：u2 可见并可真实调用 u1 的工具（管理侧仍属主隔离）
+    assert tools.catalog("u2")[0]["function"]["name"] == tool["function_name"]
     assert len(tool["function_name"]) <= 64
     asyncio.run(tools.confirm("u1", proposal["id"], proposal["content_hash"], accept_terms=True))
-    assert len(upstream) == 1
+    assert len(upstream) == 2
     with pytest.raises(HTTPException):
         tools.get("u2", tool["id"])
     outcome = asyncio.run(invoke_tool(tool["function_name"], ToolContext("u2", "", "", ""), {"latitude": 1, "longitude": 2}))
-    assert not outcome.success and len(upstream) == 1
+    assert outcome.success and len(upstream) == 3
+    # 按工具用户黑名单：拉黑 u2 后目录与执行门禁同时拒绝，不影响其他用户
+    tools.configure("u1", tool["id"], blocked_users=["u2"])
+    assert tools.catalog("u2") == [] and tools.catalog("u1")
+    outcome = asyncio.run(invoke_tool(tool["function_name"], ToolContext("u2", "", "", ""), {"latitude": 1, "longitude": 2}))
+    assert not outcome.success and len(upstream) == 3
+    tools.configure("u1", tool["id"], blocked_users=[])
     outcome = asyncio.run(invoke_tool(tool["function_name"], ToolContext("u1", "", "", ""), {"latitude": True, "longitude": 2}))
     assert not outcome.success
     tools.configure("u1", tool["id"], enabled=False)
@@ -86,6 +112,35 @@ def test_confirm_real_shape_owner_version_idempotence(upstream, isolated):
     assert tools.catalog("u1")
     db.init_db(isolated)
     assert len(tools.listing("u1")) == 1
+
+
+def test_function_name_functional_unique_and_stable(upstream, isolated):
+    tool, _ = install()
+    # 连接器以功能名注册，不再基于随机码
+    assert tool["function_name"] == "get_elevation"
+    other, _ = install(owner="u2")
+    assert other["function_name"] == "get_elevation_2"
+    assert {t["function"]["name"] for t in tools.catalog("u1")} == {"get_elevation", "get_elevation_2"}
+    # 功能名跨版本稳定：同工具升级新版本不改名
+    spec = specs.connector_spec("elevation")
+    spec["limitations"] += "；第二版本"
+    proposal = tools.propose("u1", spec, tool_id=tool["id"])
+    accepted = confirm_and_settle("u1", proposal["id"], proposal["content_hash"], accept_terms=True)
+    assert tools.get("u1", accepted["tool_id"])["function_name"] == "get_elevation"
+    # resolve 按功能名反查；非法/不存在名称拒绝
+    assert tools.resolve("u1", "get_elevation") is not None
+    assert tools.resolve("u1", "Get_Elevation") is None
+    assert tools.resolve("u1", "no_such_tool") is None
+
+
+def test_declaration_rejects_missing_or_random_function_name():
+    spec = http_spec()
+    del spec["function_name"]
+    with pytest.raises(ValueError):
+        tools.propose("u1", spec)
+    spec["function_name"] = "pt_" + "a" * 32 + "_" + "b" * 16
+    with pytest.raises(ValueError):
+        tools.propose("u1", spec)
 
 
 def test_terms_missing_or_invalid_response_never_ready(upstream, monkeypatch):
@@ -217,20 +272,32 @@ def test_cancellation_persists_terminal_and_recovery(upstream, monkeypatch):
     assert tools.get("u1", tool["id"])["status"] == "needs_config"
 
 
-def test_api_owner_and_admin_guard(upstream):
+def test_api_owner_and_admin_guard(upstream, monkeypatch):
     from app.api import personal_tools as api
-    from app.api.deps import get_current_user
+    from app.api import deps
     app = FastAPI()
     app.include_router(api.router)
-    app.dependency_overrides[get_current_user] = lambda: {"id": "u1", "role": "user"}
+    original = deps.get_current_user
+    admin = {"id": "u1", "role": "admin"}
+    app.dependency_overrides[original] = lambda: admin
+    async def _fake_admin(authorization=""):
+        return admin
+    monkeypatch.setattr(deps, "get_current_user", _fake_admin)
     with TestClient(app) as client:
         proposal = client.post("/api/personal-tools/drafts", json={"spec": specs.connector_spec("elevation")}).json()
         accepted = client.post(f"/api/personal-tools/drafts/{proposal['id']}/confirm", json={"expected_hash": proposal["content_hash"], "accept_terms": True})
         assert accepted.status_code == 200
         tid = accepted.json()["tool_id"]
         assert client.get(f"/api/personal-tools/{tid}").json()["status"] == "ready"
-        assert client.get("/api/personal-tools/reviews").status_code == 401
-        app.dependency_overrides[get_current_user] = lambda: {"id": "u2", "role": "user"}
+        assert client.get("/api/personal-tools/reviews").status_code == 200
+        # 普通用户：直接提交/确认独立工具草稿被拒（@tool 仅管理员），属主隔离不变
+        regular = {"id": "u2", "role": "user"}
+        app.dependency_overrides[original] = lambda: regular
+        async def _fake_regular(authorization=""):
+            return regular
+        monkeypatch.setattr(deps, "get_current_user", _fake_regular)
+        assert client.post("/api/personal-tools/drafts", json={"spec": specs.connector_spec("elevation")}).status_code == 403
+        assert client.get("/api/personal-tools/reviews").status_code == 403
         assert client.get(f"/api/personal-tools/{tid}").status_code == 404
         assert client.get("/api/personal-tools").json()["tools"] == []
 
@@ -255,13 +322,14 @@ def test_provenance_timestamp_does_not_change_version_but_confirmation_binds_it(
     spec = specs.connector_spec("elevation")
     spec["provenance"] = [{"url": spec["sources"][0], "content_hash": "a" * 64, "fetched_at": "2026-01-01T00:00:00Z"}]
     first = tools.propose("u1", spec)
-    installed = asyncio.run(tools.confirm("u1", first["id"], first["content_hash"], accept_terms=True))
+    installed = confirm_and_settle("u1", first["id"], first["content_hash"], accept_terms=True)
     spec["provenance"][0]["fetched_at"] = "2026-01-02T00:00:00Z"
     second = tools.propose("u1", spec)
     assert first["content_hash"] != second["content_hash"]
     assert first["review"]["version"] == second["review"]["version"]
     duplicate = asyncio.run(tools.confirm("u1", second["id"], second["content_hash"], accept_terms=True))
-    assert installed["tool_id"] == duplicate["tool_id"] and len(upstream) == 1
+    # 重复版本确认幂等：不再测试/评测，上游调用保持 样例测试1次+自动评测1次
+    assert installed["tool_id"] == duplicate["tool_id"] and len(upstream) == 2
     spec["provenance"][0]["content_hash"] = "b" * 64
     assert specs.review(spec)["version"] != first["review"]["version"]
 
@@ -294,7 +362,7 @@ def test_installed_draft_includes_real_state(upstream):
     tools.configure("u1", tool["id"], enabled=False)
     repeated = asyncio.run(tools.confirm("u1", proposal["id"], proposal["content_hash"]))
     assert repeated["tool"]["status"] == "disabled"
-    assert len(upstream) == 1
+    assert len(upstream) == 2
 
 
 def test_drafts_restore_original_turn_and_expire_when_cleared(monkeypatch):

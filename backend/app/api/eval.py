@@ -81,6 +81,13 @@ async def refresh_builtin(_admin: dict = Depends(require_ops)):
 # ---------------------------------------------------------------------------
 # 评测集
 # ---------------------------------------------------------------------------
+def _guard_tool_dataset(dataset_id: str):
+    """工具评测集由工具版本声明自动派生，禁止手动增删改（复跑评测不受影响）。"""
+    row = db.query_one("SELECT kind FROM eval_datasets WHERE id = ?", (dataset_id,))
+    if row and (row.get("kind") or "rag") == "tool":
+        raise HTTPException(status_code=409, detail="工具评测集由工具版本声明自动派生，不支持手动修改")
+
+
 @router.get("/datasets")
 async def list_datasets(_admin: dict = Depends(require_ops)):
     """评测集列表（含用例数与最近一次运行状态）"""
@@ -125,6 +132,7 @@ async def delete_dataset(dataset_id: str, _admin: dict = Depends(require_ops)):
     row = db.query_one("SELECT id FROM eval_datasets WHERE id = ?", (dataset_id,))
     if not row:
         raise HTTPException(status_code=404, detail="评测集不存在")
+    _guard_tool_dataset(dataset_id)
     run_ids = [r["id"] for r in db.query(
         "SELECT id FROM eval_runs WHERE dataset_id = ?", (dataset_id,)
     )]
@@ -169,6 +177,7 @@ async def create_case(dataset_id: str, body: CaseCreate, _admin: dict = Depends(
     """新增单条用例"""
     if not db.query_one("SELECT id FROM eval_datasets WHERE id = ?", (dataset_id,)):
         raise HTTPException(status_code=404, detail="评测集不存在")
+    _guard_tool_dataset(dataset_id)
     question = body.question.strip()
     if not question:
         raise HTTPException(status_code=400, detail="用例问题不能为空")
@@ -192,8 +201,10 @@ async def create_case(dataset_id: str, body: CaseCreate, _admin: dict = Depends(
 @router.delete("/cases/{case_id}")
 async def delete_case(case_id: str, _admin: dict = Depends(require_ops)):
     """删除单条用例"""
-    if not db.query_one("SELECT id FROM eval_cases WHERE id = ?", (case_id,)):
+    row = db.query_one("SELECT dataset_id FROM eval_cases WHERE id = ?", (case_id,))
+    if not row:
         raise HTTPException(status_code=404, detail="用例不存在")
+    _guard_tool_dataset(row["dataset_id"])
     db.execute("DELETE FROM eval_cases WHERE id = ?", (case_id,))
     return {"success": True, "message": "用例已删除"}
 
@@ -203,6 +214,7 @@ async def import_cases(dataset_id: str, body: CaseImport, _admin: dict = Depends
     """JSON 批量导入用例"""
     if not db.query_one("SELECT id FROM eval_datasets WHERE id = ?", (dataset_id,)):
         raise HTTPException(status_code=404, detail="评测集不存在")
+    _guard_tool_dataset(dataset_id)
     if not body.cases:
         raise HTTPException(status_code=400, detail="导入内容为空")
 
@@ -237,6 +249,7 @@ async def import_cases_from_feedback(dataset_id: str, _admin: dict = Depends(req
     """
     if not db.query_one("SELECT id FROM eval_datasets WHERE id = ?", (dataset_id,)):
         raise HTTPException(status_code=404, detail="评测集不存在")
+    _guard_tool_dataset(dataset_id)
 
     # 已存在问题（去重基准）
     existing = {

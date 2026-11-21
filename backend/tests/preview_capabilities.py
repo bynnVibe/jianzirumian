@@ -206,7 +206,7 @@ def check(application):
     assert accepted.status_code == 200, accepted.text
     proposal = accepted.json()["draft"]
     assert proposal["status"] == "pending"
-    for query in ("@skills 分点总结", "@tool 隔离计算", "普通回答"):
+    for query in ("@skills 分点总结", "普通回答"):
         response = client.post("/api/chat/send", json={"query": query, "use_knowledge": True, "use_search": False})
         assert response.status_code == 200, response.text
         events = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")]
@@ -214,8 +214,18 @@ def check(application):
         assert not any(e["event"] == "error" for e in events), response.text
         if query.startswith("@"):
             assert any(e["event"] in ("skill_draft", "tool_draft") for e in events), response.text
+    # @tool 仅管理员可用：普通用户 403，管理员正常生成工具草稿
+    denied = client.post("/api/chat/send", json={"query": "@tool 隔离计算", "use_knowledge": True, "use_search": False})
+    assert denied.status_code == 403, denied.text
+    admin_login = client.post("/api/auth/login", json={"username": "preview-admin", "password": "Preview-only-2026!"})
+    assert admin_login.status_code == 200, admin_login.text
+    client.headers["Authorization"] = "Bearer " + admin_login.json()["token"]
+    response = client.post("/api/chat/send", json={"query": "@tool 隔离计算", "use_knowledge": True, "use_search": False})
+    assert response.status_code == 200, response.text
+    events = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")]
+    assert any(e["event"] == "tool_draft" for e in events), response.text
     assert client.get("/skills").status_code == 200
-    print("隔离预览冒烟通过：真实登录、个人建议、接受草稿、命令与普通 SSE。", flush=True)
+    print("隔离预览冒烟通过：真实登录、个人建议、接受草稿、@tool 管理员专属与普通 SSE。", flush=True)
 
 
 if __name__ == "__main__":

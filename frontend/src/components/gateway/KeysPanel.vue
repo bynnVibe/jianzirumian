@@ -207,6 +207,7 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted } from 'vue'
+import { useQueryCacheStore } from '@/stores/queryCache'
 import {
   listGatewayKeys, createGatewayKey, updateGatewayKey,
   deleteGatewayKey, resetGatewayKey,
@@ -251,13 +252,25 @@ function formatTime(iso) {
   return `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
 
-async function load() {
+const queryCache = useQueryCacheStore()
+
+function applyKeys(data) {
+  keys.value = data.keys || []
+  models.value = data.models || []
+  if (data.meta) internalMeta.value = data.meta
+}
+
+// 列表经统一查询缓存（仅内存层，不落持久缓存）；写操作后 force 重拉
+async function load(force = 0) {
   loading.value = true
   try {
-    const [res, iRes] = await Promise.all([listGatewayKeys(), getGatewayInternalKey().catch(() => null)])
-    keys.value = res.data.keys || []
-    models.value = res.data.models || []
-    if (iRes) internalMeta.value = iRes.data.meta || internalMeta.value
+    const data = await queryCache.cachedGet('gateway', { kind: 'keys' },
+      async () => {
+        const [res, iRes] = await Promise.all([listGatewayKeys(), getGatewayInternalKey().catch(() => null)])
+        return { keys: res.data.keys || [], models: res.data.models || [], meta: iRes?.data?.meta || null }
+      },
+      { force: !!force, onRevalidate: applyKeys })
+    applyKeys(data)
   } catch (e) {
     errorMsg.value = e.response?.data?.detail || '加载密钥失败'
   } finally {
@@ -267,8 +280,10 @@ async function load() {
 
 async function loadUsers() {
   try {
-    const res = await listUsers()
-    users.value = res.data.users || res.data || []
+    const data = await queryCache.cachedGet('users', { kind: 'list' },
+      async () => (await listUsers()).data,
+      { onRevalidate: (d) => { users.value = d.users || d || [] } })
+    users.value = data.users || data || []
   } catch (e) {
     // 用户列表加载失败不阻断密钥管理（绑定下拉为空时给出提示）
   }
@@ -282,7 +297,7 @@ async function onRotateInternal() {
     const res = await rotateGatewayInternalKey()
     newPlainKey.value = res.data.key?.key || ''
     copied.value = false
-    await load()
+    await load(1)
   } catch (e) {
     errorMsg.value = e.response?.data?.detail || '轮换失败'
   } finally {
@@ -340,7 +355,7 @@ async function onSave() {
       copied.value = false
     }
     showModal.value = false
-    await load()
+    await load(1)
   } catch (e) {
     formError.value = e.response?.data?.detail || '保存失败'
   } finally {
@@ -354,16 +369,16 @@ async function copyKey() {
 }
 async function onReset(k) {
   if (!confirm(`确认重置「${k.name}」的 Token 与请求用量？`)) return
-  try { await resetGatewayKey(k.id); await load() }
+  try { await resetGatewayKey(k.id); await load(1) }
   catch (e) { errorMsg.value = e.response?.data?.detail || '重置失败' }
 }
 async function onToggle(k) {
-  try { await updateGatewayKey(k.id, { enabled: !k.enabled }); await load() }
+  try { await updateGatewayKey(k.id, { enabled: !k.enabled }); await load(1) }
   catch (e) { errorMsg.value = e.response?.data?.detail || '操作失败' }
 }
 async function onDelete(k) {
   if (!confirm(`确认删除密钥「${k.name}」？删除后该密钥立即失效。`)) return
-  try { await deleteGatewayKey(k.id); await load() }
+  try { await deleteGatewayKey(k.id); await load(1) }
   catch (e) { errorMsg.value = e.response?.data?.detail || '删除失败' }
 }
 

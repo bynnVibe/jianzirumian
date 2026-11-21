@@ -37,7 +37,7 @@
     <!-- 配置与管理的入口 -->
     <div class="actions config-actions">
       <!-- 知识库（整合 管理/收藏/百科 三入口，进入知识库控制台；运维角色不可见） -->
-      <router-link v-if="!auth.isOps" to="/kb" class="btn-upload" :class="{ active: isKnowledgeHub }" @click="handleNavClick">
+      <router-link v-if="!auth.isOps" to="/kb" class="btn-upload" :class="{ active: isKnowledgeHub }" @click="handleNavClick" @mouseenter="preloadPath('/kb')">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="btn-icon">
           <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
         </svg>
@@ -45,14 +45,16 @@
       </router-link>
 
       <!-- Skill 配置：管理自己的技能并决定是否应用（运维角色不可见） -->
-      <router-link v-if="auth.isAuthenticated && !auth.isOps" to="/skills" class="btn-upload" :class="{ active: route.name === 'Skills' }" @click="handleNavClick">
+      <router-link v-if="auth.isAuthenticated && !auth.isOps" to="/skills" class="btn-upload" :class="{ active: route.name === 'Skills' }" @click="handleNavClick" @mouseenter="preloadPath('/skills')">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="btn-icon">
           <path d="M13 2L4.5 12.5H11L10 22l8.5-10.5H12L13 2z"/>
         </svg>
         Skill 配置
       </router-link>
 
-      <router-link v-if="auth.isAuthenticated && !auth.canOps" to="/observability" class="btn-upload" :class="{ active: route.name === 'MyObservability' }" @click="handleNavClick">
+      <!-- 工具治理已迁入系统管理控制台（/admin/tools，仅管理员/运维可见） -->
+
+      <router-link v-if="auth.isAuthenticated && !auth.canOps" to="/observability" class="btn-upload" :class="{ active: route.name === 'MyObservability' }" @click="handleNavClick" @mouseenter="preloadPath('/observability')">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="btn-icon">
           <path d="M3 3v18h18"/><path d="M7 14l4-4 4 3 6-8"/>
         </svg>
@@ -66,6 +68,7 @@
         class="btn-upload"
         :class="{ active: isAdminConsole }"
         @click="handleNavClick"
+        @mouseenter="preloadPath('/admin/gateway'); preloadPath('/admin/observability')"
       >
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="btn-icon">
           <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
@@ -405,7 +408,7 @@
         <div class="cache-head">
           <div class="cache-head-text">
             <h3 class="modal-title">语义缓存（网关层）</h3>
-            <p class="cache-desc">仅个人域复用已验证的静态答案，硬期限最多 24 小时，命中不续期。知识问答每次仍检索并核对权限与证据；纯模型问答仅精确匹配。联网、动态问题、工具任务和强制刷新不复用最终答案。开关已统一到系统设置，开启后对所有用户生效。</p>
+            <p class="cache-desc">仅个人域复用已验证的静态答案，硬期限最多 24 小时，命中不续期。意图改写后先探针缓存：命中复用答案与来源、跳过检索与生成；未命中走正常检索并核对权限与证据。相似度分层判定：≥0.95 直放，其余需 LLM 等价验证；仅被引用文档变更时失效。纯模型问答仅精确匹配。联网、动态问题、工具任务和强制刷新不复用最终答案。开关已统一到系统设置，开启后对所有用户生效。</p>
           </div>
           <div class="sc-global-status">
             <span class="sc-status-chip" :class="cacheStats.enabled ? 'on' : 'off'">{{ cacheStats.enabled ? '全局开启' : '已关闭' }}</span>
@@ -590,6 +593,7 @@ import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useChatStore } from '@/stores/chat'
 import { useAuthStore } from '@/stores/auth'
+import { preloadPath } from '@/utils/routePreload'
 import { healthCheck, updateProfile, getMyUsageStats, compactSession, listMyMemories, createMyMemory, updateMyMemory, deleteMyMemory, getModuleRecall, getSemanticCache, clearSemanticCache, deleteSemanticCacheEntry, getMyInstructions, saveMyInstructions, listMyAgentMemories, createMyAgentMemory, updateMyAgentMemory, deleteMyAgentMemory, getSessionNote, updateSessionNote } from '@/api'
 
 const props = defineProps({

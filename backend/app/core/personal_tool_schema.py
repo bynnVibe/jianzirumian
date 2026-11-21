@@ -15,6 +15,66 @@ def migrate(conn):
         conn.execute("UPDATE personal_tool_drafts SET parent_skill_draft_id=COALESCE((SELECT l.draft_id FROM skill_tool_links l "
                      "WHERE l.owner_id=personal_tool_drafts.owner_id AND l.tool_draft_id=personal_tool_drafts.id LIMIT 1),'')")
         conn.execute("INSERT INTO schema_migrations VALUES (?,?)", (version, datetime.now(timezone.utc).isoformat()))
+    version = "tool_eval_v1"
+    if not conn.execute("SELECT 1 FROM schema_migrations WHERE version=?", (version,)).fetchone():
+        # 工具标准化评测：样例测试通过后自动构建 kind='tool' 评测集并运行，
+        # 全部用例通过（eval_status='passed'）才进入标准化工具注册表。
+        for col in ("eval_status", "eval_dataset_id", "eval_run_id"):
+            conn.execute(f"ALTER TABLE personal_tools ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
+        conn.execute("INSERT INTO schema_migrations VALUES (?,?)", (version, datetime.now(timezone.utc).isoformat()))
+    version = "personal_tool_sharing_v1"
+    if not conn.execute("SELECT 1 FROM schema_migrations WHERE version=?", (version,)).fetchone():
+        # 工具默认全员可调用：blocked_users 为按工具的用户黑名单（JSON 数组）；
+        # 执行记录保留属主 owner_id，另记实际调用者 caller_id 供审计与取消授权。
+        conn.execute("ALTER TABLE personal_tools ADD COLUMN blocked_users TEXT NOT NULL DEFAULT '[]'")
+        conn.execute("ALTER TABLE personal_tool_executions ADD COLUMN caller_id TEXT NOT NULL DEFAULT ''")
+        conn.execute("UPDATE personal_tool_executions SET caller_id=owner_id WHERE caller_id=''")
+        conn.execute("INSERT INTO schema_migrations VALUES (?,?)", (version, datetime.now(timezone.utc).isoformat()))
+    version = "personal_tool_naming_v1"
+    if not conn.execute("SELECT 1 FROM schema_migrations WHERE version=?", (version,)).fetchone():
+        # 功能名以功能命名为主：去掉版本表 function_name 的 UNIQUE（改为应用层当前版本唯一，
+        # 功能名跨版本稳定），并把历史 pt_ 随机码名迁移为功能名（连接器内置功能名/声明标识/执行器兜底）。
+        ddl = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='personal_tool_versions'").fetchone()
+        if ddl and "UNIQUE" in ddl[0]:
+            conn.execute("ALTER TABLE personal_tool_versions RENAME TO personal_tool_versions_old")
+            conn.execute("""CREATE TABLE personal_tool_versions (
+                tool_id TEXT NOT NULL, owner_id TEXT NOT NULL, version TEXT NOT NULL,
+                function_name TEXT NOT NULL, spec_json TEXT NOT NULL, review_json TEXT NOT NULL,
+                approved_by TEXT NOT NULL DEFAULT '', approved_at TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL, PRIMARY KEY(owner_id,tool_id,version),
+                FOREIGN KEY(owner_id,tool_id) REFERENCES personal_tools(owner_id,id) ON DELETE CASCADE)""")
+            conn.execute("INSERT INTO personal_tool_versions SELECT * FROM personal_tool_versions_old")
+            conn.execute("DROP TABLE personal_tool_versions_old")
+        import json
+        from app.services import personal_tool_specs as specs
+        from app.services.tools import base as tools_base
+        if not tools_base.all_tools():
+            try:
+                from app.services.tools import bootstrap_registry
+                bootstrap_registry()
+            except Exception:
+                pass
+        used = {t["name"] for t in tools_base.registry_snapshot()}
+        rows = conn.execute("SELECT t.id, v.spec_json, v.function_name FROM personal_tools t "
+                            "JOIN personal_tool_versions v ON v.owner_id=t.owner_id AND v.tool_id=t.id "
+                            "AND v.version=t.current_version ORDER BY t.created_at").fetchall()
+        for r in rows:
+            old = r["function_name"]
+            if not specs.LEGACY_FUNCTION_NAME_RE.fullmatch(old):
+                used.add(old)
+                continue
+            try:
+                spec = json.loads(r["spec_json"])
+            except ValueError:
+                spec = {}
+            base = specs.derive_function_name(spec) or ("http_api_reader" if spec.get("executor") == "http" else "python_compute")
+            name, suffix = base[:60], 1
+            while name in used:
+                suffix += 1
+                name = f"{base[:56]}_{suffix}"
+            used.add(name)
+            conn.execute("UPDATE personal_tool_versions SET function_name=? WHERE tool_id=?", (name, r["id"]))
+        conn.execute("INSERT INTO schema_migrations VALUES (?,?)", (version, datetime.now(timezone.utc).isoformat()))
 
 
 def migrate_tools(conn):
@@ -30,7 +90,7 @@ def migrate_tools(conn):
         "CREATE INDEX idx_personal_tools_owner ON personal_tools(owner_id,status)",
         """CREATE TABLE personal_tool_versions (
             tool_id TEXT NOT NULL, owner_id TEXT NOT NULL, version TEXT NOT NULL,
-            function_name TEXT NOT NULL UNIQUE, spec_json TEXT NOT NULL, review_json TEXT NOT NULL,
+            function_name TEXT NOT NULL, spec_json TEXT NOT NULL, review_json TEXT NOT NULL,
             approved_by TEXT NOT NULL DEFAULT '', approved_at TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL, PRIMARY KEY(owner_id,tool_id,version),
             FOREIGN KEY(owner_id,tool_id) REFERENCES personal_tools(owner_id,id) ON DELETE CASCADE)""",

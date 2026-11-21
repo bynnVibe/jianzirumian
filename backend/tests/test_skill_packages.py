@@ -333,8 +333,15 @@ def dependency_tool(monkeypatch):
         return {"elevation": [12.5]}, 100
     monkeypatch.setattr(tool_http, "request_json", response)
     def create(owner="u1", terms=True):
-        d = tools.propose(owner, specs.connector_spec("elevation"))
-        installed = asyncio.run(tools.confirm(owner, d["id"], d["content_hash"], accept_terms=terms))
+        from app.services import tool_eval
+        async def run():
+            d = tools.propose(owner, specs.connector_spec("elevation"))
+            installed = await tools.confirm(owner, d["id"], d["content_hash"], accept_terms=terms)
+            # 注册门禁：依赖工具须评测通过才 ready，等待后台评测结束
+            while tool_eval._BG_TASKS:
+                await asyncio.gather(*list(tool_eval._BG_TASKS))
+            return installed
+        installed = asyncio.run(run())
         return tools.get(owner, installed["tool_id"])
     return create
 
@@ -408,7 +415,12 @@ def test_dependency_needs_config_then_recheck_and_unbind(dependency_tool):
     installed = confirm_bound(selected)
     assert installed["review"]["status"] == "needs_config"
     tools.configure("u1", tool["id"], accept_terms=True)
-    asyncio.run(tools.test("u1", tool["id"]))
+    async def retest():
+        from app.services import tool_eval
+        await tools.test("u1", tool["id"])
+        while tool_eval._BG_TASKS:
+            await asyncio.gather(*list(tool_eval._BG_TASKS))
+    asyncio.run(retest())
     assert not skill_runtime.catalog("u1")  # 工具通过不自动启用 Skill。
     installed = confirm_bound(drafts.get_draft(selected["id"], "u1"))
     assert installed["review"]["status"] == "ready"

@@ -159,6 +159,46 @@
             </div>
           </div>
 
+          <div class="dash-cols">
+            <!-- 调用归属分布：用户业务/真实系统/公共游客/历史未归属 -->
+            <div class="card">
+              <h3 class="card-title">调用归属分布</h3>
+              <table v-if="stats.by_attribution?.length" class="mini-table">
+                <thead>
+                  <tr><th>归属</th><th class="num">调用</th><th class="num">Token</th><th class="num">占比</th></tr>
+                </thead>
+                <tbody>
+                  <tr v-for="a in attrRows" :key="a.category">
+                    <td><span class="attr-tag" :class="`attr-${a.category}`">{{ attrLabel(a.category) }}</span></td>
+                    <td class="num">{{ a.total }}</td>
+                    <td class="num">{{ formatNum(a.tokens) }}</td>
+                    <td class="num">{{ attrPct(a.tokens) }}%</td>
+                  </tr>
+                </tbody>
+              </table>
+              <div v-else class="mini-empty">暂无数据</div>
+              <p class="attr-note">用户业务=归属到绑定密钥的发起用户；真实系统=内部密钥；公共游客=公共密钥无用户；历史未归属=存量无证据日志。</p>
+            </div>
+
+            <!-- Top 用户用量 -->
+            <div class="card">
+              <h3 class="card-title">Top 用户用量</h3>
+              <table v-if="stats.by_user?.length" class="mini-table">
+                <thead>
+                  <tr><th>用户</th><th class="num">调用</th><th class="num">Token</th></tr>
+                </thead>
+                <tbody>
+                  <tr v-for="u in stats.by_user" :key="u.user_id">
+                    <td>{{ u.username || u.user_id.slice(0, 12) }}</td>
+                    <td class="num">{{ u.total }}</td>
+                    <td class="num">{{ formatNum(u.tokens) }}</td>
+                  </tr>
+                </tbody>
+              </table>
+              <div v-else class="mini-empty">暂无归属到用户的调用</div>
+            </div>
+          </div>
+
           <!-- 最近风险日志 -->
           <div class="card">
             <div class="card-head">
@@ -221,9 +261,10 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, provide } from 'vue'
+import { ref, reactive, computed, onMounted, onActivated, watch, provide } from 'vue'
 import { useRoute } from 'vue-router'
 import { getGatewayOverview, getGatewayStats } from '@/api'
+import { useQueryCacheStore, TTL_MONITOR } from '@/stores/queryCache'
 import { useUnsavedLeaveGuard } from '@/composables/useUnsavedLeaveGuard'
 import UpstreamsPanel from '@/components/gateway/UpstreamsPanel.vue'
 import RulesPanel from '@/components/gateway/RulesPanel.vue'
@@ -244,6 +285,7 @@ const tabs = [
   { key: 'security', label: '安全审计中心' },
 ]
 const route = useRoute()
+const queryCache = useQueryCacheStore()
 const activeTab = ref('dashboard')
 const dashLoading = ref(true)
 
@@ -285,12 +327,24 @@ async function switchTab(key) {
 }
 const statDays = ref(7)
 const overview = reactive({ upstream_health: {}, recent_risks: [] })
-const stats = reactive({ overview: {}, daily: [], by_channel: [], by_model: [], by_risk: [], top_keys: [] })
+const stats = reactive({ overview: {}, daily: [], by_channel: [], by_model: [], by_risk: [], top_keys: [], by_attribution: [], by_user: [] })
 
 const RISK_LABELS = { none: '无风险', low: '低', medium: '中', high: '高', critical: '严重' }
 const AUDIT_LABELS = { warn: '警告', mask: '已脱敏', block: '已阻断', '': '审计' }
+const ATTR_LABELS = { user: '用户业务', system: '真实系统', public: '公共游客', unattributed: '历史未归属' }
+const ATTR_ORDER = ['user', 'system', 'public', 'unattributed']
 function riskLabel(l) { return RISK_LABELS[l] || l }
 function auditLabel(a) { return AUDIT_LABELS[a] || a }
+function attrLabel(a) { return ATTR_LABELS[a] || a }
+// 四分类固定顺序呈现（含零值类别），占比按 Token 口径
+const attrRows = computed(() => {
+  const map = Object.fromEntries((stats.by_attribution || []).map((r) => [r.category, r]))
+  return ATTR_ORDER.map((c) => map[c] || { category: c, total: 0, tokens: 0 })
+})
+function attrPct(tokens) {
+  const sum = (stats.by_attribution || []).reduce((s, r) => s + (r.tokens || 0), 0)
+  return sum ? Math.round(((tokens || 0) / sum) * 100) : 0
+}
 function formatNum(n) { return (n || 0).toLocaleString('en-US') }
 function formatTime(iso) {
   if (!iso) return '-'
@@ -307,28 +361,53 @@ function riskPct(v) { return Math.round(((v || 0) / maxRisk()) * 100) }
 
 async function loadOverview() {
   try {
-    const res = await getGatewayOverview()
-    Object.assign(overview, res.data)
+    const data = await queryCache.cachedGet('gateway', { kind: 'overview' },
+      async () => (await getGatewayOverview()).data,
+      { ttl: TTL_MONITOR, onRevalidate: (d) => Object.assign(overview, d) })
+    Object.assign(overview, data)
   } catch (e) {
     console.error('加载网关总览失败', e)
   }
 }
-async function loadStats() {
+async function loadStats(force = 0) {
   try {
-    const res = await getGatewayStats(statDays.value)
-    Object.assign(stats, res.data)
+    const data = await queryCache.cachedGet('usage', { kind: 'gw-stats', days: statDays.value },
+      async () => (await getGatewayStats(statDays.value)).data,
+      { ttl: TTL_MONITOR, force: !!force, onRevalidate: (d) => Object.assign(stats, d) })
+    Object.assign(stats, data)
   } catch (e) {
     console.error('加载网关统计失败', e)
   }
 }
 
-onMounted(async () => {
+// 仪表盘按需加载 + 版本重验：热切换/KeepAlive 回页不重复拉相同 GET，
+// 仅当 gateway/usage/alerts 资源版本落后时才重拉
+let dashLoaded = false
+let dashSig = ''
+function gwVersionSig() {
+  const v = queryCache.versions
+  return `${v.gateway || 0}|${v.usage || 0}|${v.alerts || 0}`
+}
+async function loadDashboard(force = 0) {
+  dashLoading.value = true
+  await Promise.all([loadOverview(), loadStats(force)])
+  dashLoading.value = false
+  dashLoaded = true
+  dashSig = gwVersionSig()
+}
+function maybeRefreshDashboard() {
+  if (activeTab.value !== 'dashboard') return
+  if (!dashLoaded) loadDashboard()
+  else if (dashSig !== gwVersionSig()) loadDashboard()
+}
+watch(activeTab, maybeRefreshDashboard)
+onActivated(maybeRefreshDashboard)
+
+onMounted(() => {
   // 支持深链：/gateway?tab=upstreams 直接定位到指定 tab（系统设置「前往网关」跳转用）
   const q = route.query.tab
   if (q && tabs.some((t) => t.key === q)) activeTab.value = q
-  dashLoading.value = true
-  await Promise.all([loadOverview(), loadStats()])
-  dashLoading.value = false
+  maybeRefreshDashboard()
 })
 </script>
 
@@ -415,6 +494,12 @@ onMounted(async () => {
 
 /* ---- 风险标签 ---- */
 .risk-tag { font-size: 11px; font-weight: 700; padding: 2px 9px; border-radius: 10px; white-space: nowrap; }
+.attr-tag { font-size: 10.5px; font-weight: 600; padding: 2px 8px; border-radius: 8px; white-space: nowrap; }
+.attr-user { background: #e4f4e8; color: #3d8b52; }
+.attr-system { background: #eef2f7; color: #4a6fa5; }
+.attr-public { background: #fdf0d9; color: #b8802a; }
+.attr-unattributed { background: #eee9e2; color: #8a7e72; }
+.attr-note { font-size: 11px; color: var(--color-text-secondary); line-height: 1.6; margin-top: 8px; }
 .risk-none { background: #eee9e2; color: #8a7e72; }
 .risk-low { background: #e8f0fb; color: #3a6ea5; }
 .risk-medium { background: #fdf0d9; color: #b8802a; }

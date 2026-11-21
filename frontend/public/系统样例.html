@@ -405,6 +405,7 @@ body {
       <button class="nav-btn" data-view="gateway" onclick="switchView('gateway', this)">模型网关</button>
       <button class="nav-btn" data-view="eval" onclick="switchView('eval', this)">回归评测</button>
       <button class="nav-btn" data-view="observability" onclick="switchView('observability', this)">Agent 可观测性</button>
+      <button class="nav-btn" data-view="tools" onclick="switchView('tools', this)">工具治理中心</button>
     </div>
     <button class="nav-btn" data-view="guide" onclick="switchView('guide', this)">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>系统使用指导</button>
@@ -1392,8 +1393,10 @@ body {
                   <tr><td>knowledge_summarize</td><td><span class="tag">knowledge</span></td><td><span class="tag">摘要</span></td><td>库级知识总结</td><td>登录用户</td><td><span class="status-dot ok"></span>低</td><td>可用</td><td><span class="tag blue">kb_id</span></td></tr>
                   <tr><td>web_search</td><td><span class="tag">web</span></td><td><span class="tag">搜索</span> <span class="tag">联网</span></td><td>知识库无结果时联网增强</td><td>白名单 host</td><td><span class="status-dot error"></span>高</td><td>可用</td><td><span class="tag blue">query</span></td></tr>
                   <tr><td>search_knowledge</td><td><span class="tag">knowledge</span></td><td><span class="tag">检索</span> <span class="tag">RAG</span></td><td>混合检索问答</td><td>公开</td><td><span class="status-dot ok"></span>低</td><td>可用</td><td><span class="tag blue">query</span> <span class="tag blue">kb_id</span></td></tr>
-                  <tr><td>doc_to_pdf</td><td><span class="tag">cli</span></td><td><span class="tag">转换</span></td><td>Word 原始排版预览</td><td>运维</td><td><span class="status-dot error"></span>高</td><td>可用</td><td><span class="tag blue">file_path</span></td></tr></tbody></table></div>
-                <p class="note">共 7 个工具 · function-calling schema 7 份 · Schema Token 估算 4.2k；与后端工具注册表同源。</p>
+                  <tr><td>doc_to_pdf</td><td><span class="tag">cli</span></td><td><span class="tag">转换</span></td><td>Word 原始排版预览</td><td>运维</td><td><span class="status-dot error"></span>高</td><td>可用</td><td><span class="tag blue">file_path</span></td></tr>
+                  <tr><td>当前天气 <code style="font-size:11px">get_current_weather</code></td><td><span class="tag blue">personal</span></td><td><span class="tag">天气</span> <span class="tag">个人工具</span></td><td>实时天气查询（@tool 添加）</td><td>全员（黑名单除外）</td><td><span class="status-dot ok"></span>低</td><td>可用</td><td><span class="tag blue">city</span></td></tr>
+                  <tr><td>坐标海拔 <code style="font-size:11px">get_elevation</code></td><td><span class="tag blue">personal</span></td><td><span class="tag">地理</span> <span class="tag">个人工具</span></td><td>按经纬度查询海拔</td><td>全员（黑名单除外）</td><td><span class="status-dot ok"></span>低</td><td>可用</td><td><span class="tag blue">latitude</span> <span class="tag blue">longitude</span></td></tr></tbody></table></div>
+                <p class="note">共 9 个工具（内置 7 + 个人 2）· function-calling schema 9 份 · Schema Token 估算 4.6k；与后端工具注册表同源。个人工具以功能名注册，治理详情见「工具治理中心」。</p>
               </div>
               <div class="panel demo-section"><h3>按请求的工具调用链（点击行查看该请求全链路）</h3>
                 <div class="demo-table-wrap"><table class="demo-table"><thead><tr><th>时间</th><th>用户</th><th>Agent</th><th>工具调用序列</th><th>次数</th><th>失败</th><th>工具耗时</th><th>状态</th></tr></thead>
@@ -1432,6 +1435,35 @@ body {
               <pre class="span-text" id="lmMsg"></pre>
             </div>
           </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= 工具治理中心 ================= -->
+    <section class="view" id="view-tools">
+      <div class="page-wrap">
+        <div class="page-head"><div><h2>工具治理中心</h2><div class="page-desc">/admin/tools（管理员/运维）：个人工具生命周期评测工作流的<b>唯一集中入口</b>。聊天 <code>@tool</code> 发起后按六步工作流跑完并展示全部配置与评测记录；工具须样例测试与标准化评测全部通过、启用且就绪后才进入注册表。注册工具<b>默认全员可调用</b>，可按工具设置用户黑名单。</div></div><span class="tag">六步工作流 · 演示</span></div>
+        <div class="panel demo-section"><h3>我的工具 <span class="tag">2</span></h3>
+          <div class="file-row"><span class="tag green">ready · 已启用</span><span class="fname">当前天气 · <code>get_current_weather</code> · connector · v3 · 功能名跨版本稳定</span><button class="btn btn-outline btn-sm" onclick="document.getElementById('wfDemo').open=!document.getElementById('wfDemo').open">展开工作流</button><button class="btn btn-outline btn-sm" disabled>运行完整工作流（演示）</button></div>
+          <div class="file-row"><span class="tag green">ready · 已启用</span><span class="fname">坐标海拔 · <code>get_elevation</code> · connector · v1</span><button class="btn btn-outline btn-sm" disabled>展开工作流（演示）</button></div>
+          <p class="note">工具以<b>功能名</b>注册（小写英文 snake_case，如 get_current_weather），不再使用 pt_随机码；同名冲突自动追加确定数字后缀（get_elevation_2）。管理员聊天输入 <code>@tool 功能描述或公开 API 文档链接</code> 添加；普通用户通过 <code>@skills</code> 派生工具。本静态样例不执行真实调用。</p>
+          <details class="panel" id="wfDemo" style="background:#fffdf9;padding:10px 12px;margin-top:8px"><summary style="cursor:pointer;font-weight:600;font-size:13px">当前天气 · 六步工作流（全部配置与评测记录内嵌对应步骤）</summary>
+            <ol style="margin:8px 0 0;padding-left:20px;font-size:12.5px;line-height:1.9">
+              <li><span class="tag green">完成</span> <b>创建与确认</b>：规格 connector=weather · 功能名 <code>get_current_weather</code> · 版本 v1→v3（升级不改名）</li>
+              <li><span class="tag green">完成</span> <b>配置与审批</b>：条款已接受 · 凭据已加密（AES-GCM，UI 不回读）· 无阻塞项</li>
+              <li><span class="tag green">通过</span> <b>只读样例测试</b>：北京当前天气 · 真实调用上游 1 次 · 测试历史 3 条</li>
+              <li><span class="tag green">通过</span> <b>标准化评测</b>：逐用例真实调用 + 断言校验 4/4 通过</li>
+              <li><span class="tag green">已启用</span> <b>启用</b>：启停开关与评测/审批门禁联动</li>
+              <li><span class="tag green">已注册</span> <b>注册与调用</b>：默认全员可调用 · 黑名单 1 人 · 最近执行 5 条（执行/数据校验/需求满足三态独立展示）</li>
+            </ol></details>
+        </div>
+        <div class="panel demo-section"><h3>标准化工具注册表（个人工具部分）</h3>
+          <div class="demo-table-wrap"><table class="demo-table"><thead><tr><th>工具</th><th>命名空间</th><th>执行器</th><th>版本</th><th>评测</th><th>调用范围</th><th>状态</th></tr></thead>
+            <tbody>
+              <tr><td>当前天气 <code style="font-size:11px;background:#f3ece1;padding:1px 5px;border-radius:4px">get_current_weather</code> <span class="tag blue">个人工具</span></td><td><span class="tag">personal</span></td><td>connector · weather</td><td>v3</td><td><span class="tag green">passed</span></td><td>全员（限制 1 人） <button class="btn btn-outline btn-sm" onclick="openModal('restrictModal')">限制</button></td><td><span class="status-dot ok"></span>已启用</td></tr>
+              <tr><td>坐标海拔 <code style="font-size:11px;background:#f3ece1;padding:1px 5px;border-radius:4px">get_elevation</code> <span class="tag blue">个人工具</span></td><td><span class="tag">personal</span></td><td>connector · elevation</td><td>v1</td><td><span class="tag green">passed</span></td><td>全员 <button class="btn btn-outline btn-sm" onclick="openModal('restrictModal')">限制</button></td><td><span class="status-dot ok"></span>已启用</td></tr>
+            </tbody></table></div>
+          <p class="note">注册表主显工具中文名 + 功能名标识；「限制」弹层勾选不允许使用的用户（属主除外）保存后，被限制用户的<b>工具目录与执行门禁同时拒绝</b>，其他用户不受影响；工作流第 6 步可配置同一黑名单。管理侧（详情/编辑/测试）仍属主隔离。内置工具注册表见「Agent 可观测性 → 链路追踪 → 工具调用链路」。</p>
         </div>
       </div>
     </section>
@@ -1504,7 +1536,7 @@ body {
             <div class="sc-foot"><span>prompt · chat · 共享只读</span><button class="btn btn-outline btn-sm" style="margin-left:auto">引用到我的技能</button></div></div>
         </details>
         <p class="note">安全预审：5 类高安全风险 + 6 类本项目无法实现的能力，命中拒绝落库并告知原因；预审全程留痕于 <code>skill_review_logs</code>，在可观测性「Skill 安全预审」面板重点暴露。自定义技能上限 50，支持导入 .json / .md / .txt。</p>
-        <p class="note"><b>聊天添加个人能力</b>：首位输入 @ 选择 Skills（@skills）或 Tools（@tool），补充功能描述或来源链接。本次发现联网但不改变普通聊天开关；来源不可达如实说明，模型生成标明未验证。正文只概述能力与限制，完整 SKILL.md／资源或工具配置在折叠草稿卡中预览；24 小时内确认才安装，可取消，刷新回原轮次。缺依赖的 Skill 保持关闭，工具完成配置、必要审批与只读样例测试后才就绪；Skill 声明 allowed-tools 时草稿卡展开「关联工具依赖」，可绑定已安装工具特定版本或「联网查找并生成工具草稿」自动发现（可取消依赖发现），全部就绪并「确认依赖并重新评审」ready 才启用；凭据使用专用表单，不放聊天。Python 默认关闭，须专用 Linux Worker 真实隔离验收。灰色过程只显示公开工作摘要，不显示内部推理。</p>
+        <p class="note"><b>聊天添加个人能力</b>：首位输入 @ 选择 Skills（@skills）或 Tools（@tool），补充功能描述或来源链接。本次发现联网但不改变普通聊天开关；来源不可达如实说明，模型生成标明未验证。正文只概述能力与限制，完整 SKILL.md／资源或工具配置在折叠草稿卡中预览；24 小时内确认才安装，可取消，刷新回原轮次。缺依赖的 Skill 保持关闭，工具以<b>功能名</b>注册（如 get_current_weather，不再使用随机码），完成配置、必要审批、只读样例测试与标准化评测后就绪，生命周期在「工具治理中心」按六步工作流集中管理（默认全员可调用，可按工具限制特定用户）；Skill 声明 allowed-tools 时草稿卡展开「关联工具依赖」，可绑定已安装工具特定版本或「联网查找并生成工具草稿」自动发现（可取消依赖发现），全部就绪并「确认依赖并重新评审」ready 才启用；凭据使用专用表单，不放聊天。Python 默认关闭，须专用 Linux Worker 真实隔离验收。灰色过程只显示公开工作摘要，不显示内部推理。</p>
       </div>
     </section>
 
@@ -1690,10 +1722,10 @@ body {
       </div>
     </section>
 
-    <!-- ================= 系统使用指导（镜像 GuideView 18 节） ================= -->
+    <!-- ================= 系统使用指导（镜像 GuideView 19 节） ================= -->
     <section class="view" id="view-guide">
       <div class="page-wrap">
-        <div class="page-head"><div><h2>系统使用指导</h2><div class="page-desc">/guide：登录页「系统使用指导」入口，无需登录即可浏览。下方目录与正文镜像真实 GuideView 的 18 个章节，点击目录跳转对应小节。</div></div><span class="tag">共 18 节</span></div>
+        <div class="page-head"><div><h2>系统使用指导</h2><div class="page-desc">/guide：登录页「系统使用指导」入口，无需登录即可浏览。下方目录与正文镜像真实 GuideView 的 19 个章节，点击目录跳转对应小节。</div></div><span class="tag">共 19 节</span></div>
         <div class="guide-toc">
           <a onclick="document.getElementById('gsec-0').scrollIntoView({behavior:'smooth'})"><span class="gt-num">0</span>快速上手 4 步</a>
           <a onclick="document.getElementById('gsec-1').scrollIntoView({behavior:'smooth'})"><span class="gt-num">1</span>注册登录与游客</a>
@@ -1710,9 +1742,10 @@ body {
           <a onclick="document.getElementById('gsec-12').scrollIntoView({behavior:'smooth'})"><span class="gt-num">12</span>系统架构五层</a>
           <a onclick="document.getElementById('gsec-13').scrollIntoView({behavior:'smooth'})"><span class="gt-num">13</span>系统设置·Embedding</a>
           <a onclick="document.getElementById('gsec-14').scrollIntoView({behavior:'smooth'})"><span class="gt-num">14</span>Agent 可观测性</a>
-          <a onclick="document.getElementById('gsec-15').scrollIntoView({behavior:'smooth'})"><span class="gt-num">15</span>ECS 部署与 CI/CD</a>
-          <a onclick="document.getElementById('gsec-16').scrollIntoView({behavior:'smooth'})"><span class="gt-num">16</span>移动端使用</a>
-          <a onclick="document.getElementById('gsec-17').scrollIntoView({behavior:'smooth'})"><span class="gt-num">17</span>常见问题</a>
+          <a onclick="document.getElementById('gsec-15').scrollIntoView({behavior:'smooth'})"><span class="gt-num">15</span>工具治理中心</a>
+          <a onclick="document.getElementById('gsec-16').scrollIntoView({behavior:'smooth'})"><span class="gt-num">16</span>ECS 部署与 CI/CD</a>
+          <a onclick="document.getElementById('gsec-17').scrollIntoView({behavior:'smooth'})"><span class="gt-num">17</span>移动端使用</a>
+          <a onclick="document.getElementById('gsec-18').scrollIntoView({behavior:'smooth'})"><span class="gt-num">18</span>常见问题</a>
         </div>
         <div class="guide-block" id="gsec-0"><h3><span class="gb-num">0</span>快速上手：4 步用起来</h3>
           <ul><li>① 注册并登录（首个账号自动成为管理员）；② 上传第一个文件（图片 / Word / PDF / 链接）；③ 检查解析效果并确认入库；④ 回到对话向笔记提问。</li></ul></div>
@@ -1744,12 +1777,14 @@ body {
           <ul><li>各区块默认折叠、在线热切换优先级高于 .env；网络模型连接参数在网关上游管理保存与测试，此处只读展示。</li><li>OCR / 联网搜索 / Embedding / Rerank / 检索参数 / Redis 文件缓存 / 用户注册 / 游客访问 / llm-wiki 编译；未保存离开弹窗确认。</li></ul></div>
         <div class="guide-block" id="gsec-14"><h3><span class="gb-num">14</span>Agent 可观测性：四大模块（管理员/运维）</h3>
           <ul><li>DashBoard / 日志记录 / 指标监控 / 链路追踪；普通用户见个人业务视图（/observability），管理员 / 运维见技术视图。</li><li>含语义缓存监控、Skill 安全预审、技能沉淀建议、五层记忆架构、Token 分析等面板；日志 / 链路可筛选并打开全链路弹窗。达告警等级的安全风险由<b>全局安全弹窗</b>在任意页面提醒（同一水位<b>仅提示一次、需手动关闭</b>，不自动消失），附自动生成的处置建议。</li></ul></div>
-        <div class="guide-block" id="gsec-15"><h3><span class="gb-num">15</span>阿里云 ECS 部署与 CI/CD 工作流（运维）</h3>
+        <div class="guide-block" id="gsec-15"><h3><span class="gb-num">15</span>工具治理中心：六步评测工作流与功能名注册表（管理员/运维）</h3>
+          <ul><li>「系统管理 → 工具治理中心」（/admin/tools）是个人工具生命周期的<b>唯一集中入口</b>：聊天 @tool 发起后按六步工作流（创建确认 → 配置审批 → 只读样例测试 → 标准化评测 → 启用 → 注册调用）跑完并展示全部配置与评测记录，「运行完整工作流」可一键重跑。</li><li>工具以<b>功能名</b>注册（如 get_current_weather，小写英文 snake_case、拒绝随机码），跨版本稳定、全局唯一（冲突追加确定数字后缀）；历史 pt_随机码工具升级时自动迁移为功能名。</li><li>注册工具<b>默认全员可调用</b>；管理员在注册表「调用范围」列点「限制」勾选不允许使用的用户（属主除外），被限制用户的工具目录与执行门禁同时拒绝，其他用户不受影响。</li></ul></div>
+        <div class="guide-block" id="gsec-16"><h3><span class="gb-num">16</span>阿里云 ECS 部署与 CI/CD 工作流（运维）</h3>
           <ul><li>Docker Compose 双镜像 + Nginx 离线部署；CI/CD 流水线（/admin/pipeline）评估驱动部署（EDD）：代码提交 → 单元测试 → 评估回归 → 构建镜像 → 灰度发布 → 全量上线。</li><li>评估回归以 Ragas 四指标均值为质量分，低于阈值自动阻断发布。</li></ul></div>
-        <div class="guide-block" id="gsec-16"><h3><span class="gb-num">16</span>移动端使用（手机 / 平板）</h3>
+        <div class="guide-block" id="gsec-17"><h3><span class="gb-num">17</span>移动端使用（手机 / 平板）</h3>
           <ul><li>手机 / 平板浏览器打开<b>同一地址</b>即可使用，无需单独 App；屏宽 ≤768px 自动切换移动布局，功能与桌面端一致。</li><li>侧边栏收为汉堡抽屉、宽表格横滑、多列网格收单列、标签栏滑动切换、上传等弹窗近全屏、知识助手全宽展开；触控目标加大，告警铃铛可拖动避让。</li></ul></div>
-        <div class="guide-block" id="gsec-17"><h3><span class="gb-num">17</span>常见问题</h3>
-          <ul><li>上传模糊件被提醒重拍？前端拉普拉斯方差检测，可换更清晰图片。回答引用百分比是检索相关度，不是答案正确率。</li><li>游客为何不能入库？游客仅可对话；个人库为何他人搜不到？向量检索阶段物理隔离。更多见手册附录 C。</li></ul></div>
+        <div class="guide-block" id="gsec-18"><h3><span class="gb-num">18</span>常见问题</h3>
+          <ul><li>上传模糊件被提醒重拍？前端拉普拉斯方差检测，可换更清晰图片。回答引用百分比是检索相关度，不是答案正确率。</li><li>个人工具为何是英文功能名？便于模型原生 tool_calls 识别与跨版本稳定调用；限制某些用户使用见第 15 节注册表「限制」。</li><li>游客为何不能入库？游客仅可对话；个人库为何他人搜不到？向量检索阶段物理隔离。更多见手册附录 C。</li></ul></div>
       </div>
     </section>
   </main>
@@ -1797,6 +1832,20 @@ body {
       <p class="note" style="margin-bottom:0">聚合 Skills.sh / ClawHub 等市场，不可达源自动降级不阻断；命中可一键填充表单。</p></div>
     <p class="note">保存前经安全预审（5 类高安全风险 + 6 类无法实现能力），命中拒绝落库并告知原因；留痕 skill_review_logs。</p>
     <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end"><button class="btn btn-outline" onclick="closeModal('skillModal')">取消</button><button class="btn btn-primary" onclick="closeModal('skillModal')">安全预审并保存</button></div>
+  </div>
+</div>
+<!-- 工具调用范围限制（按工具用户黑名单） -->
+<div class="modal-mask" id="restrictModal" onclick="if(event.target===this)closeModal('restrictModal')">
+  <div class="modal" style="width:min(440px,92vw)">
+    <h3>限制调用用户 · 当前天气 <code style="font-size:12px">get_current_weather</code> <span class="close-x" onclick="closeModal('restrictModal')">×</span></h3>
+    <p class="note" style="margin-top:0">勾选<b>不允许使用</b>该工具的用户（属主 admin 除外）。保存后被勾选用户的工具目录与执行门禁同时拒绝，其他用户不受影响；默认全员可调用。</p>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:13px">
+      <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" checked> 演示用户甲</label>
+      <label style="display:flex;gap:6px;align-items:center"><input type="checkbox"> 演示用户乙</label>
+      <label style="display:flex;gap:6px;align-items:center"><input type="checkbox"> 养生爱好者</label>
+      <label style="display:flex;gap:6px;align-items:center"><input type="checkbox"> 税务笔记用户</label>
+    </div>
+    <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end"><button class="btn btn-outline" onclick="closeModal('restrictModal')">取消</button><button class="btn btn-primary" onclick="closeModal('restrictModal')">保存限制</button></div>
   </div>
 </div>
 <!-- 修改个人信息 -->
@@ -1921,7 +1970,7 @@ function switchView(name, btn) {
   document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
   const navNew = document.querySelector('.nav-new');
   if (navNew) navNew.classList.toggle('active', name === 'chat');
-  const adminViews = ['settings', 'users', 'pipeline', 'gateway', 'eval', 'observability'];
+  const adminViews = ['settings', 'users', 'pipeline', 'gateway', 'eval', 'observability', 'tools'];
   if (adminViews.indexOf(name) >= 0) {
     // 管理控制台子视图：展开子导航 + 高亮父级与对应子项
     const sub = document.getElementById('adminSub'); if (sub) sub.hidden = false;

@@ -17,6 +17,7 @@ invoke_tool 绝不抛出业务异常（除取消/生成器退出），所有失�
 import hashlib
 import json
 import logging
+import re
 import time
 from typing import Any, Dict, Optional
 
@@ -80,7 +81,8 @@ async def invoke_tool(
     args = dict(args or {})
     t0 = time.monotonic()
     tool = get_tool(name)
-    if isinstance(name, str) and name.startswith("pt_"):
+    # 个人工具以功能名注册（不在内置注册表）：按功能名反查治理门禁
+    if tool is None and isinstance(name, str) and re.fullmatch(r"[a-z][a-z0-9_]{2,63}", name):
         try:
             from app.services.personal_tools import resolve
             tool = resolve(ctx.user_id, name, ctx.tool_test_id)
@@ -156,7 +158,7 @@ def _record(name: str, namespace: str, ctx: ToolContext, args: dict,
             routed_by=routed_by,
             args=({"input_hash": hashlib.sha256(json.dumps(
                 args, sort_keys=True, ensure_ascii=False, default=str).encode()).hexdigest()}
-                if name.startswith("pt_") else args),
+                if namespace == "personal" else args),
             risk_level=(get_tool(name).risk_level if get_tool(name) else "low"),
             schema_valid=(pre.schema_valid if pre else True),
             permission_ok=(pre.permission_ok if pre else True),

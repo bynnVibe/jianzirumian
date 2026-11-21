@@ -136,9 +136,10 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onActivated, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
+import { useQueryCacheStore } from '@/stores/queryCache'
 import {
   listKnowledgeBases,
   createKnowledgeBase,
@@ -179,13 +180,16 @@ function enterKb(kb) {
   router.push(`/kb/${kb.id}`)
 }
 
-async function load() {
+// 知识库列表经统一查询缓存：热切换先展示缓存，写操作后 force 重拉
+async function load(force = 0) {
   loading.value = true
   error.value = ''
   try {
-    const res = await listKnowledgeBases()
-    bases.value = res.data.bases || []
-    topics.value = res.data.topics || []
+    const data = await useQueryCacheStore().cachedGet('knowledge', { kind: 'bases' },
+      async () => (await listKnowledgeBases()).data,
+      { force: !!force, onRevalidate: (d) => { bases.value = d.bases || []; topics.value = d.topics || [] } })
+    bases.value = data.bases || []
+    topics.value = data.topics || []
   } catch (e) {
     error.value = e.response?.data?.detail || '加载知识库列表失败'
   } finally {
@@ -228,7 +232,7 @@ async function submitForm() {
       })
     }
     formVisible.value = false
-    await load()
+    await load(1)
   } catch (e) {
     formError.value = e.response?.data?.detail || '保存失败'
   } finally {
@@ -240,13 +244,15 @@ async function removeKb(kb) {
   if (!window.confirm(`确定删除知识库「${kb.name}」？其中的文档与条目将一并删除，且无法恢复。`)) return
   try {
     await deleteKnowledgeBase(kb.id)
-    await load()
+    await load(1)
   } catch (e) {
     window.alert(e.response?.data?.detail || '删除失败')
   }
 }
 
-onMounted(load)
+onMounted(() => load())
+// KeepAlive 回页：缓存先展示，资源版本落后时后台重验
+onActivated(() => load())
 </script>
 
 <style scoped>

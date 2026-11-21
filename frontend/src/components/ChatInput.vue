@@ -1,6 +1,6 @@
 <template>
   <div class="input-area">
-    <!-- 配额友好提示：公共额度用尽→联系管理员；专属配额用尽→已降级公共密钥（均不阻断使用） -->
+    <!-- 配额友好提示：公共额度用尽→联系管理员；专属配额用尽→明确提示不降级（均不阻断使用） -->
     <div v-if="quotaMessage" class="quota-banner" :class="quota.exhausted ? 'warn' : 'info'">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
         <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
@@ -146,10 +146,12 @@
 <script setup>
 import { ref, computed, watch, nextTick, onMounted } from 'vue'
 import { useChatStore } from '@/stores/chat'
+import { useAuthStore } from '@/stores/auth'
 import { getMyChatModels, getMyGatewayQuota } from '@/api'
 import ContextUsageBadge from '@/components/ContextUsageBadge.vue'
 
 const store = useChatStore()
+const auth = useAuthStore()
 const emit = defineEmits(['send'])
 
 const inputText = ref('')
@@ -163,19 +165,22 @@ const commandIndex = ref(0)
 const commandsDismissed = ref(false)
 const commandError = ref('')
 let compositionEndedAt = 0
-const commands = [
+// @tool 仅管理员可见可用；普通用户只开放 @skills
+const commands = computed(() => [
   { label: 'Skills', command: 'skills', description: '查找、适配并确认添加个人 Skill' },
-  { label: 'Tools', command: 'tool', description: '添加只读 API 或隔离计算工具' },
-]
+  ...(auth.isAdmin ? [{ label: 'Tools', command: 'tool', description: '添加只读 API 或隔离计算工具（管理员）' }] : []),
+])
 const commandOptions = computed(() => {
   if (!/^@[a-z]*$/i.test(inputText.value)) return []
   const word = inputText.value.slice(1).toLowerCase()
-  return commands.filter(item => item.command.startsWith(word) || (word === 'tools' && item.command === 'tool'))
+  return commands.value.filter(item => item.command.startsWith(word) || (word === 'tools' && item.command === 'tool'))
 })
 const showCommands = computed(() => isFocused.value && !props.disabled && !composing.value && !commandsDismissed.value && commandOptions.value.length > 0)
 const activeCommand = computed(() => {
   const match = inputText.value.match(/^@(skills|tools?)(?=\s|$)/i)
-  return match ? (match[1].toLowerCase() === 'skills' ? 'skills' : 'tool') : ''
+  if (!match) return ''
+  const name = match[1].toLowerCase() === 'skills' ? 'skills' : 'tool'
+  return name === 'tool' && !auth.isAdmin ? '' : name
 })
 watch(inputText, () => { commandIndex.value = 0; commandsDismissed.value = false; commandError.value = '' })
 
@@ -338,7 +343,7 @@ watch(() => store.isGenerating, (v) => {
   if (!v) ctxBadgeRef.value?.refresh()
 })
 
-// 我的出网配额：友好提示（公共额度用尽→联系管理员；专属配额用尽→已降级），非阻断
+// 我的出网配额：友好提示（公共额度用尽→联系管理员；专属配额用尽→明确报错不降级），非阻断
 const quota = ref({})
 const quotaDismissed = ref(false)
 const quotaMessage = computed(() => {
@@ -351,7 +356,7 @@ async function loadQuota() {
   try {
     const res = await getMyGatewayQuota()
     const next = res.data.quota || {}
-    // 状态变化（如从降级恢复）时重新展示提示
+    // 状态变化（如配额调整后恢复）时重新展示提示
     if ((next.message || '') !== (quota.value.message || '')) quotaDismissed.value = false
     quota.value = next
   } catch (e) {
@@ -424,7 +429,7 @@ function handleKeydown(e) {
 function handleSend() {
   const text = inputText.value.trimEnd()
   if (!canSend.value || props.disabled || composing.value) return
-  if (text === '@') { selectCommand(commands[commandIndex.value]); return }
+  if (text === '@') { selectCommand(commands.value[commandIndex.value]); return }
   const command = activeCommand.value
   if (command && !text.replace(/^@(skills|tools?)(?=\s|$)/i, '').trim()) {
     commandError.value = command === 'skills' ? '例如：@skills 添加一个文章总结技能，也可附来源链接' : '例如：@tool 查询指定城市的天气'

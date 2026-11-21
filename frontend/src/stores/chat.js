@@ -32,9 +32,20 @@ export const useChatStore = defineStore('chat', () => {
   const editingDraft = ref(null) // 再编辑草稿 { text }，由 ChatInput 消费
   let controller = null
   let generationId = 0
+  // 会话消息内存快照（上限 20 个会话）：切会话先展示快照不闪空，注销即清
+  const sessionSnapshots = new Map()
+  function saveSnapshot(sessionId, msgs) {
+    if (!sessionId || !msgs?.length) return
+    sessionSnapshots.delete(sessionId)
+    sessionSnapshots.set(sessionId, msgs)
+    while (sessionSnapshots.size > 20) {
+      sessionSnapshots.delete(sessionSnapshots.keys().next().value)
+    }
+  }
   const pendingDone = ref(null) // 最近一次 done 事件数据（含 message_id）
   const cacheHitInfo = ref(null) // 本轮是否命中语义缓存 { score }（命中则绕过检索路由直回）
-  const capabilityGap = ref(null) // 本轮能力缺口（需求5）：候选 CLI 方案随回答附带，由用户 HITL 选择执行
+  const capabilityGap = ref(null) // 本轮能力受限说明（DeepSeek 式降级）：随回答附带限制说明与应用内动作建议
+  const streamError = ref(null) // 本轮结构化错误 {code, stage, message}：过程面板定位失败步骤
   const skillDraft = ref(null) // 本轮 Skill 沉淀配置草稿：随回答呈现确认卡，确认后系统自动导入
   const pendingCheckpoint = ref(null) // 中途停止任务的 checkpoint：界面呈现「是否继续」，继续则在前序基础上续答
 
@@ -90,14 +101,18 @@ export const useChatStore = defineStore('chat', () => {
   async function switchToSession(sessionId) {
     stopGeneration()
     const epoch = generationId
+    // 留存旧会话快照，切回时可直接展示
+    saveSnapshot(currentSessionId.value, messages.value)
     currentSessionId.value = sessionId
-    messages.value = []
+    // 内存快照先展示（无快照才置空），后台拉取最新历史
+    messages.value = sessionSnapshots.get(sessionId) || []
     try {
-      await switchSession(sessionId)
+      // 切换标记与历史拉取互不依赖，并行发起；保留 generationId 防旧响应覆盖
+      const [, res] = await Promise.all([switchSession(sessionId), getChatHistory(sessionId)])
       if (epoch !== generationId) return
-      const res = await getChatHistory(sessionId)
-      if (epoch !== generationId) return
-      messages.value = (res.data.messages || []).map(normalizeMessage)
+      const fresh = (res.data.messages || []).map(normalizeMessage)
+      messages.value = fresh
+      saveSnapshot(sessionId, fresh)
       await refreshCheckpoints()
     } catch (err) {
       console.error('切换会话失败:', err)
@@ -152,6 +167,7 @@ export const useChatStore = defineStore('chat', () => {
     agentTools.value = []
     cacheHitInfo.value = null
     capabilityGap.value = null
+    streamError.value = null
     skillDraft.value = null
     toolDraft.value = null
     toolSources.value = []
@@ -222,7 +238,10 @@ export const useChatStore = defineStore('chat', () => {
       await presenter.finish()
       if (requestId === generationId) {
         const reason = err.name === 'AbortError' ? '已停止生成' : err.message || '网络连接中断'
-        currentResponse.value += `\n\n[生成已中断，内容不完整：${reason}]`
+        // 结构化错误码/失败阶段随中断提示展示，不再只有笼统「未知错误」
+        const detail = err.code ? `［${err.code}${err.stage ? ' · ' + err.stage : ''}］` : ''
+        if (err.code && !streamError.value) streamError.value = { code: err.code, stage: err.stage || '', message: err.message || '' }
+        currentResponse.value += `\n\n[生成已中断，内容不完整：${reason}${detail}]`
         sources.value = []
         searchResults.value = []
       }
@@ -259,8 +278,9 @@ export const useChatStore = defineStore('chat', () => {
           skill_drafts: skillDraft.value ? [skillDraft.value] : [],
           tool_drafts: toolDraft.value ? [toolDraft.value] : [],
           // Agent 中间过程快照：随答案保留为灰色可折叠区（默认收缩，可展开回看）
-          agent_process: pendingDone.value?.message?.agent_process || ((agentPlan.value.length || agentTools.value.length)
-            ? { plan: [...agentPlan.value], tools: [...agentTools.value] }
+          agent_process: pendingDone.value?.message?.agent_process || ((agentPlan.value.length || agentTools.value.length || streamError.value)
+            ? { plan: [...agentPlan.value], tools: [...agentTools.value],
+                ...(streamError.value ? { error: streamError.value, status: 'error' } : {}) }
             : null),
           process_collapsed: true,
         })
@@ -350,13 +370,14 @@ export const useChatStore = defineStore('chat', () => {
         break
 
       case 'capability_gap':
-        // 能力缺口（需求5）：不暂停回答，方案卡片随本轮回答一起呈现，
-        // 由用户选择 CLI 方案后调 /capability-gap/execute 在沙箱执行
+        // 能力受限（DeepSeek 式降级）：诚实说明限制，提供应用内动作建议，
+        // 不再要求用户执行命令行方案
         capabilityGap.value = {
           gap_id: data.gap_id || '',
           scenario: data.scenario || '',
           scenario_label: data.scenario_label || '',
-          solutions: Array.isArray(data.solutions) ? data.solutions : [],
+          kind: data.kind || 'limitation',
+          suggestions: Array.isArray(data.suggestions) ? data.suggestions : [],
           query: data.query || '',
           message: data.message || '',
         }
@@ -373,6 +394,8 @@ export const useChatStore = defineStore('chat', () => {
 
       case 'error':
         toolSources.value = []
+        // 结构化错误闭环：保留错误码与失败阶段，过程面板据此指明失败步骤
+        streamError.value = { code: data.code || '', stage: data.stage || '', message: data.message || '' }
         // LLM 错误 — 显示错误消息并立即结束；
         // 同时清理知识来源/搜索结果：生成失败时展示检索来源没有意义
         sources.value = []
@@ -380,8 +403,10 @@ export const useChatStore = defineStore('chat', () => {
         break
 
       case 'done':
-        // 保存 done 事件数据（含 message_id），并更新会话列表（标题可能已变）
+        // 保存 done 事件数据（含 message_id）；优先更新当前会话快照与摘要，
+        // 全量列表后台对账（标题可能已变）
         pendingDone.value = data
+        saveSnapshot(currentSessionId.value, messages.value)
         loadSessions()
         break
     }
@@ -444,6 +469,13 @@ export const useChatStore = defineStore('chat', () => {
     } finally {
       useSearch.value = prev
     }
+  }
+
+  /** 能力受限卡「开启联网搜索并重新提问」：持久开启联网开关后重发原问题 */
+  async function enableSearchAndResend(query) {
+    if (isGenerating.value || !query) return
+    useSearch.value = true
+    await sendMessage(query)
   }
 
   /** HITL「直接回答」：带 skip_search_prompt 重发，不再询问、用模型自身知识作答 */
@@ -551,6 +583,7 @@ export const useChatStore = defineStore('chat', () => {
   /** 清空所有会话状态（用于切换游客身份时） */
   function clearAllSessionData() {
     stopGeneration()
+    sessionSnapshots.clear()
     sessions.value = []
     currentSessionId.value = null
     messages.value = []
@@ -585,6 +618,7 @@ export const useChatStore = defineStore('chat', () => {
     skillDraft,
     toolDraft,
     toolSources,
+    streamError,
     pendingCheckpoint,
     updateToolDraft,
     agentPlan,
@@ -608,6 +642,7 @@ export const useChatStore = defineStore('chat', () => {
     updateSkillDraft,
     startReask,
     resendWithSearch,
+    enableSearchAndResend,
     answerWithoutSearch,
     sendClarifyOption,
     resolveHitl,

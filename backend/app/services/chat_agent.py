@@ -91,16 +91,15 @@ def clarify_event(question: str, options: Optional[List[str]] = None) -> str:
 
 
 def capability_gap_event(gap_id: str, scenario: str, scenario_label: str,
-                         solutions: List[dict], query: str = "") -> str:
-    """HITL（需求5）：系统无合适工具/能力时，下发候选 CLI 方案由用户选择。"""
-    return sse("capability_gap", {
-        "gap_id": gap_id,
-        "scenario": scenario,
-        "scenario_label": scenario_label,
-        "solutions": solutions,
-        "query": query,
-        "message": "当前系统没有合适的工具解决这个问题，可选择以下命令行方案执行（沙箱运行）：",
-    })
+                         solutions: List[dict], query: str = "", use_search: bool = False) -> str:
+    """能力受限降级（参考 DeepSeek）：如实说明限制并给出应用内建议。
+
+    工具调用由服务端 auto_resolve 完成；不再把命令行方案交给用户执行。
+    solutions 参数仅为兼容旧调用签名保留，不会下发到前端。
+    """
+    from app.services.capability_gap import limitation_payload
+    return sse("capability_gap", limitation_payload(
+        gap_id, scenario, scenario_label, query, use_search=use_search))
 
 
 def _clip(text: str, limit: int = _MAX_OBSERVATION_CHARS) -> str:
@@ -897,12 +896,12 @@ async def _answer_phase(agent_llm, state, query, user_id, history_ctx, memory_pr
                 has_low = any((s.get("risk_level") or "low") == "low" for s in gap_solutions)
                 auto = None
                 if has_low:
-                    # 需求7：低危 CLI 方案内化为模型自动执行，不弹卡等用户确认
+                    # 需求7：低危工具方案内化为服务端自动执行，不弹卡等用户确认
                     yield sse("status", {"phase": "auto_resolving",
-                                         "message": "🔧 正在自动调用命令行能力尝试解决你的问题，请耐心等待…"})
+                                         "message": "🔧 正在调用实时数据工具尝试解决你的问题，请耐心等待…"})
                     auto = await _cap_gap.auto_resolve(gap_id)
                 if auto and auto.get("resolved") and auto.get("answer"):
-                    bridge = "\n\n---\n\n✅ 已通过命令行能力获取到实时数据，为你整理如下：\n\n"
+                    bridge = "\n\n---\n\n✅ 已通过实时数据工具获取到信息，为你整理如下：\n\n"
                     yield sse("token", {"content": bridge})
                     yield sse("token", {"content": auto["answer"]})
                     full_response += bridge + auto["answer"]
@@ -913,9 +912,11 @@ async def _answer_phase(agent_llm, state, query, user_id, history_ctx, memory_pr
                         fail_trace=False,
                     )
                 else:
+                    # 自动执行未解决 → DeepSeek 式降级：如实说明限制 + 应用内建议
                     fallback_sols = (auto or {}).get("solutions") or gap_solutions
                     yield capability_gap_event(
-                        gap_id, gap_scenario, label, fallback_sols, query[:60],
+                        gap_id, gap_scenario, label, fallback_sols, query,
+                        use_search=use_search,
                     )
                     obs.record_step(
                         "capability_gap",

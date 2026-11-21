@@ -495,12 +495,13 @@ async def reset_key(key_id: str, _ops: dict = Depends(require_ops)):
 async def query_logs(
     key_id: str = "", model: str = "", channel_id: str = "", status: str = "",
     risk_level: str = "", keyword: str = "", start: str = "", end: str = "",
-    role: str = "", limit: int = 30, offset: int = 0, _ops: dict = Depends(require_ops),
+    role: str = "", user_id: str = "", attribution: str = "",
+    limit: int = 30, offset: int = 0, _ops: dict = Depends(require_ops),
 ):
     result = log_svc.query_logs(
         key_id=key_id, model=model, channel_id=channel_id, status=status,
         risk_level=risk_level, keyword=keyword, start=start, end=end,
-        role=role, limit=limit, offset=offset)
+        role=role, user_id=user_id, attribution=attribution, limit=limit, offset=offset)
     return {"success": True, **result}
 
 

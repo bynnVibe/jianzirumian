@@ -4,10 +4,13 @@
     <header class="eval-header">
       <div class="header-inner">
         <div class="header-title">
-          <button class="btn btn-ghost sm back-btn-top" @click="goOverview">← 返回回归评测</button>
-          <span class="header-eyebrow">Regression Suite</span>
+          <button class="btn btn-ghost sm back-btn-top" @click="goOverview">← 返回{{ isToolDataset ? '工具评测' : '回归评测' }}</button>
+          <span class="header-eyebrow">{{ isToolDataset ? 'Tool Evaluation' : 'Regression Suite' }}</span>
           <h1>{{ selectedDataset ? selectedDataset.name : '问答回归 · Ragas' }}</h1>
-          <p class="header-sub">
+          <p v-if="isToolDataset" class="header-sub">
+            工具标准化评测：逐用例真实调用工具并校验输出断言，全部通过后工具进入「标准化工具注册表」。用例由工具版本声明自动派生，不支持手动修改。
+          </p>
+          <p v-else class="header-sub">
             仿照 Ragas 评估框架对问答主链路跑离线回归，量化忠实度、回答相关性、上下文精确率与上下文召回率，防止优化引入回退
           </p>
         </div>
@@ -46,8 +49,9 @@
 
           <!-- ---------- 用例管理 ---------- -->
           <section v-show="panel === 'cases'" class="panel-body">
+            <p v-if="isToolDataset" class="tool-readonly-note">工具评测集由工具版本声明自动派生（样例输入 + 输出断言），不支持手动新增、导入或删除用例；如需变更请在聊天中重新创建工具版本。</p>
             <!-- 新增用例表单 -->
-            <div class="card">
+            <div v-if="!isToolDataset" class="card">
               <div class="card-head">
                 <h3>新增用例</h3>
                 <div class="card-head-actions">
@@ -104,6 +108,18 @@
             <div class="card">
               <div class="card-head"><h3>用例列表</h3></div>
               <div v-if="loadingCases" class="mini-loading">加载中…</div>
+              <table v-else-if="cases.length && isToolDataset" class="data-table">
+                <thead>
+                  <tr><th style="width:38%">输入参数（JSON）</th><th style="width:38%">输出断言（JSON）</th><th>期望工具</th></tr>
+                </thead>
+                <tbody>
+                  <tr v-for="c in cases" :key="c.id">
+                    <td><pre class="json-cell">{{ prettyJson(c.question) }}</pre></td>
+                    <td><pre class="json-cell">{{ prettyJson(c.expected_outcome) }}</pre></td>
+                    <td><span class="kw-tag">{{ (c.expected_tools || []).join('、') || '—' }}</span></td>
+                  </tr>
+                </tbody>
+              </table>
               <table v-else-if="cases.length" class="data-table">
                 <thead>
                   <tr><th style="width:44%">问题</th><th>期望关键词</th><th>期望来源</th><th>参考答案</th><th style="width:48px"></th></tr>
@@ -129,7 +145,7 @@
                   </tr>
                 </tbody>
               </table>
-              <div v-else class="empty-block"><p>暂无用例，先添加或导入</p></div>
+              <div v-else class="empty-block"><p>{{ isToolDataset ? '暂无用例（工具版本声明缺少样例测试）' : '暂无用例，先添加或导入' }}</p></div>
             </div>
           </section>
 
@@ -148,6 +164,10 @@
                     <span class="run-time">{{ fmtTime(r.started_at) }}</span>
                     <span class="run-prog">
                       <template v-if="r.status === 'running'">进度 {{ r.completed }}/{{ r.total }}</template>
+                      <template v-else-if="isToolDataset && r.summary && r.summary.total != null">
+                        通过 {{ r.summary.ok }}/{{ r.summary.total }} · 通过率 {{ pct(r.summary.pass_rate) }} ·
+                        {{ Math.round(r.summary.avg_latency_ms || 0) }}ms
+                      </template>
                       <template v-else-if="r.summary && r.summary.total != null">
                         忠实 {{ pct(r.summary.avg_faithfulness) }} · 相关 {{ pct(r.summary.avg_answer_relevance) }} ·
                         精确 {{ pct(r.summary.avg_context_precision) }} · 召回 {{ pct(r.summary.avg_context_recall) }} ·
@@ -191,7 +211,39 @@
               <!-- 结果明细表 -->
               <div class="card">
                 <div class="card-head"><h3>用例结果明细</h3></div>
-                <table class="data-table result-table">
+                <table v-if="isToolDataset" class="data-table result-table">
+                  <thead>
+                    <tr><th style="width:40%">输入参数（JSON）</th><th>断言校验</th><th>延迟</th><th>状态</th></tr>
+                  </thead>
+                  <tbody>
+                    <template v-for="row in detail.results" :key="row.id">
+                      <tr class="result-row" @click="toggleExpand(row.id)">
+                        <td class="q-cell">
+                          <span class="exp-caret" :class="{ open: expanded.has(row.id) }">▸</span><code class="inline-json">{{ row.question }}</code>
+                        </td>
+                        <td><span class="bool" :class="row.metric_details && row.metric_details.assertions_passed ? 'yes' : 'no'">{{ row.metric_details && row.metric_details.assertions_passed ? '✓ 通过' : '✗ 未通过' }}</span></td>
+                        <td>{{ row.latency_ms }}ms</td>
+                        <td><span class="status-pill sm" :class="row.status === 'ok' ? 'finished' : 'failed'">{{ row.status === 'ok' ? '成功' : '错误' }}</span></td>
+                      </tr>
+                      <tr v-if="expanded.has(row.id)" class="expand-row">
+                        <td colspan="4">
+                          <div class="expand-inner">
+                            <div v-if="row.error" class="err-line">错误：{{ row.error }}</div>
+                            <div class="expand-block">
+                              <span class="expand-title">工具输出</span>
+                              <div class="answer-box">{{ row.answer || '(空)' }}</div>
+                            </div>
+                            <div class="expand-block">
+                              <span class="expand-title">输出断言（来自工具版本声明）</span>
+                              <pre class="json-cell">{{ prettyJson(caseById(row.case_id)?.expected_outcome) }}</pre>
+                            </div>
+                          </div>
+                        </td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+                <table v-else class="data-table result-table">
                   <thead>
                     <tr><th style="width:24%">问题</th><th>忠实</th><th>相关</th><th>精确</th><th>召回</th><th title="Hit@K：top K 内是否命中期望来源/关键词">Hit@K</th><th title="MRR：首个相关来源排名的倒数">MRR</th><th>延迟</th><th>状态</th></tr>
                   </thead>
@@ -308,9 +360,10 @@ const datasets = ref([])
 const loadingDatasets = ref(false)
 const selectedDatasetId = ref(String(route.params.datasetId || ''))
 const selectedDataset = computed(() => datasets.value.find((d) => d.id === selectedDatasetId.value) || null)
+const isToolDataset = computed(() => selectedDataset.value?.kind === 'tool')
 
 function goOverview() {
-  router.push({ name: 'EvalOverview' })
+  router.push({ name: 'EvalOverview', query: isToolDataset.value ? { domain: 'tool' } : {} })
 }
 
 // ---- 面板 ----
@@ -367,7 +420,7 @@ async function loadDatasets() {
 
 async function selectDataset(id) {
   selectedDatasetId.value = id
-  panel.value = 'cases'
+  panel.value = isToolDataset.value ? 'runs' : 'cases'
   detail.value = null
   expanded.value = new Set()
   errorMsg.value = ''
@@ -585,6 +638,25 @@ function delta(cur, prev, { invert = false, suffix = '', scale = 1, digits = 0 }
 const metricCards = computed(() => {
   const s = detail.value?.run?.summary || {}
   const p = detail.value?.prev_summary || {}
+  if (isToolDataset.value) {
+    return [
+      { key: 'total', label: '用例数', value: s.total != null ? s.total : '—' },
+      { key: 'ok', label: '断言通过', value: s.ok != null ? s.ok : '—' },
+      { key: 'error', label: '未通过', value: s.error != null ? s.error : '—' },
+      {
+        key: 'pass_rate',
+        label: '通过率（全部通过才进入注册表）',
+        value: pct(s.pass_rate),
+        delta: delta(s.pass_rate, p.pass_rate, { scale: 100, suffix: 'pp' }),
+      },
+      {
+        key: 'latency',
+        label: '平均延迟',
+        value: s.avg_latency_ms != null ? `${Math.round(s.avg_latency_ms)}ms` : '—',
+        delta: delta(s.avg_latency_ms, p.avg_latency_ms, { invert: true, suffix: 'ms' }),
+      },
+    ]
+  }
   // Ragas 四核心指标（0-1 均值，环比以百分点计）
   const ragas = (key, label) => ({
     key,
@@ -633,6 +705,15 @@ const metricCards = computed(() => {
 // ============================================
 // 格式化
 // ============================================
+function caseById(id) {
+  return cases.value.find((c) => c.id === id) || null
+}
+
+function prettyJson(text) {
+  if (!text) return '—'
+  try { return JSON.stringify(JSON.parse(text), null, 2) } catch (e) { return String(text) }
+}
+
 function pct(v) {
   if (v == null) return '—'
   return `${(v * 100).toFixed(1)}%`
@@ -879,6 +960,19 @@ function fmtTime(iso) {
 /* ---- 空/加载 ---- */
 .mini-loading { padding: 26px; text-align: center; color: var(--color-text-secondary); font-size: 12.5px; }
 .empty-block { padding: 30px 16px; text-align: center; color: var(--color-text-secondary); font-size: 12.5px; display: flex; flex-direction: column; gap: 10px; align-items: center; }
+
+/* ---- 工具评测（只读用例 / JSON 展示） ---- */
+.tool-readonly-note {
+  font-size: 12px; color: #8a6d3b; background: #fdf6e3; border: 1px solid #ecd9b0;
+  border-radius: 10px; padding: 9px 13px; line-height: 1.6; margin: 0;
+}
+.json-cell {
+  margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px;
+  line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--color-text);
+  background: #faf7f2; border: 1px solid var(--color-border); border-radius: 8px; padding: 8px 10px;
+  max-height: 220px; overflow-y: auto;
+}
+.inline-json { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; overflow-wrap: anywhere; }
 
 /* ---- 响应式 ---- */
 @media (max-width: 980px) {

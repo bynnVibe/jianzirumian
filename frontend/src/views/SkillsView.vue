@@ -10,7 +10,7 @@
       </button>
       <div class="header-title">
         <h1>Skill 配置</h1>
-        <p class="subtitle">管理个人技能与工具。对话提示约束回答风格，playbook 提供处理策略，agent_skill 按需加载工作流与资源。工具经确认、配置和样例测试后才能调用。</p>
+        <p class="subtitle">管理个人技能。对话提示约束回答风格，playbook 提供处理策略，agent_skill 按需加载工作流与资源。工具由管理员在聊天中 @tool 添加，经样例测试与标准化评测后进入工具注册表（工具治理中心查看）。</p>
       </div>
       <button class="btn btn-primary new-btn" @click="openCreate">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
@@ -20,7 +20,6 @@
       </button>
     </header>
 
-    <PersonalToolsPanel />
     <section class="skill-group suggestion-group" aria-labelledby="suggestion-title">
       <div class="suggestion-head">
         <h2 id="suggestion-title" class="group-title">个人能力建议</h2>
@@ -30,7 +29,7 @@
       <p class="suggestion-hint">接受建议将联网查找资料并生成待确认草稿，不改变普通聊天的联网开关，也不会自动安装或标记能力已实现。</p>
       <p v-if="suggestionError" class="suggestion-error" role="alert">{{ suggestionError }}</p>
       <p v-if="suggestionsLoading" role="status">正在加载个人建议…</p>
-      <p v-else-if="!suggestions.length && !suggestionDrafts.length && !acceptances.length" class="suggestion-hint">暂无新建议、待确认草稿或待验收能力。也可在对话中主动使用 @skills 或 @tool。</p>
+      <p v-else-if="!suggestions.length && !suggestionDrafts.length && !acceptances.length" class="suggestion-hint">暂无新建议、待确认草稿或待验收能力。也可在对话中主动使用 @skills。</p>
       <article v-for="item in suggestions" :key="item.id" class="suggestion-item">
         <h3>{{ item.label }} · {{ item.count }} 条独立请求</h3>
         <p>{{ item.message }}</p>
@@ -359,10 +358,10 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted, onActivated } from 'vue'
+import { useQueryCacheStore } from '@/stores/queryCache'
 import { useRouter } from 'vue-router'
 import MarkdownIt from 'markdown-it'
-import PersonalToolsPanel from '@/components/PersonalToolsPanel.vue'
 import SkillDraftCard from '@/components/SkillDraftCard.vue'
 import { listSkills, createSkill, updateSkill, deleteSkill, getSkillDoc, getSkillDocRef,
   listPersonalSuggestions, markPersonalSuggestionsSeen, acceptPersonalSuggestion, dismissPersonalSuggestion,
@@ -457,7 +456,7 @@ function updateSuggestionDraft(draft) {
   if (index < 0) suggestionDrafts.value.push(draft)
   else suggestionDrafts.value[index] = draft
   if (draft.status === 'imported') {
-    load()
+    load(1)
     if (previousStatus !== 'imported') loadSuggestions()
   }
 }
@@ -531,12 +530,15 @@ function showToast(message, error = false) {
   toastTimer = setTimeout(() => { toast.value = null }, 2600)
 }
 
-async function load() {
+// 技能列表经统一查询缓存：热切换先展示缓存，写操作后 force 重拉
+async function load(force = 0) {
   loading.value = true
   loadError.value = ''
   try {
-    const res = await listSkills()
-    skills.value = res.data.skills || []
+    const data = await useQueryCacheStore().cachedGet('skills', { kind: 'list' },
+      async () => (await listSkills()).data,
+      { force: !!force, onRevalidate: (d) => { skills.value = d.skills || [] } })
+    skills.value = data.skills || []
   } catch (err) {
     loadError.value = '加载技能失败：' + (err.response?.data?.detail || err.message)
   } finally {
@@ -671,7 +673,7 @@ async function save() {
       showToast('技能已创建')
     }
     showEditor.value = false
-    await load()
+    await load(1)
   } catch (err) {
     editorError.value = err.response?.data?.detail || err.message
   } finally {
@@ -690,7 +692,7 @@ async function confirmDelete() {
     await deleteSkill(deleteTarget.value.id)
     showToast('技能已删除')
     deleteTarget.value = null
-    await load()
+    await load(1)
   } catch (err) {
     showToast('删除失败：' + (err.response?.data?.detail || err.message), true)
   } finally {
@@ -749,6 +751,8 @@ function closeDoc() {
 }
 
 onMounted(() => Promise.all([load(), loadSuggestions()]))
+// KeepAlive 回页：缓存先展示，资源版本落后时后台重验
+onActivated(() => load())
 onUnmounted(() => {
   disposed = true
   for (const controller of suggestionRequests) controller.abort()
@@ -770,9 +774,14 @@ onUnmounted(() => {
 .acceptance-note textarea { width: 100%; box-sizing: border-box; resize: vertical; padding: 8px; border: 1px solid #d8c6a8; border-radius: 8px; background: #fffdf9; color: inherit; font: inherit; }
 .acceptance-check { display: flex; align-items: flex-start; gap: 7px; margin: 12px 0; font-size: 13px; line-height: 1.6; }
 .skills-view {
+  /* .main-content 为 overflow:hidden 的 flex 列容器，页面须自带滚动区 */
+  flex: 1;
+  min-height: 0;
+  width: 100%;
   max-width: 900px;
   margin: 0 auto;
   padding: 28px 24px 80px;
+  overflow-y: auto;
   color: var(--color-text);
 }
 .skills-header {

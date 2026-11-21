@@ -23,6 +23,7 @@ from typing import AsyncGenerator, List, Optional
 
 from app.config import settings
 from app.core import db
+from app.core import call_context
 from app.core.request_budget import iterate, close_resources
 from app.core import observability as obs
 from app.core.evidence_checker import check_evidence_sufficiency, verify_citations
@@ -122,9 +123,16 @@ class Message:
         self.use_knowledge = use_knowledge
         self.use_search = use_search
         self.attachments = attachments or []  # 用户消息附件元数据 [{file_id, filename, kind}]
-        # Agent 中间过程快照 {plan, thoughts, tools}：历史/刷新后灰色过程区可展开回看
-        self.agent_process = ({key: agent_process.get(key, []) for key in ("plan", "tools", "tool_sources")}
-                              if isinstance(agent_process, dict) else None)
+        # Agent 中间过程快照：旧版 {plan, tools, tool_sources}；v2 额外携带
+        # steps/error/intent/trace_id/status 等（仅写入时存在的键，旧消息形状不变）
+        self.agent_process = None
+        if isinstance(agent_process, dict):
+            proc = {key: agent_process.get(key, []) for key in ("plan", "tools", "tool_sources")}
+            for key in ("schema_version", "trace_id", "run_id", "steps", "error",
+                        "intent", "status", "final_message_id"):
+                if key in agent_process:
+                    proc[key] = agent_process[key]
+            self.agent_process = proc
         self.cache_info = cache_info or {}
 
     def to_dict(self) -> dict:
@@ -371,6 +379,10 @@ class ChatService:
             SSE 格式的事件流
         """
         obs.start_trace("chat", user_id, query, session_id=session_id)
+        # 请求级调用上下文：全链路（含线程池内的 embedding/rerank/OCR）按发起用户归属
+        ctx_token = call_context.activate(
+            actor_user_id=user_id or "", trace_id=obs.current_trace_id(),
+            origin="guest" if user_id in ("", "guest") else "chat")
         deadline = time.monotonic() + max(0.01, settings.CHAT_REQUEST_TIMEOUT)
         tasks, partial = set(), []
         current_task = asyncio.current_task()
@@ -399,6 +411,14 @@ class ChatService:
                         last_search = data["search_results"]
                 elif data.get("event") == "done":
                     status = "ok"
+                elif data.get("event") == "error":
+                    # 错误闭环：结构化回填 trace 失败归因，不再落「未知错误」
+                    status = "error"
+                    err_code = str(data.get("code") or "")
+                    err_msg = str(data.get("message") or "")
+                    obs.mark_failed(
+                        f"[{err_code}] {err_msg}" if err_code else (err_msg or "未知错误"),
+                        code=err_code or "stream_error", stage=str(data.get("stage") or ""))
                 yield event
                 if data.get("event") == "error":
                     return
@@ -442,8 +462,11 @@ class ChatService:
                     has_assistant = session and any(m.role == "assistant" for m in session.messages[user_index + 1:])
                     if session and not has_assistant and db.query_one("SELECT message_id FROM chat_messages WHERE message_id=? AND session_id=?", (user_message_id, session_id)):
                         content = (partial_text + "\n\n[生成已中断，内容不完整]") if partial_text else "[生成已中断，内容不完整]"
+                        interrupt_process = obs.build_process_snapshot(status=status)
+                        interrupt_process.update({"plan": [], "tools": [], "tool_sources": []})
                         session.add_message(Message(role="assistant", content=content, interrupted=True,
-                                                    sources=last_sources, search_results=last_search))
+                                                    sources=last_sources, search_results=last_search,
+                                                    agent_process=interrupt_process))
                         self._persist_session(session)
                     if status in ("cancelled", "timeout") and session:
                         try:
@@ -461,6 +484,7 @@ class ChatService:
                 if not active:
                     self._active_tasks.pop(session_id, None)
                 obs.end_trace(status=status)
+                call_context.deactivate(ctx_token)
 
     async def _chat_stream_inner(
         self,
@@ -618,7 +642,8 @@ class ChatService:
         #    每轮变化的内容（相关记忆/OCR/知识上下文）一律置尾，避免污染头部前缀。
         # 统一走网关 chat_answer 业务路由（规则+模型由网关解析；llm_provider 参数已废弃）
         # model 为聊天页用户显式选择的模型（空=按业务路由/规则内均衡解析）
-        llm = LLMFactory.create_for_role("chat_answer", user_id, rule_id, model or None)
+        # 聊天模型延迟创建：探针命中/Agent 分流/个人工具轮均不需要该客户端，
+        # 真正进入快路径生成前才创建（见步骤 6.5 前），避免工具任务白占网关解析。
         llm_messages = self._build_system_prompt()
         # segment 级 token 度量：系统提示段
         obs.note_segment("system", "\n".join(m.get("content", "") for m in llm_messages))
@@ -674,31 +699,43 @@ class ChatService:
                 "content": f"【用户已启用的技能要求，请在回答中遵循】\n{skills_text}",
             })
 
-        # 2.7 整改2：检索前语义缓存探针——高相似重复提问直接复用缓存答案，
-        # 跳过检索/复杂度分流/上游生成。安全门禁：无附件/联网/命令/强刷/续任务，
-        # 且无查询相关记忆/技能/个人工具等个性化上下文（个性化答案不得复用）。
-        # 常驻画像属用户稳定上下文（同用户跨会话一致），允许复用，
-        # 由 profile_hash 保证画像变更后旧条目不再命中。
-        if (use_knowledge and not use_search and not attachments and not parsed_command.name
-                and not force_refresh and not resume_checkpoint_id and not relevant_text and not skills_text
-                and not _SKILL_DISTILL_RE.search(query or "") and user_id not in ("", "guest")):
+        # 2.7 语义缓存探针（意图改写之后、检索之前）：高相似重复提问直接复用缓存答案，
+        # 跳过检索/复杂度分流/证据校验/上游生成。安全门禁：无附件/联网/命令/强刷/续任务，
+        # 且无查询相关记忆/个人工具/运行时 Skill 等逐轮个性化上下文（不得复用）；
+        # prompt 类 Skills 与常驻画像属用户稳定上下文，允许复用，
+        # 由 skills_hash/profile_hash 保证内容变更后旧条目不再命中。
+        search_query, _intent, intent_scope, intent_done = "", {}, "personal", False
+        probe_eligible = (use_knowledge and not use_search and not attachments and not parsed_command.name
+                          and not force_refresh and not resume_checkpoint_id and not relevant_text
+                          and not _SKILL_DISTILL_RE.search(query or "") and user_id not in ("", "guest"))
+        if probe_eligible:
             from app.services import skill_runtime as _probe_sr, personal_tools as _probe_pt
+            probe_eligible = not _probe_sr.catalog(user_id) and not _probe_pt.catalog(user_id)
+        if probe_eligible:
             from app.services.gateway import semantic_cache as _probe_sc
-            if not _probe_sr.catalog(user_id) and not _probe_pt.catalog(user_id):
-                try:
-                    probe_hit = await _probe_sc.probe(
-                        user_id, effective_query,
-                        profile_hash=cache_policy.digest(profile_text))
-                except Exception as probe_err:
-                    logger.warning("语义缓存探针失败（走正常流水线）: %s", probe_err)
-                    probe_hit = None
-                if probe_hit:
-                    obs.record_step("semantic_cache_probe",
-                                    f"hit score={probe_hit.get('score')} entry={probe_hit.get('id')}",
-                                    fail_trace=False)
-                    async for ev in self._finalize_cache_hit(session, user_msg, probe_hit):
-                        yield ev
-                    return
+            yield f"data: {self._json_event('status', {'phase': 'rewriting', 'message': '正在理解你的问题...'})}\n\n"
+            search_query, _intent = await self._rewrite_intent(retrieval_query, llm_provider, ocr_excerpt, user_id=user_id)
+            intent_scope = _intent.get("scope") or "personal"
+            intent_done = True
+            if search_query != retrieval_query.strip():
+                logger.info("检索查询改写: %r → %r", retrieval_query[:50], search_query[:50])
+            try:
+                probe_hit = await _probe_sc.probe(
+                    user_id, effective_query,
+                    profile_hash=cache_policy.digest(profile_text),
+                    skills_hash=cache_policy.digest(skills_text + "\n" + instruction_text),
+                    search_query=search_query)
+            except Exception as probe_err:
+                logger.warning("语义缓存探针失败（走正常流水线）: %s", probe_err)
+                probe_hit = None
+            if probe_hit:
+                obs.record_step("semantic_cache_probe",
+                                f"hit score={probe_hit.get('score')} entry={probe_hit.get('id')}",
+                                fail_trace=False)
+                async for ev in self._finalize_cache_hit(session, user_msg, probe_hit):
+                    yield ev
+                return
+            obs.record_step("semantic_cache_probe", "miss，走检索流水线", fail_trace=False)
 
         from app.services import skill_runtime
         runtime_skill = {"context": "", "tool_used": False, "records": []}
@@ -751,8 +788,11 @@ class ChatService:
                         raise ValueError("Skill 依赖在加载后发生变化")
                 else:
                     selected_tools = await tool_workflow.select_for_query(user_id, effective_query)
-            except Exception:
-                yield chat_agent.sse("error", {"code": "tool_selection_unavailable", "message": "个人工具匹配失败或 Skill 依赖已变更，未执行该工作流。请核对工具启用状态与模型配置后重试。"})
+            except Exception as exc:
+                obs.record_step("tool_selection", str(exc), status="error", error=str(exc))
+                obs.mark_failed(f"[tool_selection_unavailable] {exc}",
+                                code="tool_selection_unavailable", stage="tool_selection")
+                yield chat_agent.sse("error", {"code": "tool_selection_unavailable", "stage": "tool_selection", "message": "个人工具匹配失败或 Skill 依赖已变更，未执行该工作流。请核对工具启用状态与模型配置后重试。"})
                 return
 
         # 3.5 复杂度分流：simple→fast（下方现有流水线不变），moderate→ReAct，complex→Plan&Execute。
@@ -824,6 +864,20 @@ class ChatService:
             f"realtime={route.is_realtime} | {route.reason}",
             fail_trace=False,
         )
+        # 执行决策（B1）：纯实时任务 + 已授权工具 → 直调工具，跳过知识检索/重排/证据校验；
+        # 混合个人数据意图（笔记/资料/结合我的）仍保留检索证据，不一刀切。
+        realtime_direct = (route.is_realtime and bool(selected_tools) and not attachments
+                           and not re.search(r"笔记|资料|结合我的|根据我的", query or ""))
+        if selected_tools:
+            execution_mode = "direct_tool" if realtime_direct else (
+                "mixed" if (use_knowledge or use_search) else "model_tools")
+        else:
+            execution_mode = "retrieval" if (use_knowledge or use_search) else "answer"
+        obs.record_step("execution_decision",
+                        f"mode={execution_mode} realtime={route.is_realtime} tools={len(selected_tools)}",
+                        fail_trace=False)
+        if route.is_realtime:
+            yield f"data: {self._json_event('status', {'phase': 'intent_realtime', 'realtime': True, 'message': '已识别为实时查询，将优先使用实时数据源' + ('，直接调用已授权工具并跳过知识检索' if realtime_direct else '')})}\n\n"
         sources = []
         search_results = []
         retrieve_task = None
@@ -834,47 +888,39 @@ class ChatService:
         search_failed = False
         # 意图识别产出的缓存域标签（公共/个人）；默认 personal（安全），
         # 启用知识库时由 analyze_intent 覆盖，作为网关语义缓存的键之一。
-        intent_scope = "personal"
-        _intent = {}
+        # （探针 eligible 的轮次已在 2.7 提前完成改写，此处直接复用）
         evidence_sufficient = False
         try:
             cache_revision = cache_policy.revisions()
         except Exception:
             cache_revision = {}
-        search_query = ""
 
         if use_knowledge:
-            # 发出检索开始信号
-            yield f"data: {self._json_event('status', {'phase': 'retrieving', 'message': '正在检索知识库...'})}\n\n"
+            # 发出检索开始信号（实时直调轮不发，避免误导「正在检索」）
+            if not realtime_direct:
+                yield f"data: {self._json_event('status', {'phase': 'retrieving', 'message': '正在检索知识库...'})}\n\n"
 
-            # 意图改写：用 LLM 将检索查询改写为更适合向量检索的查询（超时保护，避免卡死流水线）
-            # 检索查询=用户文本 + 图片 OCR 摘录（截图检索），改写负责把长摘录压成检索式
-            yield f"data: {self._json_event('status', {'phase': 'rewriting', 'message': '正在理解你的问题...'})}\n\n"
-            t_rewrite = time.monotonic()
-            try:
-                # 意图识别是增强而非必需：8s 内未完成即回退原问题检索，避免慢上游吃满预算
-                _intent = await asyncio.wait_for(
-                    analyze_intent(retrieval_query, llm_provider), timeout=8
-                )
-                search_query = _intent.get("query") or retrieval_query.strip()
+            if not intent_done:
+                # 意图改写：用 LLM 将检索查询改写为更适合向量检索的查询（超时保护，避免卡死流水线）
+                # 检索查询=用户文本 + 图片 OCR 摘录（截图检索），改写负责把长摘录压成检索式
+                yield f"data: {self._json_event('status', {'phase': 'rewriting', 'message': '正在理解你的问题...'})}\n\n"
+                search_query, _intent = await self._rewrite_intent(retrieval_query, llm_provider, ocr_excerpt, user_id=user_id)
                 intent_scope = _intent.get("scope") or "personal"
-                obs.record_llm("intent_rewrite", retrieval_query, search_query, t0=t_rewrite, fail_trace=False)
-            except asyncio.TimeoutError:
-                logger.warning("意图改写超时，使用原问题检索")
-                obs.record_llm("intent_rewrite", retrieval_query, "", t0=t_rewrite,
-                               status="error", error="timeout", fail_trace=False)
-                # 贴图场景回退时按预算截断（OCR 摘录可能数百字，过长会稀释检索信号）；
-                # 纯文本提问保持原样，行为与改造前一致
-                search_query = retrieval_query.strip()
-                if ocr_excerpt:
-                    search_query = search_query[:max(60, settings.OCR_RETRIEVAL_CHARS)]
-            if search_query != retrieval_query.strip():
-                logger.info("检索查询改写: %r → %r", retrieval_query[:50], search_query[:50])
+                intent_done = True
+                if search_query != retrieval_query.strip():
+                    logger.info("检索查询改写: %r → %r", retrieval_query[:50], search_query[:50])
 
-            retrieve_task = asyncio.create_task(
-                asyncio.to_thread(knowledge_service.retrieve_for_user, search_query, user_id)
-            )
-            tasks.add(retrieve_task)
+            if realtime_direct:
+                # 纯实时直调：显式记录被跳过的阶段（过程面板展示原因，而非阶段凭空消失）
+                obs.record_skip("knowledge_retrieve", "实时任务直调工具，跳过知识库检索")
+                obs.record_skip("rerank", "实时任务直调工具，跳过重排序")
+                obs.record_skip("evidence_check", "实时任务直调工具，跳过证据校验")
+                yield f"data: {self._json_event('status', {'phase': 'retrieval_skipped', 'message': '实时查询直接调用工具，已跳过知识检索/重排序/证据校验'})}\n\n"
+            else:
+                retrieve_task = asyncio.create_task(
+                    asyncio.to_thread(knowledge_service.retrieve_for_user, search_query, user_id)
+                )
+                tasks.add(retrieve_task)
 
         if use_search:
             yield f"data: {self._json_event('status', {'phase': 'searching', 'message': '正在联网搜索...'})}\n\n"
@@ -1012,7 +1058,7 @@ class ChatService:
             async with aclosing(self._personal_tool_turn(session, user_msg, tool_messages, selected_tools,
                     rule_id, model, use_knowledge, use_search, sources, search_results,
                     force_refresh or route.is_realtime or bool(re.search(r"最新|实时|现在|当前|latest|real.?time", query, re.I)),
-                    runtime_skill["records"], runtime_skill.get("identity"))) as stream:
+                    runtime_skill["records"], runtime_skill.get("identity"), intent=_intent or None)) as stream:
                 async for event in stream:
                     yield event
             return
@@ -1027,6 +1073,8 @@ class ChatService:
         llm_messages.append({"role": "user", "content": augmented_query})
 
         # 6.5 只有服务器签发的 v2 合同允许复用；旧标签不能触发缓存。
+        # 聊天模型在此才创建（延迟创建：工具轮/Agent 轮/探针命中已提前 return）
+        llm = LLMFactory.create_for_role("chat_answer", user_id, rule_id, model or None)
         cache_decision = {"kind": "bypass", "reason": "unavailable", "ttl_seconds": 0}
         if getattr(llm, "extra_body", None) is not None:
             policy_args = dict(
@@ -1039,7 +1087,7 @@ class ChatService:
             try:
                 preliminary = cache_policy.decide(effective_query, freshness="static", **policy_args)
                 if not use_knowledge and preliminary["kind"] != "bypass" and cache_policy.signing_key():
-                    _intent = await asyncio.wait_for(analyze_intent(effective_query), timeout=6)
+                    _intent = await asyncio.wait_for(analyze_intent(effective_query, user_id=user_id), timeout=6)
                 cache_decision = cache_policy.decide(effective_query, freshness=_intent.get("freshness", "unknown"), **policy_args)
                 if not cache_revision or cache_revision != cache_policy.revisions():
                     cache_decision = {"kind": "bypass", "reason": "dependency_changed", "ttl_seconds": 0}
@@ -1047,10 +1095,13 @@ class ChatService:
                     user_id=user_id, query=effective_query, messages=llm_messages, model=llm.model,
                     decision=cache_decision, sources=sources, revision=cache_revision,
                     use_knowledge=use_knowledge, use_search=use_search,
-                    profile_hash=cache_policy.digest(profile_text))
+                    profile_hash=cache_policy.digest(profile_text),
+                    skills_hash=cache_policy.digest(skills_text + "\n" + instruction_text),
+                    search_query=search_query)
             except Exception:
                 llm.extra_body.pop("_gw_cache_contract", None)
-            obs.record_step("semantic_cache_policy", f"{cache_decision['kind']} {cache_decision['reason']}", fail_trace=False)
+            # 写侧合同（检索后签发）：读侧命中检查已在 2.7 探针完成（意图改写后、检索前）
+            obs.record_step("cache_write_policy", f"{cache_decision['kind']} {cache_decision['reason']}", fail_trace=False)
 
         # 7. 流式 LLM 生成
         yield f"data: {self._json_event('status', {'phase': 'generating', 'message': '正在生成回答...'})}\n\n"
@@ -1112,8 +1163,8 @@ class ChatService:
             else:
                 hint = f"生成回答时出错: {error_msg}"
 
-            # 发出错误事件，让前端显示错误而不是一直转圈
-            yield f"data: {self._json_event('error', {'message': hint})}\n\n"
+            # 发出错误事件，让前端显示错误而不是一直转圈（结构化错误契约：code/stage）
+            yield f"data: {self._json_event('error', {'message': hint, 'code': 'answer_generation_failed', 'stage': 'answer_generation'})}\n\n"
             full_response = hint
 
         # 7.5 轻量 Self-RAG：核对回答中引用编号的真实性
@@ -1163,10 +1214,10 @@ class ChatService:
                     if has_low:
                         # 需求7：低危 CLI 方案内化为模型自动执行，不弹卡等用户确认；
                         # 先给界面友好等待提示，循环执行+回喂直到解决问题。
-                        yield f"data: {self._json_event('status', {'phase': 'auto_resolving', 'message': '🔧 正在自动调用命令行能力尝试解决你的问题，请耐心等待…'})}\n\n"
+                        yield f"data: {self._json_event('status', {'phase': 'auto_resolving', 'message': '🔧 正在调用实时数据工具尝试解决你的问题，请耐心等待…'})}\n\n"
                         auto = await capability_gap.auto_resolve(gap_id)
                     if auto and auto.get("resolved") and auto.get("answer"):
-                        bridge = "\n\n---\n\n✅ 已通过命令行能力获取到实时数据，为你整理如下：\n\n"
+                        bridge = "\n\n---\n\n✅ 已通过实时数据工具获取到信息，为你整理如下：\n\n"
                         yield f"data: {self._json_event('token', {'content': bridge})}\n\n"
                         yield f"data: {self._json_event('token', {'content': auto['answer']})}\n\n"
                         full_response += bridge + auto["answer"]
@@ -1177,10 +1228,12 @@ class ChatService:
                             fail_trace=False,
                         )
                     else:
-                        # 无低危方案 / 自动执行未解决 → 回退 HITL 卡片由用户选择
+                        # 自动执行未解决 → DeepSeek 式降级：如实说明限制 + 应用内建议，
+                        # 不再让用户选择/执行命令行方案
                         fallback_sols = (auto or {}).get("solutions") or solutions
                         yield chat_agent.capability_gap_event(
-                            gap_id, gap_scenario, label, fallback_sols, query[:60],
+                            gap_id, gap_scenario, label, fallback_sols, query,
+                            use_search=use_search,
                         )
                         obs.record_step(
                             "capability_gap",
@@ -1194,6 +1247,10 @@ class ChatService:
             logger.warning("能力缺口检测失败（忽略）: %s", e)
 
         # 8. 保存助手消息（LLM 生成失败时不保存知识来源，避免展示与回答无关的检索结果）
+        # 过程快照 v2：steps/error/intent 随消息落库，灰色过程区历史与观测界面同源
+        fast_process = obs.build_process_snapshot(
+            intent=_intent or None, status="error" if llm_error is not None else "ok")
+        fast_process.update({"plan": [], "tools": runtime_skill["records"], "tool_sources": []})
         assistant_msg = Message(
             role="assistant",
             content=full_response,
@@ -1202,8 +1259,9 @@ class ChatService:
             use_knowledge=use_knowledge,
             use_search=use_search,
             cache_info=getattr(llm, "cache_info", {}) if llm_error is None else {},
-            agent_process={"plan": [], "tools": runtime_skill["records"]} if runtime_skill["records"] else None,
+            agent_process=fast_process,
         )
+        assistant_msg.agent_process["final_message_id"] = assistant_msg.message_id
         # 后处理也属于本轮总预算；取消后不再发起摘要或记忆模型调用。
         from copy import copy
         summary_session = copy(session)
@@ -1236,6 +1294,32 @@ class ChatService:
         }
         yield f"data: {self._json_event('done', done_data)}\n\n"
 
+    async def _rewrite_intent(self, retrieval_query, llm_provider, ocr_excerpt, user_id=""):
+        """意图改写（8s 超时保护）：返回 (search_query, intent_dict)。
+
+        意图识别是增强而非必需：超时回退原问题检索，避免慢上游吃满预算。
+        span 输出记完整意图 JSON（query/scope/freshness），观测界面可回看实时标签。
+        """
+        t_rewrite = time.monotonic()
+        try:
+            _intent = await asyncio.wait_for(
+                analyze_intent(retrieval_query, llm_provider, user_id=user_id), timeout=8
+            )
+            search_query = _intent.get("query") or retrieval_query.strip()
+            obs.record_llm("intent_rewrite", retrieval_query,
+                           json.dumps(_intent, ensure_ascii=False), t0=t_rewrite, fail_trace=False)
+            return search_query, _intent
+        except asyncio.TimeoutError:
+            logger.warning("意图改写超时，使用原问题检索")
+            obs.record_llm("intent_rewrite", retrieval_query, "", t0=t_rewrite,
+                           status="error", error="timeout", fail_trace=False)
+            # 贴图场景回退时按预算截断（OCR 摘录可能数百字，过长会稀释检索信号）；
+            # 纯文本提问保持原样
+            search_query = retrieval_query.strip()
+            if ocr_excerpt:
+                search_query = search_query[:max(60, settings.OCR_RETRIEVAL_CHARS)]
+            return search_query, {}
+
     async def _finalize_cache_hit(self, session, user_msg, hit):
         """整改2：检索前探针命中收尾——复用缓存答案与来源，跳过检索与生成。"""
         answer = hit.get("answer") or ""
@@ -1249,8 +1333,12 @@ class ChatService:
         yield f"data: {self._json_event('cache_hit', {'cache_info': cache_info, 'score': hit.get('score')})}\n\n"
         score_label = hit.get("score")
         yield f"data: {self._json_event('status', {'phase': 'retrieved', 'message': f'语义缓存命中（相似度 {score_label}），复用缓存答案与 {len(sources)} 份来源，跳过检索与生成', 'sources': sources})}\n\n"
+        cache_process = obs.build_process_snapshot(status="ok")
+        cache_process.update({"plan": [], "tools": [], "tool_sources": []})
         assistant_msg = Message(role="assistant", content=answer, sources=sources,
-                                use_knowledge=True, cache_info=cache_info)
+                                use_knowledge=True, cache_info=cache_info,
+                                agent_process=cache_process)
+        assistant_msg.agent_process["final_message_id"] = assistant_msg.message_id
         session.add_message(assistant_msg)
         self._persist_session(session)
         obs.note_segment("knowledge", "\n".join(s.get("text") or s.get("title") or "" for s in sources))
@@ -1265,7 +1353,7 @@ class ChatService:
         yield f"data: {self._json_event('done', {'session_id': session.session_id, 'user_message_id': user_msg.message_id, 'message': assistant_msg.to_dict()})}\n\n"
 
     async def _personal_tool_turn(self, session, user_msg, messages, tools, rule_id, model,
-                                  use_knowledge, use_search, sources, search_results, force_refresh, skill_records, skill_identity=None):
+                                  use_knowledge, use_search, sources, search_results, force_refresh, skill_records, skill_identity=None, intent=None):
         """个人工具轮次：预留稳定消息，原生调用、来源与取消终态共同持久化。"""
         from app.core.tool_stream import ToolModelUnavailable
         from app.services.tools.base import ToolContext
@@ -1283,21 +1371,46 @@ class ChatService:
                     current_identity = None
                 if current_identity != skill_identity:
                     result.update(status="error", answer="Skill 或关联工具状态已变化，未执行该工作流。请重新加载后重试。")
-                    yield chat_agent.sse("error", {"code": "skill_dependencies_changed", "message": result["answer"]})
+                    obs.record_step("skill_identity_check", result["answer"], status="error", error=result["answer"])
+                    obs.mark_failed(f"[skill_dependencies_changed] {result['answer']}",
+                                    code="skill_dependencies_changed", stage="skill_identity_check")
+                    yield chat_agent.sse("error", {"code": "skill_dependencies_changed", "stage": "skill_identity_check", "message": result["answer"]})
                     return
-            llm = LLMFactory.create_for_role("tool_decision", session.user_id, rule_id, model or None, require_tools=True)
             ctx = ToolContext(session.user_id, "", "", "", session_id=session.session_id,
                               message_id=assistant.message_id, force_refresh=force_refresh or bool(skill_identity))
-            yield chat_agent.sse("status", {"phase": "native_tools", "message": "正在调用已授权工具；个人 API 使用独立网络授权"})
-            async with aclosing(run_tool_loop(llm, messages, ctx, tools, result=result, stream_final=True)) as stream:
-                async for event in stream:
-                    yield chat_agent.sse(event["event"], {k: v for k, v in event.items() if k != "event"})
+            # 确定性直调优先（B2）：需求契约参数齐全时直接执行已授权工具，
+            # 不创建决策模型；参数不全/工具缺失自动回退模型决策。
+            from app.services.tools import direct
+            query_text = next((m.get("content") or "" for m in reversed(messages) if m.get("role") == "user"), "")
+            direct_plan = direct.plan(query_text, session.user_id, tools)
+            if direct_plan is not None:
+                yield chat_agent.sse("status", {"phase": "direct_tool", "message": "参数完整，直接调用已授权工具读取实时数据（无需决策模型）"})
+                async with aclosing(direct.execute(direct_plan, ctx, result=result)) as stream:
+                    async for event in stream:
+                        yield chat_agent.sse(event["event"], {k: v for k, v in event.items() if k != "event"})
+            else:
+                try:
+                    llm = LLMFactory.create_for_role("tool_decision", session.user_id, rule_id, model or None, require_tools=True)
+                except ToolModelUnavailable as exc:
+                    # 解耦（B2）：tool_decision 绑定缺失/不兼容不再硬阻断工具执行，
+                    # 自动复用兼容聊天模型（仍受网关规则与原生工具能力校验约束）。
+                    obs.record_step("tool_model_fallback",
+                                    f"tool_decision 不可用（{exc}），复用 chat_answer 兼容模型", fail_trace=False)
+                    llm = LLMFactory.create_for_role("chat_answer", session.user_id, rule_id, model or None, require_tools=True)
+                yield chat_agent.sse("status", {"phase": "native_tools", "message": "正在调用已授权工具；个人 API 使用独立网络授权"})
+                async with aclosing(run_tool_loop(llm, messages, ctx, tools, result=result, stream_final=True)) as stream:
+                    async for event in stream:
+                        yield chat_agent.sse(event["event"], {k: v for k, v in event.items() if k != "event"})
             if asyncio.current_task().cancelling():
                 raise asyncio.CancelledError()
             finished = result.get("status") in ("ok", "unverified", "partial")
-        except ToolModelUnavailable:
-            result.update(status="error", answer="未配置兼容的原生工具决策模型，未执行个人工具。请在模型网关配置 tool_decision 与上游工具能力。")
-            yield chat_agent.sse("error", {"code": "tool_model_unavailable", "message": result["answer"]})
+        except ToolModelUnavailable as exc:
+            detail = str(exc) or "未配置兼容的原生工具决策模型"
+            result.update(status="error", answer="暂无兼容的原生工具决策模型（tool_decision 与 chat_answer 均未配置 Function Calling 能力），未执行个人工具。请在模型网关为业务路由绑定支持原生工具调用的模型。", error=detail)
+            obs.record_step("tool_model_selection", detail, status="error", error=detail)
+            obs.mark_failed(f"[tool_model_unavailable] {detail}",
+                            code="tool_model_unavailable", stage="model_selection")
+            yield chat_agent.sse("error", {"code": "tool_model_unavailable", "stage": "model_selection", "message": result["answer"]})
         finally:
             assistant.content = result.get("answer") or "工具任务未完整结束，未取得可用答案。"
             assistant.interrupted = not finished
@@ -1305,8 +1418,13 @@ class ChatService:
                 assistant.content += "\n\n[生成已中断，内容不完整]"
             assistant.sources = sources if finished else []
             assistant.search_results = search_results if finished else []
-            assistant.agent_process = {"plan": [], "tools": skill_records + result.get("records", []),
-                                       "tool_sources": result.get("tool_sources", []) if finished else []}
+            tool_process = obs.build_process_snapshot(
+                intent=intent or None,
+                status=result.get("status") or ("ok" if finished else "error"))
+            tool_process.update({"plan": [], "tools": skill_records + result.get("records", []),
+                                 "tool_sources": result.get("tool_sources", []) if finished else [],
+                                 "final_message_id": assistant.message_id})
+            assistant.agent_process = tool_process
             if db.query_one("SELECT message_id FROM chat_messages WHERE message_id=? AND session_id=?", (user_msg.message_id, session.session_id)):
                 self._persist_session(session)
                 if finished and not asyncio.current_task().cancelling():
@@ -1317,7 +1435,8 @@ class ChatService:
             from app.services.usage import record_usage
             record_usage(session.user_id, sum(len(m.get("content") or "") for m in messages), len(assistant.content),
                          use_knowledge=use_knowledge, use_search=use_search)
-            yield chat_agent.sse("done", {"session_id": session.session_id, "user_message_id": user_msg.message_id, "message": assistant.to_dict()})
+            yield chat_agent.sse("done", {"session_id": session.session_id, "user_message_id": user_msg.message_id,
+                                          "status": result.get("status") or "ok", "message": assistant.to_dict()})
 
     async def _finalize_agent_turn(self, session, user_msg, result, use_knowledge, use_search, llm_provider):
         """Agent 轮次收尾：HITL 暂停只发 done；正常完成则落库/摘要/记忆/用量后发 done。
@@ -1328,10 +1447,16 @@ class ChatService:
         if result.get("hitl"):
             yield f"data: {self._json_event('done', {'session_id': session.session_id, 'user_message_id': user_msg.message_id, 'hitl': result['hitl']})}\n\n"
             return
-        # Agent 内部已出错（已发 error 事件）：不再落库，直接结束（外层见 error 会 return）
+        # Agent 内部已出错（已发 error 事件）：回填失败归因后结束（外层见 error 会 return）
         if result.get("status") == "error":
+            obs.mark_failed(result.get("error") or "Agent 轮次失败", code="agent_error", stage="agent")
             return
         full_response = result.get("answer", "")
+        agent_process = result.get("agent_process") or {}
+        agent_snapshot = obs.build_process_snapshot(status=result.get("status") or "ok")
+        agent_snapshot.update({"plan": agent_process.get("plan", []),
+                               "tools": agent_process.get("tools", []),
+                               "tool_sources": agent_process.get("tool_sources", [])})
         assistant_msg = Message(
             role="assistant",
             content=full_response,
@@ -1339,8 +1464,9 @@ class ChatService:
             search_results=result.get("search_results", []),
             use_knowledge=use_knowledge,
             use_search=use_search,
-            agent_process=result.get("agent_process"),
+            agent_process=agent_snapshot,
         )
+        assistant_msg.agent_process["final_message_id"] = assistant_msg.message_id
         from copy import copy
         summary_session = copy(session)
         summary_session.messages = [*session.messages, assistant_msg]

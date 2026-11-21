@@ -140,6 +140,11 @@ export const useAuthStore = defineStore('auth', () => {
   async function logout() {
     const { useChatStore } = await import('./chat')
     useChatStore().clearAllSessionData()
+    // 注销即清理查询缓存（含公共持久层）并关闭变更同步长连接
+    const { useQueryCacheStore } = await import('./queryCache')
+    useQueryCacheStore().clearAll()
+    const { stopSync } = await import('@/utils/syncClient')
+    stopSync()
     try {
       await logoutUser()
     } catch {

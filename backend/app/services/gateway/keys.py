@@ -133,18 +133,46 @@ def get_key(key_id: str) -> Optional[dict]:
     return _row_to_dict(row) if row else None
 
 
-def create_key(name: str, created_by: str = "", token_quota: int = 0,
-               request_quota: int = 0, allowed_models: Optional[List[str]] = None,
-               expires_at: Optional[str] = None, key_type: str = "public",
-               bound_users: Optional[List[str]] = None,
-               daily_token_limit: int = 0, daily_request_limit: int = 0,
-               rate_per_minute: int = 0) -> dict:
-    """创建密钥，返回 dict（含明文 key，仅此一次）。
+def _register_outbound_conn(conn, key_id: str, plain: str) -> None:
+    """事务内登记/移除出网明文（conn 感知，供注册/迁移同事务使用）。
 
-    - key_type=user：bound_users 必填（强制绑定 1..n 个用户）；
-    - key_type=public（默认）：可设每用户每日限额与流控（生成时设置）；
-    - 公共/用户密钥的明文登记到 outbound_keys 映射，供系统按用户解析自动携带。
+    gateway_settings 默认行缺失时惰性创建（与 settings.get_settings 同口径），
+    保证迁移阶段（早于任何业务读写）也能安全登记明文。
     """
+    row = conn.execute("SELECT outbound_keys FROM gateway_settings WHERE id='default'").fetchone()
+    if row is None:
+        conn.execute(
+            "INSERT INTO gateway_settings (id, audit_mode, unicode_detection, tool_cmd_detection,"
+            " outbound_detection, retry_count, disabled_rules, blacklist, whitelist,"
+            " log_retention_days, default_model, internal_key, outbound_keys,"
+            " security_alert_min_severity, updated_at)"
+            " VALUES ('default', 'audit', 1, 1, 1, 2, '[]', '[]', '[]', 30, '', '', '{}',"
+            " 'medium', ?)",
+            (_now(),),
+        )
+        mapping = {}
+    else:
+        try:
+            mapping = json.loads(row["outbound_keys"] or "{}")
+            if not isinstance(mapping, dict):
+                mapping = {}
+        except (json.JSONDecodeError, TypeError):
+            mapping = {}
+    if plain:
+        mapping[key_id] = plain
+    else:
+        mapping.pop(key_id, None)
+    conn.execute("UPDATE gateway_settings SET outbound_keys=?, updated_at=? WHERE id='default'",
+                 (json.dumps(mapping, ensure_ascii=False), _now()))
+
+
+def _create_key_conn(conn, *, name: str, created_by: str = "", token_quota: int = 0,
+                     request_quota: int = 0, allowed_models: Optional[List[str]] = None,
+                     expires_at: Optional[str] = None, key_type: str = "public",
+                     bound_users: Optional[List[str]] = None,
+                     daily_token_limit: int = 0, daily_request_limit: int = 0,
+                     rate_per_minute: int = 0) -> dict:
+    """在调用方事务内创建密钥（密钥行 + 出网明文登记原子落库），返回含明文的 dict。"""
     name = (name or "").strip()
     if not name:
         raise ValueError("密钥名称不能为空")
@@ -159,7 +187,7 @@ def create_key(name: str, created_by: str = "", token_quota: int = 0,
     plain = _generate_key()
     key_id = _new_id()
     models = [str(m).strip() for m in (allowed_models or []) if str(m).strip()]
-    db.execute(
+    conn.execute(
         "INSERT INTO gateway_keys (id, name, key_prefix, key_hash, token_quota, token_used,"
         " request_quota, request_count, allowed_models, enabled, expires_at, created_by,"
         " created_at, last_used_at, key_type, bound_users, daily_token_limit,"
@@ -173,11 +201,33 @@ def create_key(name: str, created_by: str = "", token_quota: int = 0,
          max(0, int(rate_per_minute or 0))),
     )
     if key_type in ("public", "user"):
-        from app.services.gateway import settings as settings_svc
-        settings_svc.set_outbound_key(key_id, plain)
-    info = get_key(key_id)
+        _register_outbound_conn(conn, key_id, plain)
+    row = conn.execute("SELECT * FROM gateway_keys WHERE id=?", (key_id,)).fetchone()
+    info = _row_to_dict(dict(row))
     info["key"] = plain  # 明文仅创建时返回
     return info
+
+
+def create_key(name: str, created_by: str = "", token_quota: int = 0,
+               request_quota: int = 0, allowed_models: Optional[List[str]] = None,
+               expires_at: Optional[str] = None, key_type: str = "public",
+               bound_users: Optional[List[str]] = None,
+               daily_token_limit: int = 0, daily_request_limit: int = 0,
+               rate_per_minute: int = 0) -> dict:
+    """创建密钥，返回 dict（含明文 key，仅此一次）。
+
+    - key_type=user：bound_users 必填（强制绑定 1..n 个用户）；
+    - key_type=public（默认）：可设每用户每日限额与流控（生成时设置）；
+    - 公共/用户密钥的明文登记到 outbound_keys 映射，供系统按用户解析自动携带。
+    """
+    with db.transaction() as conn:
+        return _create_key_conn(
+            conn, name=name, created_by=created_by, token_quota=token_quota,
+            request_quota=request_quota, allowed_models=allowed_models,
+            expires_at=expires_at, key_type=key_type, bound_users=bound_users,
+            daily_token_limit=daily_token_limit, daily_request_limit=daily_request_limit,
+            rate_per_minute=rate_per_minute,
+        )
 
 
 def update_key(key_id: str, patch: dict) -> Optional[dict]:
@@ -466,6 +516,69 @@ def resolve_outbound_key(user_id: str = "") -> Tuple[str, str]:
 
 
 # ---------------------------------------------------------------------------
+# 用户默认密钥（user_default_keys 唯一映射：注册同事务创建，存量迁移回填）
+# ---------------------------------------------------------------------------
+
+def get_default_key_id(user_id: str) -> str:
+    """用户默认出网密钥 id（未映射返回空）。"""
+    if not user_id:
+        return ""
+    row = db.query_one("SELECT key_id FROM user_default_keys WHERE user_id=?", (str(user_id),))
+    return str((row or {}).get("key_id") or "")
+
+
+def _ensure_default_conn(conn, user_id: str, username: str = "") -> dict:
+    """事务内确保用户默认密钥：已有绑定沿用最早有效密钥（不重签），从未绑定才新建。"""
+    now = _now()
+    row = conn.execute("SELECT key_id FROM user_default_keys WHERE user_id=?",
+                       (user_id,)).fetchone()
+    if row:
+        key_row = conn.execute("SELECT * FROM gateway_keys WHERE id=?",
+                               (row["key_id"],)).fetchone()
+        if key_row:
+            return _row_to_dict(dict(key_row))
+        # 映射指向已删除密钥：落入重建分支（ON CONFLICT 覆盖旧映射）
+    chosen = None
+    bound_rows = conn.execute(
+        "SELECT * FROM gateway_keys WHERE key_type='user' AND enabled=1"
+        " ORDER BY created_at ASC").fetchall()
+    for r in bound_rows:
+        info = _row_to_dict(dict(r))
+        if user_id in set(info["bound_users"]) and not info["expired"]:
+            chosen = info  # 单一绑定设默认；多绑定沿用最早有效
+            break
+    if chosen is None:
+        label = (username or "").strip() or user_id[:8]
+        chosen = _create_key_conn(conn, name=f"{label}的默认密钥", created_by="system",
+                                  key_type="user", bound_users=[user_id])
+    conn.execute(
+        "INSERT INTO user_default_keys (user_id, key_id, created_at, updated_at)"
+        " VALUES (?,?,?,?)"
+        " ON CONFLICT(user_id) DO UPDATE SET key_id=excluded.key_id,"
+        " updated_at=excluded.updated_at",
+        (user_id, chosen["id"], now, now),
+    )
+    return chosen
+
+
+def ensure_user_default_key(user_id: str, username: str = "", conn=None) -> dict:
+    """确保用户拥有默认出网密钥（幂等）。
+
+    - 已有映射且密钥存在：直接返回，不新建不重签；
+    - 存量绑定用户：沿用最早有效的绑定密钥设默认；
+    - 从未绑定：新建独立用户密钥（无限配额，管理员后续可调整）。
+    传入 conn 时在调用方事务内执行（注册/迁移同事务原子落库）。
+    """
+    user_id = str(user_id or "").strip()
+    if not user_id:
+        raise ValueError("user_id 不能为空")
+    if conn is not None:
+        return _ensure_default_conn(conn, user_id, username)
+    with db.transaction() as c:
+        return _ensure_default_conn(c, user_id, username)
+
+
+# ---------------------------------------------------------------------------
 # 每用户配额与流控（公共密钥每日限额 / 用户密钥流控）
 # ---------------------------------------------------------------------------
 
@@ -557,14 +670,20 @@ def user_quota_status(user_id: str) -> dict:
                     "request_quota": info["request_quota"],
                     "request_count": info["request_count"]})
         return out
-    # 无可用用户密钥：看是否有绑定的密钥但已用尽（降级提示）
-    bound = None
-    rows = db.query("SELECT * FROM gateway_keys WHERE key_type='user'")
-    for r in rows:
-        cand = _row_to_dict(r)
-        if user_id and user_id in set(cand["bound_users"]):
-            bound = cand
-            break
+    # 绑定即强制：有启用未过期的绑定密钥但总配额用尽 → 仍显示用户密钥与用尽状态，
+    # 出网不会降级公共密钥（代理鉴权层明确报 quota_exceeded）
+    bound = find_bound_user_key(user_id)
+    if bound:
+        usage = get_day_usage(bound["id"], user_id)
+        out.update({"key_type": "user", "key_name": bound["name"],
+                    "daily_tokens": usage["tokens"], "daily_requests": usage["requests"],
+                    "token_quota": bound["token_quota"], "token_used": bound["token_used"],
+                    "request_quota": bound["request_quota"],
+                    "request_count": bound["request_count"],
+                    "exhausted": True,
+                    "message": (f"您的专属密钥「{bound['name']}」配额已用尽，"
+                                "请联系管理员调整配额（出网不会自动降级公共密钥）")})
+        return out
     pub = find_public_key()
     if pub:
         usage = get_day_usage(pub["id"], user_id)
@@ -575,13 +694,9 @@ def user_quota_status(user_id: str) -> dict:
                     "daily_tokens": usage["tokens"], "daily_requests": usage["requests"],
                     "daily_token_limit": pub["daily_token_limit"],
                     "daily_request_limit": pub["daily_request_limit"],
-                    "exhausted": exhausted,
-                    "degraded": bool(bound)})
+                    "exhausted": exhausted})
         if exhausted:
             out["message"] = "今日公共密钥额度已用完，请联系管理员"
-        elif bound:
-            out["message"] = (f"您的专属密钥「{bound['name']}」配额已用尽，"
-                              "已自动降级为公共密钥继续提供服务")
         return out
     out["exhausted"] = True
     out["message"] = "今日公共密钥额度已用完，请联系管理员"

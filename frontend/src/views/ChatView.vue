@@ -73,11 +73,14 @@
           >
             <template #process>
               <AgentProcessPanel v-if="msg.agent_process" :plan="msg.agent_process.plan" :tools="msg.agent_process.tools"
+                :steps="msg.agent_process.steps || []" :error="msg.agent_process.error || null"
+                :intent="msg.agent_process.intent || null" :process-status="msg.agent_process.status || ''"
                 :collapsed="msg.process_collapsed !== false" @toggle="msg.process_collapsed = !(msg.process_collapsed !== false)" />
             </template>
             <template #cards>
               <ChatActionCard v-for="action in msg.actions || []" :key="action.id" :action="action" @update="store.updateAction" />
-              <CapabilityGapCard v-if="msg.capability_gap" :gap="msg.capability_gap" />
+              <CapabilityGapCard v-if="msg.capability_gap" :gap="msg.capability_gap"
+                @enable-search="(q) => store.enableSearchAndResend(q)" @retry="(q) => store.sendMessage(q)" />
               <SkillDraftCard v-for="d in msg.skill_drafts || []" :key="d.id" :draft="d" @update="store.updateSkillDraft" />
               <ToolDraftCard v-for="d in msg.tool_drafts || []" :key="d.id" :draft="d" @update="store.updateToolDraft" />
             </template>
@@ -99,7 +102,7 @@
           :cache-hit="!!store.cacheHitInfo?.hit" :cache-info="store.cacheHitInfo || {}">
           <template #process>
             <AgentProcessPanel :plan="store.agentPlan" :tools="store.agentTools"
-              :steps="pipelineSteps" :status-text="phaseMessage" :collapsed="processCollapsed" live
+              :steps="pipelineSteps" :status-text="phaseMessage" :error="store.streamError" :collapsed="processCollapsed" live
               @toggle="toggleProcess" />
           </template>
           <template #cards>
@@ -188,6 +191,9 @@ const phaseMessage = computed(() => {
     case 'skill_loading': return '正在匹配个人 Skill 并核验资源…'
     case 'tool_selecting': return '正在匹配已授权个人工具…'
     case 'native_tools': return '正在执行原生工具调用；个人 API 使用独立网络授权'
+    case 'direct_tool': return '参数完整，直接调用已授权工具读取实时数据（无需决策模型）'
+    case 'intent_realtime': return '已识别为实时查询，将优先使用实时数据源'
+    case 'retrieval_skipped': return '实时查询直接调用工具，已跳过知识检索/重排序/证据校验'
     case 'tool_results': return '工具结果已返回，正在核验数据并生成回答'
     case 'tool_start':
     case 'tool_processing': return '正在处理附件...'

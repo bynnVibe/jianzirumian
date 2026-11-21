@@ -34,6 +34,13 @@
         <option value="">全部场景</option>
         <option v-for="(label, r) in ROLE_LABELS" :key="r" :value="r">{{ label }}</option>
       </select>
+      <select v-model="filters.attribution" class="field-input" @change="reload">
+        <option value="">全部归属</option>
+        <option value="user">用户业务</option>
+        <option value="system">真实系统</option>
+        <option value="public">公共游客</option>
+        <option value="unattributed">历史未归属</option>
+      </select>
       <input v-model.trim="filters.model" class="field-input" placeholder="模型名" @keyup.enter="reload" />
       <select v-model="filters.key_id" class="field-input" @change="reload">
         <option value="">全部密钥</option>
@@ -57,6 +64,8 @@
           <span class="risk-tag" :class="headBadge(row).cls">{{ headBadge(row).text }}</span>
           <span class="status-tag" :class="`st-${row.status}`">{{ statusLabel(row.status) }}</span>
           <span v-if="row.role" class="scene-tag" :title="`业务场景 role=${row.role}`">{{ roleLabel(row.role) }}</span>
+          <span class="attr-tag" :class="`attr-${row.attribution || 'unattributed'}`"
+                :title="attrTitle(row)">{{ attrLabel(row.attribution) }}<template v-if="row.user_id"> · {{ row.user_id.slice(0, 8) }}</template></span>
           <span class="log-code mono">{{ row.status_code || '-' }}</span>
           <span class="log-key">{{ row.key_name || '匿名' }}</span>
           <span class="log-model mono">{{ row.model_requested }}<template v-if="row.model_mapped && row.model_mapped !== row.model_requested"> → {{ row.model_mapped }}</template></span>
@@ -108,6 +117,13 @@
                 <div class="kv"><span>URL</span><code class="mono">{{ detail.upstream_url || '-' }}</code></div>
                 <div class="kv"><span>流式</span><strong>{{ detail.stream ? '是' : '否' }}</strong></div>
                 <div class="kv"><span>客户端 IP</span><strong>{{ detail.client_ip || '-' }}</strong></div>
+                <div class="kv"><span>调用归属</span><strong>
+                  <span class="attr-tag" :class="`attr-${detail.attribution || 'unattributed'}`">{{ attrLabel(detail.attribution) }}</span>
+                  <template v-if="detail.user_id"> 用户 {{ detail.user_id }}</template>
+                  <template v-if="detail.billing_user_id && detail.billing_user_id !== detail.user_id">（计费 {{ detail.billing_user_id }}）</template>
+                </strong></div>
+                <div class="kv"><span>归属来源</span><strong>{{ attrSourceLabel(detail.attribution_source) }}</strong></div>
+                <div v-if="detail.trace_id" class="kv"><span>Trace</span><code class="mono">{{ detail.trace_id }}</code></div>
                 <div class="kv"><span>Token</span><strong>{{ detail.prompt_tokens }} + {{ detail.completion_tokens }} = {{ detail.total_tokens }}</strong></div>
                 <div v-if="detail.error" class="kv err"><span>错误</span><strong>{{ detail.error }}</strong></div>
               </div>
@@ -146,6 +162,7 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted } from 'vue'
+import { useQueryCacheStore, TTL_MONITOR } from '@/stores/queryCache'
 import {
   queryGatewayLogs, getGatewayLog, purgeGatewayLogs,
   listGatewayKeys, listGatewayRoutingRules,
@@ -165,13 +182,24 @@ const detailLoading = ref(false)
 const keyOptions = ref([])
 const channelOptions = ref([])
 
-const filters = reactive({ keyword: '', status: '', risk_level: '', role: '', model: '', key_id: '', channel_id: '' })
+const filters = reactive({ keyword: '', status: '', risk_level: '', role: '', attribution: '', model: '', key_id: '', channel_id: '' })
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / PAGE_SIZE)))
 
 const RISK_LABELS = { none: '无风险', low: '低', medium: '中', high: '高', critical: '严重' }
 const STATUS_LABELS = { ok: '成功', error: '失败', blocked: '阻断', cancelled: '已取消', timeout: '超时' }
 const AUDIT_LABELS = { warn: '警告', mask: '已脱敏', block: '已阻断', '': '审计' }
 const SEV_LABELS = { low: '低危', medium: '中危', high: '高危', critical: '严重' }
+// 归属四分类：用户业务/真实系统/公共游客/历史未归属（不再笼统「系统内部调用」）
+const ATTR_LABELS = { user: '用户业务', system: '真实系统', public: '公共游客', unattributed: '历史未归属' }
+const ATTR_SOURCE_LABELS = {
+  signed_context: '签名调用上下文', key_binding: '密钥绑定用户', legacy_hint: '旧链路提示（未验签）',
+  signature_invalid: '验签失败（不信任声明用户）', system_internal: '系统内部密钥', public_shared: '公共密钥共享',
+}
+function attrLabel(a) { return ATTR_LABELS[a] || ATTR_LABELS.unattributed }
+function attrSourceLabel(s) { return ATTR_SOURCE_LABELS[s] || (s || '无归属证据（存量历史日志）') }
+function attrTitle(row) {
+  return `归属来源：${attrSourceLabel(row.attribution_source)}${row.user_id ? `；发起用户 ${row.user_id}` : ''}`
+}
 function riskLabel(l) { return RISK_LABELS[l] || l }
 function statusLabel(s) { return STATUS_LABELS[s] || s }
 // 行头徽标：命中安全风险 → 风险等级；否则调用失败 → 「调用异常」；正常才显示「无风险」（修复失败却标无风险的逻辑矛盾）
@@ -194,15 +222,22 @@ function prettyBody(raw) {
   try { return JSON.stringify(JSON.parse(raw), null, 2) } catch { return raw }
 }
 
-async function load() {
+const queryCache = useQueryCacheStore()
+
+// 日志列表经统一查询缓存（仅内存层，原始日志不落持久缓存）
+async function load(force = 0) {
   loading.value = true
   errorMsg.value = ''
   try {
-    const res = await queryGatewayLogs({
+    const params = {
       ...filters, limit: PAGE_SIZE, offset: (page.value - 1) * PAGE_SIZE,
-    })
-    logs.value = res.data.items || []
-    total.value = res.data.total || 0
+    }
+    const data = await queryCache.cachedGet('usage', { kind: 'logs', ...params },
+      async () => (await queryGatewayLogs(params)).data,
+      { ttl: TTL_MONITOR, force: !!force,
+        onRevalidate: (d) => { logs.value = d.items || []; total.value = d.total || 0 } })
+    logs.value = data.items || []
+    total.value = data.total || 0
   } catch (e) {
     errorMsg.value = e.response?.data?.detail || '加载日志失败'
   } finally {
@@ -211,7 +246,7 @@ async function load() {
 }
 function reload() { page.value = 1; expanded.value = null; detail.value = null; load() }
 function resetFilters() {
-  Object.assign(filters, { keyword: '', status: '', risk_level: '', role: '', model: '', key_id: '', channel_id: '' })
+  Object.assign(filters, { keyword: '', status: '', risk_level: '', role: '', attribution: '', model: '', key_id: '', channel_id: '' })
   reload()
 }
 function goPage(p) { page.value = p; expanded.value = null; detail.value = null; load() }
@@ -236,7 +271,7 @@ async function onPurge() {
   try {
     const res = await purgeGatewayLogs()
     alert(`已清理 ${res.data.deleted || 0} 条过期日志`)
-    await load()
+    await load(1)
   } catch (e) {
     errorMsg.value = e.response?.data?.detail || '清理失败'
   }
@@ -244,10 +279,18 @@ async function onPurge() {
 
 async function loadOptions() {
   try {
-    const [kRes, cRes] = await Promise.all([listGatewayKeys(), listGatewayRoutingRules()])
-    keyOptions.value = kRes.data.keys || []
-    channelOptions.value = (cRes.data.rules || []).map((r) => ({ id: r.id, name: r.model_pattern }))
+    const data = await queryCache.cachedGet('gateway', { kind: 'log-options' },
+      async () => {
+        const [kRes, cRes] = await Promise.all([listGatewayKeys(), listGatewayRoutingRules()])
+        return { keys: kRes.data.keys || [], rules: cRes.data.rules || [] }
+      },
+      { onRevalidate: applyOptions })
+    applyOptions(data)
   } catch (e) { /* 选项加载失败不阻断日志展示 */ }
+}
+function applyOptions(data) {
+  keyOptions.value = data.keys || []
+  channelOptions.value = (data.rules || []).map((r) => ({ id: r.id, name: r.model_pattern }))
 }
 
 onMounted(async () => { await Promise.all([loadOptions(), load()]) })
@@ -278,6 +321,11 @@ onMounted(async () => { await Promise.all([loadOptions(), load()]) })
 .risk-critical { background: #fbe4e3; color: #c0392b; }
 .risk-abnormal { background: #fbe4e3; color: #c0392b; border: 1px dashed #e0a49e; }
 .scene-tag { font-size: 10.5px; font-weight: 600; padding: 2px 8px; border-radius: 8px; background: #eef2f7; color: #4a6fa5; white-space: nowrap; }
+.attr-tag { font-size: 10.5px; font-weight: 600; padding: 2px 8px; border-radius: 8px; white-space: nowrap; }
+.attr-user { background: #e4f4e8; color: #3d8b52; }
+.attr-system { background: #eef2f7; color: #4a6fa5; }
+.attr-public { background: #fdf0d9; color: #b8802a; }
+.attr-unattributed { background: #eee9e2; color: #8a7e72; }
 .status-tag { font-size: 10.5px; font-weight: 700; padding: 2px 8px; border-radius: 8px; }
 .st-ok { background: #e4f4e8; color: #3d8b52; }
 .st-error { background: #fbe4e3; color: #c0392b; }

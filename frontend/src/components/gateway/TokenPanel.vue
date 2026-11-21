@@ -336,7 +336,10 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted } from 'vue'
+import { useQueryCacheStore, TTL_MONITOR } from '@/stores/queryCache'
 import { getGatewayTokenAnalysis, getContextExplorer, getGatewayTokenRequests } from '@/api'
+
+const queryCache = useQueryCacheStore()
 
 const days = ref(7)
 const loading = ref(false)
@@ -409,12 +412,15 @@ function toggleSeg(seg) {
   expandedSegs.value = s
 }
 
-async function load() {
+// Token 分析经统一查询缓存（监控类 30s TTL）；天数切换/手动刷新 force 重拉
+async function load(force = 0) {
   loading.value = true
   errorMsg.value = ''
   try {
-    const res = await getGatewayTokenAnalysis(days.value, 'days')
-    data.value = res.data
+    const payload = await queryCache.cachedGet('usage', { kind: 'token-analysis', days: days.value },
+      async () => (await getGatewayTokenAnalysis(days.value, 'days')).data,
+      { ttl: TTL_MONITOR, force: !!force, onRevalidate: (d) => { data.value = d } })
+    data.value = payload
   } catch (e) {
     errorMsg.value = e.response?.data?.detail || '加载 Token 分析失败'
   } finally {

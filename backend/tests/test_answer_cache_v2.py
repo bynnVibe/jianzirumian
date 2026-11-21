@@ -140,13 +140,19 @@ def test_safe_normalization():
 
 
 def test_semantic_equivalence_required(monkeypatch):
+    # 中间带（0.70 ≤ score < 0.95）必须经 LLM 等价验证：假向量构造 cos=0.8
+    async def embed(text):
+        return [0.8, 0.6] if text == "解释光合作用的原理" else [1.0, 0.0]
+
+    monkeypatch.setattr(cache, "_embed", embed)
+    monkeypatch.setattr(cache, "effective_threshold", lambda: 0.7)
     c = contract_for(kind="knowledge_semantic", sources=[{"text": "植物使用光能", "citation_index": 1}])
     assert store(c)
 
-    async def no(*args):
+    async def no(*args, **kwargs):
         return False
 
-    async def yes(*args):
+    async def yes(*args, **kwargs):
         return True
 
     monkeypatch.setattr(policy, "equivalent", no)
@@ -155,6 +161,19 @@ def test_semantic_equivalence_required(monkeypatch):
     assert lookup(c, query="请说明光合作用的原理")["sources"] == c["sources"]
     db.execute("UPDATE semantic_cache_v2 SET sources='[]'")
     assert lookup(c) is None
+
+
+def test_high_confidence_skips_verification(monkeypatch):
+    """≥0.95 高置信直放：即使等价验证拒绝也命中（实测高相似改述曾被验证模型误拒）。"""
+    c = contract_for(kind="knowledge_semantic", sources=[{"text": "植物使用光能", "citation_index": 1}])
+    assert store(c)
+
+    async def no(*args):
+        return False
+
+    monkeypatch.setattr(policy, "equivalent", no)
+    hit = lookup(c, query="请说明光合作用的原理")
+    assert hit and hit["score"] >= cache.HIGH_CONFIDENCE
 
 
 def test_permission_revision_invalidates():

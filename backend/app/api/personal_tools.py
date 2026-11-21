@@ -26,6 +26,8 @@ class Confirm(StrictBody):
 class Configuration(StrictBody):
     enabled: bool | None = None
     accept_terms: bool | None = None
+    # 按工具的用户黑名单（默认空＝全员可调用）；属主不可拉黑自己
+    blocked_users: list[str] | None = None
 
 
 class Credential(StrictBody):
@@ -49,7 +51,8 @@ def listing(user=Depends(get_current_user)):
 
 
 @router.post("/drafts")
-def propose(body: Proposal, user=Depends(get_current_user)):
+def propose(body: Proposal, user=Depends(require_admin)):
+    """直接提交工具草稿仅对管理员开放；普通用户只能经 @skills 沉淀依赖工具。"""
     try:
         return tools.propose(user["id"], body.spec, tool_id=body.tool_id)
     except ValueError as exc:
@@ -63,6 +66,9 @@ def draft(draft_id: str, user=Depends(get_current_user)):
 
 @router.post("/drafts/{draft_id}/confirm")
 async def confirm(draft_id: str, body: Confirm, user=Depends(get_current_user)):
+    current = tools.draft(user["id"], draft_id)
+    if not current.get("parent_skill_draft_id") and user.get("role") != "admin":
+        raise HTTPException(403, "独立添加工具仅对管理员开放，普通用户请使用 @skills 添加技能")
     try:
         return await tools.confirm(user["id"], draft_id, **body.model_dump())
     except ValueError as exc:

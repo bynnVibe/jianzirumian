@@ -106,6 +106,8 @@ async def send_message(
         raise HTTPException(422, str(exc)) from exc
     if parsed_command.name and user_id == "guest":
         raise HTTPException(403, "请登录后添加个人能力")
+    if parsed_command.name == "tool" and (not user or user.get("role") != "admin"):
+        raise HTTPException(403, "@tool 添加工具仅对管理员开放，普通用户请使用 @skills 添加技能")
     session_id = body.session_id
 
     # 如果未指定 session_id, 自动创建新会话；若指定则由 ChatService 按需加载校验
@@ -186,6 +188,8 @@ async def send_message_with_files(
         raise HTTPException(422, str(exc)) from exc
     if parsed_command.name and user_id == "guest":
         raise HTTPException(403, "请登录后添加个人能力")
+    if parsed_command.name == "tool" and (not user or user.get("role") != "admin"):
+        raise HTTPException(403, "@tool 添加工具仅对管理员开放，普通用户请使用 @skills 添加技能")
     if parsed_command.name and any(f.filename for f in files):
         raise HTTPException(422, "能力添加请使用功能描述或来源链接，附件请单独发送")
 

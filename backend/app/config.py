@@ -224,8 +224,10 @@ class Settings:
     # 并按「实时/非实时」+ 命中热度分档设置 TTL（阶梯形过期）。
     # 总开关（可在系统设置页运行时覆盖）
     SEMANTIC_CACHE_ENABLED: bool = os.getenv("SEMANTIC_CACHE_ENABLED", "true").lower() == "true"
-    # 命中判定阈值（余弦相似度，越高越严格；系统设置页可运行时覆盖，clamp 0.5-0.99）
-    SEMANTIC_CACHE_THRESHOLD: float = float(os.getenv("SEMANTIC_CACHE_THRESHOLD", "0.90"))
+    # 命中判定阈值（余弦相似度下限，clamp 0.5-0.99，系统设置页可运行时覆盖）。
+    # 分层决策：[阈值, 0.95) 走 LLM 等价性二次验证防误命中；≥0.95 高置信直放。
+    # 中文短问同义改述余弦实测约 0.74-0.90，默认 0.70 配合验证带兼顾命中与安全。
+    SEMANTIC_CACHE_THRESHOLD: float = float(os.getenv("SEMANTIC_CACHE_THRESHOLD", "0.70"))
     # v2 合同必须由业务后端签发；缺少至少 32 字符的独立密钥时安全旁路。
     ANSWER_CACHE_SIGNING_KEY: str = os.getenv("ANSWER_CACHE_SIGNING_KEY", "")
     ANSWER_CACHE_TTL_SECONDS: int = int(os.getenv("ANSWER_CACHE_TTL_SECONDS", "86400"))

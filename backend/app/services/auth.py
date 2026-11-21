@@ -4,6 +4,7 @@
 用户数据持久化到 SQLite (backend/data/app.db)
 """
 import hashlib
+import json
 import secrets
 import time
 import threading
@@ -140,15 +141,20 @@ def register(username: str, password: str, contact: str) -> dict:
         "last_login_at": None,
     }
 
-    db.execute(
-        "INSERT INTO users (id, username, password_hash, salt, hash_algo, contact,"
-        " role, is_active, created_at, updated_at, last_login_at)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-        (
-            user["id"], username, pw_hash, salt, "pbkdf2", contact,
-            user["role"], 1, now, now, None,
-        ),
-    )
+    # 注册同事务：用户 + 独立默认出网密钥 + 唯一映射原子落库，
+    # 保证新用户全链路调用从第一次请求起即归属自己的密钥
+    from app.services.gateway import keys as keys_svc
+    with db.transaction() as conn:
+        conn.execute(
+            "INSERT INTO users (id, username, password_hash, salt, hash_algo, contact,"
+            " role, is_active, created_at, updated_at, last_login_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                user["id"], username, pw_hash, salt, "pbkdf2", contact,
+                user["role"], 1, now, now, None,
+            ),
+        )
+        keys_svc.ensure_user_default_key(user["id"], username, conn=conn)
 
     # 返回不包含密码的用户信息
     return _user_info(user)
@@ -252,6 +258,28 @@ def get_session_user(token: str) -> Optional[dict]:
     return _user_info(user) if user else None
 
 
+def peek_session_user(token: str) -> Optional[dict]:
+    """只读校验会话有效性（不滑动续期、不写 last_seen）。
+
+    供 SSE 长连接等后台心跳使用：长连接不刷新用户活动时间或无限续期，
+    注销/过期/撤权后下一次心跳即返回 None，连接随即关闭。
+    """
+    now = time.time()
+    with _session_lock:
+        session = _active_sessions.get(token)
+        if session and session["expires_at"] > now:
+            user = _get_user(session["user_id"])
+            return _user_info(user) if user else None
+    row = db.query_one(
+        "SELECT user_id, expires_at FROM auth_sessions WHERE token_hash = ?",
+        (_token_hash(token),),
+    )
+    if not row or row["expires_at"] <= now:
+        return None
+    user = _get_user(row["user_id"])
+    return _user_info(user) if user else None
+
+
 def get_all_users(token: str) -> list[dict]:
     """
     获取所有用户列表（仅管理员可用）。
@@ -321,12 +349,30 @@ def delete_user(token: str, target_user_id: str):
     if admin["id"] == target_user_id:
         raise ValueError("不能删除自己的账号")
 
-    affected = db.execute("DELETE FROM users WHERE id = ?", (target_user_id,))
-    if not affected:
-        raise ValueError("用户不存在")
-
-    # 清理被删除用户的会话
-    db.execute("DELETE FROM auth_sessions WHERE user_id = ?", (target_user_id,))
+    # 删除用户同事务联动：会话清理 + 默认密钥映射移除 + 绑定密钥解绑；
+    # 解绑后无任何绑定的用户密钥禁用并回收出网明文（保留密钥行供历史用量追溯）
+    from app.services.gateway import keys as keys_svc
+    with db.transaction() as conn:
+        affected = conn.execute("DELETE FROM users WHERE id = ?", (target_user_id,)).rowcount
+        if not affected:
+            raise ValueError("用户不存在")
+        conn.execute("DELETE FROM auth_sessions WHERE user_id = ?", (target_user_id,))
+        conn.execute("DELETE FROM user_default_keys WHERE user_id = ?", (target_user_id,))
+        for r in conn.execute("SELECT * FROM gateway_keys WHERE key_type='user'").fetchall():
+            try:
+                bound = json.loads(r["bound_users"] or "[]")
+            except (json.JSONDecodeError, TypeError):
+                bound = []
+            if target_user_id not in [str(u) for u in bound]:
+                continue
+            remaining = [str(u) for u in bound if str(u) != target_user_id]
+            if remaining:
+                conn.execute("UPDATE gateway_keys SET bound_users=? WHERE id=?",
+                             (json.dumps(remaining, ensure_ascii=False), r["id"]))
+            else:
+                conn.execute("UPDATE gateway_keys SET bound_users='[]', enabled=0 WHERE id=?",
+                             (r["id"],))
+                keys_svc._register_outbound_conn(conn, r["id"], "")
     with _session_lock:
         tokens_to_remove = [
             t for t, s in _active_sessions.items()

@@ -20,7 +20,13 @@ export async function consumeChatStream(response, onEvent, signal) {
         if (!line.startsWith('data:')) continue
         const data = JSON.parse(line.slice(5).trim())
         onEvent(data)
-        if (data.event === 'error') throw new Error(data.message || '生成失败')
+        if (data.event === 'error') {
+          // 结构化错误闭环：保留后端错误码与失败阶段，供界面定位失败步骤
+          const err = new Error(data.message || '生成失败')
+          err.code = data.code || ''
+          err.stage = data.stage || ''
+          throw err
+        }
         if (data.event === 'done') return data
       }
       if (done) throw new Error('连接已结束，但未收到完成信号')

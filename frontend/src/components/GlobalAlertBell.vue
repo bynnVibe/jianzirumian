@@ -27,10 +27,12 @@ import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { useAssistantStore } from '@/stores/assistant'
+import { useQueryCacheStore } from '@/stores/queryCache'
 import { getObsAlerts } from '@/api'
 
 const auth = useAuthStore()
 const assistant = useAssistantStore()
+const queryCache = useQueryCacheStore()
 const router = useRouter()
 
 const unacked = ref(0)
@@ -91,6 +93,8 @@ const METRIC_LABELS = {
 
 async function poll() {
   if (!auth.canOps || !auth.isAuthenticated) return
+  // 后台标签暂停拉取，恢复可见时由版本 watch/兜底周期补上
+  if (typeof document !== 'undefined' && document.hidden) return
   try {
     const res = await getObsAlerts({ status: 'open', limit: 50 })
     const list = res.data.alerts || []
@@ -119,13 +123,25 @@ function goAlerts() {
 
 watch(() => auth.canOps, (v) => { if (v) { firstLoad = true; poll() } })
 
+// 告警资源版本变化（SSE 推送/多标签广播/兜底轮询）即拉取，
+// 替代原 15s 盲轮询；保留 60s 轻量兜底防推送失联
+watch(() => queryCache.versions.alerts, (v, old) => {
+  if (v !== undefined && v !== old) poll()
+})
+
+function onVisibility() {
+  if (!document.hidden) poll() // 恢复可见立即补一次
+}
+
 onMounted(() => {
   poll()
-  timer = setInterval(poll, 15000)
+  timer = setInterval(poll, 60000)
+  document.addEventListener('visibilitychange', onVisibility)
 })
 onUnmounted(() => {
   if (timer) clearInterval(timer)
   if (toastTimer) clearTimeout(toastTimer)
+  document.removeEventListener('visibilitychange', onVisibility)
 })
 </script>
 

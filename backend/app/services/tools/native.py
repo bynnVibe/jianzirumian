@@ -3,13 +3,17 @@ import asyncio
 import copy
 import hashlib
 import json
+import logging
 import time
 
 from app.core.json_schema import SchemaError, check_json, parse_object, validate
 from app.core.request_budget import close_resources, iterate
 from app.core.tool_stream import ToolModelUnavailable, ToolProtocolError
 from app.services.tools.base import ToolResult
+from app.services.tools import base as tools_base
 from app.services.tools.invoke import invoke_tool
+
+logger = logging.getLogger("jianziruyang.tools.native")
 
 
 def _result_payload(result):
@@ -145,8 +149,10 @@ async def run_tool_loop(llm, messages, ctx, tools, *, result=None, deadline=None
                 name = fn["name"]
                 signature = hashlib.sha256((name + fn["arguments"]).encode()).hexdigest()
                 started = time.monotonic()
+                # 个人工具以功能名注册、不在内置注册表；事件携带 personal 供前端标签区分
+                personal = tools_base.get_tool(name) is None
                 active = {"event": "tool", "tool": name, "call_id": call["id"], "started": started}
-                yield {"event": "tool", "tool": name, "state": "start", "call_id": call["id"]}
+                yield {"event": "tool", "tool": name, "state": "start", "call_id": call["id"], "personal": personal}
                 try:
                     if name not in catalog:
                         raise SchemaError("本轮未授权该工具")
@@ -164,8 +170,11 @@ async def run_tool_loop(llm, messages, ctx, tools, *, result=None, deadline=None
                     payload = _result_payload(outcome)
                 except TimeoutError:
                     raise
-                except Exception:
-                    outcome = ToolResult(name, False, error="execution_failed")
+                except Exception as exc:
+                    # 保留根因：错误码供分类，异常详情进日志与结果 extra，不再吞掉真实原因
+                    logger.warning("原生工具调用异常 tool=%s: %s", name, exc, exc_info=True)
+                    outcome = ToolResult(name, False, error="execution_failed",
+                                         extra={"error_detail": f"{type(exc).__name__}: {exc}"[:300]})
                     payload = _result_payload(outcome)
                 failed = not payload["success"] or payload["requirement_status"] == "unmet" or payload["validation_status"] == "failed"
                 unverified = unverified or payload["validation_status"] == "unverified" or payload["requirement_status"] == "unverified"
@@ -174,7 +183,7 @@ async def run_tool_loop(llm, messages, ctx, tools, *, result=None, deadline=None
                     had_failure = True
                 summary = "工具执行结束，结果已返回" if not failed else "工具失败或被阻止，未取得有效结果"
                 record = {"event": "tool", "tool": name, "state": "end", "call_id": call["id"],
-                          "summary": summary, "failed": failed,
+                          "summary": summary, "failed": failed, "personal": personal,
                           "elapsed_ms": round((time.monotonic() - started) * 1000),
                           "execution_status": payload["execution_status"], "validation_status": payload["validation_status"],
                           "requirement_status": payload["requirement_status"]}

@@ -95,8 +95,13 @@ class Ctx:
         self.key_row: dict = {}
         self.model_req = ""
         self.stream = False
-        # 用户密钥配额用尽后自动降级为公共密钥的标记（友好提示/审计用）
-        self.degraded_from_user_key = False
+        # 调用归属（签名上下文验签通过后信任；供网关日志归属字段使用）
+        self.billing_user_id = ""
+        self.trace_id = ""
+        self.span_id = ""
+        self.job_id = ""
+        self.origin = ""
+        self.attribution_source = ""
         # 请求类型：chat（默认）/ embeddings / rerank（与 chat 通道隔离）
         self.kind = "chat"
         # 业务路由提示（role/显式规则/发起用户）
@@ -165,6 +170,27 @@ def prepare(body: dict, raw_key: str, client_ip: str = "", kind: str = "chat") -
         ctx.role = {"embeddings": "embed", "rerank": "rerank"}.get(ctx.kind, "")
     ctx.rule_id = str(body.get("_gw_rule_id") or "")
     ctx.user_id = str(body.get("_gw_user_id") or "")
+    # 签名调用上下文（LLMFactory.create_for_role 注入）：验签通过才信任归属；
+    # 有签名但验签失败 → 不信任其声明的用户（防伪造串用他人配额），密钥鉴权照常
+    from app.core import gw_context
+    signed = gw_context.verify_payload(str(body.get("_gw_ctx") or ""),
+                                       str(body.get("_gw_sig") or ""))
+    if signed:
+        ctx.user_id = str(signed.get("user_id") or "") or ctx.user_id
+        ctx.billing_user_id = str(signed.get("billing_user_id") or "") or ctx.user_id
+        ctx.trace_id = str(signed.get("trace_id") or "")
+        ctx.span_id = str(signed.get("span_id") or "")
+        ctx.job_id = str(signed.get("job_id") or "")
+        ctx.origin = str(signed.get("origin") or "")
+        ctx.attribution_source = "signed_context"
+    elif body.get("_gw_sig"):
+        ctx.user_id = ""
+        ctx.attribution_source = "signature_invalid"
+        ctx.tracer.add("auth", "调用上下文验签", "warn",
+                       "签名无效或已过期，不信任本次调用声明的用户归属")
+    elif ctx.user_id:
+        # 旧链路无签名提示：兼容保留（不一刀切拒绝），归属来源显式标记
+        ctx.attribution_source = "legacy_hint"
     # 语义缓存提示（由业务层在意图识别后经 extra_body 注入）：
     # _gw_cache_query=意图识别后的问题（缓存键）、_gw_cache_scope=public|personal、
     # _gw_cache_realtime=是否实时。仅对回答类角色且无工具调用时启用。
@@ -177,44 +203,47 @@ def prepare(body: dict, raw_key: str, client_ip: str = "", kind: str = "chat") -
         "key_id": "", "key_name": "",
         # 业务场景（role）：审计页据此展示「该链路是哪个业务模块发起的」
         "role": ctx.role,
+        # 调用归属（签名上下文验签产出）：随每条日志落库，供统计区分
+        # 用户业务/真实系统/公共游客/历史未归属；usage_event_id 幂等防重复计量
+        "user_id": ctx.user_id,
+        "billing_user_id": ctx.billing_user_id or ctx.user_id,
+        "trace_id": ctx.trace_id, "span_id": ctx.span_id,
+        "job_id": ctx.job_id, "origin": ctx.origin,
+        "attribution_source": ctx.attribution_source,
+        "usage_event_id": ctx.log_id,
     }
 
-    # 1. 密钥鉴权（用户密钥总配额用尽时自动降级公共密钥，不阻碍系统正常使用）
+    # 1. 密钥鉴权（绑定即强制不降级：配额用尽明确报错，不静默切换公共密钥）
     try:
         ctx.key_row = key_svc.authenticate(raw_key)
         base["key_id"] = ctx.key_row["id"]
         base["key_name"] = ctx.key_row.get("name") or ""
         ctx.tracer.add("auth", "密钥鉴权", "ok", f"密钥「{base['key_name']}」校验通过")
+        # 归属兜底（可靠证据）：无签名上下文时，用户密钥的绑定用户即归属；
+        # 内部/公共密钥无用户证据则显式标记来源，不再笼统归入「系统内部」
+        key_type = str(ctx.key_row.get("key_type") or "")
+        if not ctx.user_id and key_type == "user":
+            try:
+                bound = json.loads(ctx.key_row.get("bound_users") or "[]")
+            except (json.JSONDecodeError, TypeError):
+                bound = []
+            bound = [str(u) for u in bound if str(u).strip()]
+            if bound:
+                ctx.user_id = bound[0]
+                ctx.billing_user_id = ctx.user_id
+                ctx.attribution_source = "key_binding"
+        if not ctx.attribution_source:
+            ctx.attribution_source = {"internal": "system_internal",
+                                      "public": "public_shared"}.get(key_type, "")
+        base.update({"user_id": ctx.user_id,
+                     "billing_user_id": ctx.billing_user_id or ctx.user_id,
+                     "attribution_source": ctx.attribution_source})
     except key_svc.KeyRejected as e:
-        degraded = False
-        if e.code == "quota_exceeded" and raw_key:
-            # 用户密钥配额用尽 → 降级切换公共密钥（若该密钥确为用户密钥）
-            row = db.query_one("SELECT id, key_type FROM gateway_keys WHERE key_hash=?",
-                               (key_svc._hash(raw_key),))
-            if row and (row.get("key_type") or "user") == "user":
-                pub = key_svc.find_public_key()
-                pub_plain = key_svc._plain_of(pub["id"]) if pub else ""
-                if pub_plain:
-                    try:
-                        ctx.key_row = key_svc.authenticate(pub_plain)
-                        base["key_id"] = ctx.key_row["id"]
-                        base["key_name"] = ctx.key_row.get("name") or ""
-                        ctx.degraded_from_user_key = True
-                        degraded = True
-                        ctx.tracer.add(
-                            "auth", "密钥鉴权", "warn",
-                            f"用户密钥配额用尽（{e.message}），已自动降级为公共密钥"
-                            f"「{base['key_name']}」继续服务")
-                        logger.warning("[网关密钥] 用户密钥配额用尽，降级公共密钥: user=%s err=%s",
-                                       ctx.user_id or "-", e.message)
-                    except key_svc.KeyRejected:
-                        pass
-        if not degraded:
-            ctx.tracer.add("auth", "密钥鉴权", "error", e.message)
-            log_svc.write_log({**base, "status": "error", "status_code": e.status_code,
-                               "latency_ms": _latency(ctx), "trace_steps": ctx.tracer.dump(),
-                               "error": e.message, "risk_level": "none"})
-            raise GatewayError(e.status_code, e.message, e.code)
+        ctx.tracer.add("auth", "密钥鉴权", "error", e.message)
+        log_svc.write_log({**base, "status": "error", "status_code": e.status_code,
+                           "latency_ms": _latency(ctx), "trace_steps": ctx.tracer.dump(),
+                           "error": e.message, "risk_level": "none"})
+        raise GatewayError(e.status_code, e.message, e.code)
 
     # 1b. 每用户配额与流控：公共密钥按用户设每日限额（用尽提示联系管理员）；
     #     用户密钥执行每分钟流控（总配额已在鉴权/认领阶段执行）

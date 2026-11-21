@@ -66,6 +66,7 @@ def _available(conn, owner, bundle, link):
         spec = json.loads(tool["spec_json"])
         if (tool["version"] != link["tool_version"] or specs.fingerprint(spec) != link["tool_hash"]
                 or not tool["enabled"] or tool["status"] != "ready" or tools._blockers(tool)
+                or tool["eval_status"] != "passed"
                 or not _matches_script(bundle, link["requirement"], spec)):
             return None
         passed = conn.execute("SELECT 1 FROM personal_tool_tests WHERE owner_id=? AND tool_id=? "

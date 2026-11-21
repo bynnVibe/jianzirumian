@@ -1,17 +1,20 @@
 """
-见字如面 - 能力缺口（Capability Gap）治理：CLI 兜底 + HITL + 沙箱 + 技能沉淀
+见字如面 - 能力缺口（Capability Gap）治理：服务端工具链自动解决 + DeepSeek 式降级
 
-当系统现有工具/能力解决不了用户问题（如「查询今天香港的天气」仅靠联网搜索拿不到
-结构化实时数据、且模型不知道「今天」是几号），本模块负责（需求5/6）：
+当系统现有工具/能力解决不了用户问题（如「查询今天深圳的天气」仅开启知识检索），
+本模块负责：
 
-  1. 识别缺口：路由无合适工具 / 实时查询但搜索结果不充分 → 归一化为 scenario；
-  2. 生成候选方案：从内置「能力配方」（CAPABILITY_RECIPES）产出可执行的 CLI/URL
-     方案（如 curl wttr.in、curl open-meteo、date 取今日日期），供 human-in-the-loop；
-  3. HITL 选择：把方案随 SSE capability_gap 事件下发，由用户选定想怎么实现；
-  4. 沙箱执行：经 CliRunner（无 shell / env 白名单 / 临时 cwd / 超时熔断）执行所选方案；
-     风险等级 high/critical 的方案必须先经用户确认（confirmed）才执行，否则暂停返回；
+  1. 识别缺口：路由无合适工具 / 实时查询但知识库无结果 → 归一化为 scenario；
+  2. 生成候选方案：从内置「能力配方」（CAPABILITY_RECIPES）产出服务端可执行的
+     只读工具链（如 地理编码 → open-meteo 天气、wttr.in），与主流 function-calling
+     实现一致——全部由服务端调用，绝不要求用户执行命令；
+  3. 自动解决：auto_resolve 逐轮执行低风险方案并经 LLM 判定是否解决用户问题，
+     解决后把结果回喂主回答链路；
+  4. 降级说明：自动解决失败时，随 SSE capability_gap 事件下发「能力受限」说明
+     （kind=limitation）与应用内动作建议（如开启联网搜索并重新提问），
+     参考 DeepSeek 的诚实降级设计，不向用户暴露 CLI；
   5. 频次沉淀：同 scenario 累计达阈值（默认 3 次）即在可观测性提示
-     「该场景频繁出现，是否沉淀为 skill/工具」，体现系统可进化性（需求6）。
+     「该场景频繁出现，是否沉淀为 skill/工具」，体现系统可进化性。
 
 所有缺口与执行均落库 capability_gaps 表，供可观测性「技能沉淀建议」面板聚合。
 """
@@ -24,6 +27,7 @@ import unicodedata
 import uuid
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
+from urllib.parse import quote
 
 from app.core import db
 from app.services.tools.cli_runner import default_runner
@@ -66,6 +70,15 @@ CAPABILITY_RECIPES: Dict[str, dict] = {
                 "argv": ["curl", "-s", "--max-time", "15", "wttr.in/{city}?format=3&lang=zh"],
                 "risk_level": "low",
                 "note": "wttr.in 是公开天气服务，返回单行摘要",
+            },
+            {
+                "id": "cli_geocode",
+                "label": "先把 {city} 解析为经纬度（公开地理编码接口）",
+                "kind": "cli",
+                "argv": ["curl", "-s", "--max-time", "15",
+                         "https://geocoding-api.open-meteo.com/v1/search?name={city}&count=1&language=zh&format=json"],
+                "risk_level": "low",
+                "note": "为 open-meteo 天气接口提供坐标，不猜测城市位置",
             },
             {
                 "id": "cli_open_meteo",
@@ -176,11 +189,23 @@ _PLACEHOLDER_RE = re.compile(r"\{(\w+)\}")
 
 
 def _fill_placeholders(text: str, ctx: dict) -> str:
-    """安全填充：只替换 ctx 中存在的占位符，其余保留 {name} 原样。"""
-    return _PLACEHOLDER_RE.sub(
-        lambda m: str(ctx[m.group(1)]) if m.group(1) in ctx else m.group(0),
-        text or "",
-    )
+    """安全填充：只替换 ctx 中存在的占位符，其余保留 {name} 原样。
+
+    URL 内的非 ASCII 值（如中文城市名）做百分号编码：部分公开接口
+    （geocoding-api.open-meteo.com 前置 nginx）对原始 UTF-8 查询串返回 403。
+    """
+    is_url = (text or "").startswith("http")
+
+    def repl(m: re.Match) -> str:
+        key = m.group(1)
+        if key not in ctx:
+            return m.group(0)
+        val = str(ctx[key])
+        if is_url:
+            val = re.sub(r"[^\x00-\x7F]", lambda ch: quote(ch.group(0)), val)
+        return val
+
+    return _PLACEHOLDER_RE.sub(repl, text or "")
 
 
 def propose_solutions(scenario: str, context: Optional[dict] = None) -> List[dict]:
@@ -322,6 +347,8 @@ async def execute_solution(gap_id: str, solution_id: str, *, confirmed: bool = F
     res = await sandbox_controller.submit_execution(spec)
 
     success = res.execution_status == "completed" and res.exit_code == 0
+    if success and solution_id == "cli_geocode":
+        _absorb_geocode(gap_id, gap, res.stdout)
     status = "executed" if success else "pending"
     try:
         db.execute(
@@ -344,6 +371,57 @@ async def execute_solution(gap_id: str, solution_id: str, *, confirmed: bool = F
         "argv": res.argv or argv,
         "sandbox": True,
         "isolated": res.isolated,
+    }
+
+
+def _absorb_geocode(gap_id: str, gap: dict, stdout: str) -> None:
+    """地理编码成功后把坐标写回缺口上下文，并重填候选方案占位符。
+
+    主流工具链做法：城市名 → 地理编码 → 经纬度 → 天气接口，全程服务端完成，
+    不让用户补坐标；解析失败则保持缺参数状态，绝不猜测。
+    """
+    try:
+        data = json.loads(stdout or "")
+        hit = (data.get("results") or [None])[0]
+        if not isinstance(hit, dict) or "latitude" not in hit or "longitude" not in hit:
+            return
+        ctx = dict(gap.get("context") or {})
+        ctx["lat"] = str(hit["latitude"])
+        ctx["lon"] = str(hit["longitude"])
+        if hit.get("timezone"):
+            ctx["timezone"] = str(hit["timezone"])
+        solutions = propose_solutions(gap.get("scenario", ""), ctx)
+        db.execute(
+            "UPDATE capability_gaps SET context_json=?, proposed_json=? WHERE id=?",
+            (json.dumps(ctx, ensure_ascii=False), json.dumps(solutions, ensure_ascii=False), gap_id),
+        )
+    except (ValueError, TypeError, KeyError, IndexError) as e:
+        logger.warning("地理编码结果解析失败（保持缺参数）: %s", e)
+
+
+def limitation_payload(gap_id: str, scenario: str, scenario_label: str, query: str,
+                       *, use_search: bool = False) -> dict:
+    """能力受限降级（参考 DeepSeek）：如实说明限制 + 应用内可操作建议。
+
+    不再向用户下发需要自行执行的命令行方案；系统侧工具调用已在 auto_resolve
+    内完成，这里只呈现「为什么答不了」与「在应用里能做什么」。
+    """
+    if use_search:
+        message = ("抱歉，这个问题需要实时数据，但联网搜索与现有工具都未能取得可靠结果，"
+                   "我无法给出准确答案。可以稍后重试，或补充更具体的时间、地点后再问。")
+        suggestions = [{"id": "retry", "label": "重新提问"}]
+    else:
+        message = ("抱歉，当前仅开启了知识检索，知识库中没有这类实时数据，我无法直接回答。"
+                   "开启「联网搜索」后重新提问，我可以结合网络信息作答。")
+        suggestions = [{"id": "enable_search", "label": "开启联网搜索并重新提问"}]
+    return {
+        "kind": "limitation",
+        "gap_id": gap_id,
+        "scenario": scenario,
+        "scenario_label": scenario_label,
+        "query": query,
+        "message": message,
+        "suggestions": suggestions,
     }
 
 
@@ -530,7 +608,7 @@ async def execute_and_continue(gap_id: str, solution_id: str, *, confirmed: bool
     return out
 
 
-MAX_AUTO_ROUNDS = 3
+MAX_AUTO_ROUNDS = 4
 
 
 async def auto_resolve(gap_id: str, *, url: str = "") -> dict:
@@ -545,7 +623,7 @@ async def auto_resolve(gap_id: str, *, url: str = "") -> dict:
     """
     gap = get_gap(gap_id) or {}
     proposed = gap.get("proposed") or []
-    low = [s for s in proposed if (s.get("risk_level") or "low") == "low"]
+    low = [s for s in proposed if (s.get("risk_level") or "low") == "low" and not s.get("needs_argument")]
     attempts: List[dict] = []
     if not low:
         return {"resolved": False, "needs_hitl": True, "solutions": proposed,
@@ -553,6 +631,11 @@ async def auto_resolve(gap_id: str, *, url: str = "") -> dict:
     tried = set()
     current_url = url
     for _ in range(MAX_AUTO_ROUNDS):
+        # 每轮重读缺口：地理编码等前序步骤可能已补齐后续方案的参数（如经纬度）
+        fresh = get_gap(gap_id) or {}
+        candidates = fresh.get("proposed") or proposed
+        low = [s for s in candidates
+               if (s.get("risk_level") or "low") == "low" and not s.get("needs_argument")]
         nxt = next((s for s in low if s["id"] not in tried), None)
         if nxt is None:
             break
@@ -575,8 +658,6 @@ async def auto_resolve(gap_id: str, *, url: str = "") -> dict:
                 return {"resolved": False, "needs_hitl": True, "solutions": [ns],
                         "hint": res.get("next_hint", "") or "下一步方案需用户确认",
                         "attempts": attempts}
-            if ns["id"] not in tried:
-                low.append(ns)
             current_url = res.get("next_url") or current_url
     return {"resolved": False, "needs_hitl": True, "solutions": proposed,
             "hint": "已自动尝试低危方案仍未解决，请手动选择", "attempts": attempts}

@@ -547,16 +547,71 @@ def test_suggestion_api_restores_only_owned_unexpired_drafts(suggestion_flow):
 
 
 def test_capability_gap_sse_event_shape():
+    """能力受限降级（DeepSeek 式）：SSE 只下发限制说明与应用内建议，不含 CLI 方案。"""
     from app.services import chat_agent
 
     raw = chat_agent.capability_gap_event(
-        "gap-1", "realtime_weather", "实时天气查询",
-        [{"id": "cli_wttr", "label": "x", "kind": "cli", "argv": ["curl"],
-          "risk_level": "low", "note": ""}],
-        "查询今天香港的天气",
+        "gap-1", "realtime_weather", "实时天气查询", [],
+        "深圳今天天气怎么样",
     )
     assert raw.startswith("data: ") and raw.endswith("\n\n")
     payload = json.loads(raw[len("data: "):])
     assert payload["event"] == "capability_gap"
     assert payload["gap_id"] == "gap-1"
-    assert payload["solutions"][0]["id"] == "cli_wttr"
+    assert payload["kind"] == "limitation"
+    assert payload["query"] == "深圳今天天气怎么样"
+    assert "联网搜索" in payload["message"]
+    assert payload["suggestions"] == [{"id": "enable_search", "label": "开启联网搜索并重新提问"}]
+    assert "solutions" not in payload and "argv" not in raw
+
+
+def test_limitation_payload_with_search_enabled():
+    payload = cg.limitation_payload("g", "realtime_weather", "实时天气查询", "q", use_search=True)
+    assert payload["kind"] == "limitation"
+    assert payload["suggestions"] == [{"id": "retry", "label": "重新提问"}]
+    assert "联网搜索" in payload["message"]
+
+
+def test_fill_placeholders_percent_encodes_non_ascii_in_urls():
+    """中文城市名进 URL 查询串必须百分号编码（open-meteo 前置 nginx 对原始 UTF-8 返回 403）。"""
+    url = "https://geocoding-api.open-meteo.com/v1/search?name={city}&count=1"
+    filled = cg._fill_placeholders(url, {"city": "深圳"})
+    assert "%E6%B7%B1%E5%9C%B3" in filled and "深圳" not in filled
+    # 非 URL 文本（方案标题）保留可读原文
+    assert cg._fill_placeholders("查询 {city} 天气", {"city": "深圳"}) == "查询 深圳 天气"
+    # 缺失占位符保留原样
+    assert "{lat}" in cg._fill_placeholders("latitude={lat}", {})
+
+
+def test_weather_recipe_has_server_side_geocode_chain():
+    sols = cg.propose_solutions("realtime_weather", {"city": "深圳"})
+    ids = [s["id"] for s in sols]
+    assert "cli_geocode" in ids and "cli_open_meteo" in ids
+    geocode = next(s for s in sols if s["id"] == "cli_geocode")
+    assert not geocode.get("needs_argument")
+    assert "%E6%B7%B1%E5%9C%B3" in " ".join(geocode["argv"])
+    meteo = next(s for s in sols if s["id"] == "cli_open_meteo")
+    assert meteo.get("needs_argument") and "lat" in meteo["missing_arguments"]
+
+
+def test_absorb_geocode_refills_meteo_coordinates(isolated_db):
+    gap_id = cg.record_gap(user_id="u1", query="深圳今天天气怎么样",
+                           scenario="realtime_weather", context={"city": "深圳"})
+    stdout = json.dumps({"results": [{"latitude": 22.54554, "longitude": 114.0683,
+                                      "timezone": "Asia/Shanghai"}]})
+    cg._absorb_geocode(gap_id, cg.get_gap(gap_id), stdout)
+    gap = cg.get_gap(gap_id)
+    assert gap["context"]["lat"] == "22.54554" and gap["context"]["lon"] == "114.0683"
+    meteo = next(s for s in gap["proposed"] if s["id"] == "cli_open_meteo")
+    assert not meteo.get("needs_argument")
+    assert "22.54554" in " ".join(meteo["argv"]) and "114.0683" in " ".join(meteo["argv"])
+
+
+def test_absorb_geocode_bad_output_keeps_missing_argument(isolated_db):
+    gap_id = cg.record_gap(user_id="u1", query="深圳今天天气怎么样",
+                           scenario="realtime_weather", context={"city": "深圳"})
+    cg._absorb_geocode(gap_id, cg.get_gap(gap_id), "not json")
+    gap = cg.get_gap(gap_id)
+    assert "lat" not in gap["context"]
+    meteo = next(s for s in gap["proposed"] if s["id"] == "cli_open_meteo")
+    assert meteo.get("needs_argument")

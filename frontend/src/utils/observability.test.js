@@ -30,6 +30,14 @@ async function observationHarness(canOps = false, fail = false) {
     },
     getObservabilityTraces: { items: [], total: 0 },
     getObservabilityTrace: {}, getObservabilityTraceLogs: {},
+    // 按 Tab 按需加载后新增的面板数据源（null 表示面板隐藏，不阻断渲染）
+    getObsMonitor: {
+      quality: { likes: 0, dislikes: 0, skill_reviews: { high: 0 }, online_eval: { avg_geval: null, samples: 0, low_count: 0 }, regression: null },
+      security: { events_total: 0, pending: 0, unacked_alerts: 0, high: 0, critical: 0, tool_blocked: 0 },
+      business: { counts: { sessions: 0, messages: 0, active_users: 0, uploads: 0, knowledge_bases: 0 } },
+    },
+    getSkillReviews: null, getToolRoutingMetrics: null, getSedimentSuggestions: null,
+    getObsToolChains: { items: [] },
   }
   const api = Object.fromEntries(Object.entries(data).map(([name, value]) => [name, async (...args) => {
     calls.push([name, ...args])
@@ -46,14 +54,18 @@ async function observationHarness(canOps = false, fail = false) {
     return `const ${name} = (modules[${JSON.stringify(source)}] || {}).default;`
   })
   const component = new Function('modules', `${code}\nreturn __component;`)({
-    vue: { ...Vue, onMounted: (fn) => { mounted = fn } },
+    vue: { ...Vue, onMounted: (fn) => { mounted = fn }, onActivated: () => {} },
     '@/stores/auth': { useAuthStore: () => ({ canOps }) }, '@/api': api,
+    // 查询缓存测试桩：直通 fetcher（不缓存），聚焦视图加载分支断言
+    '@/stores/queryCache': { useQueryCacheStore: () => ({ versions: {}, cachedGet: (r, p, fetcher) => fetcher() }), TTL_MONITOR: 30000 },
     'vue-router': { useRoute: () => Vue.reactive({ query: {} }), useRouter: () => ({ push() {} }) },
     '@/components/observability/ObsDashboard.vue': { default: { name: 'ObsDashboard', props: ['metrics', 'monitor', 'loading', 'rangeLabel'], render: () => null } },
     '@/components/observability/ObsLogs.vue': { default: { name: 'ObsLogs', render: () => null } },
   })
   const render = component.setup({}, { expose() {} })
   await mounted()
+  // onMounted 回调未 await loadAll：刷一轮事件循环确保首次加载完成（loading 复位）
+  await new Promise((resolve) => setImmediate(resolve))
   return {
     calls,
     html: () => renderToString(Vue.createSSRApp({ render })),
@@ -86,9 +98,9 @@ async function suggestionsHarness(overrides = {}) {
     `const ${name} = modules[${JSON.stringify(source)}].default;`
   )
   const component = new Function('modules', `${code}\nreturn __component;`)({
-    vue: { ...Vue, onMounted: fn => { mounted = fn }, onUnmounted: fn => { unmounted = fn } },
+    vue: { ...Vue, onMounted: fn => { mounted = fn }, onUnmounted: fn => { unmounted = fn }, onActivated: () => {} },
     'vue-router': { useRouter: () => ({ push() {} }) }, 'markdown-it': { default: MarkdownIt }, '@/api': api,
-    '@/components/PersonalToolsPanel.vue': { default: { render: () => null } },
+    '@/stores/queryCache': { useQueryCacheStore: () => ({ versions: {}, cachedGet: (r, p, fetcher) => fetcher() }), TTL_MONITOR: 30000 },
     '@/components/SkillDraftCard.vue': { default: { props: ['draft'], render() { return Vue.h('p', `${this.draft.name}:${this.draft.status}`) } } },
   })
   const render = component.setup({}, { expose() {} })
@@ -187,9 +199,10 @@ test('普通用户只请求个人指标，渲染结果不包含技术视图', as
   assert.deepEqual(view.calls, [['getMyObservabilityMetrics', 7, 'days'], ['getMyObservabilityMetrics', 7, 'days']])
 })
 
-test('管理员和运维分支保留全站指标与追踪入口', async () => {
+test('管理员和运维分支按当前 Tab 加载，保留全站指标与追踪入口', async () => {
   const view = await observationHarness(true)
-  assert.deepEqual(view.calls.map(([name]) => name), ['getObservabilityMetrics', 'getObservabilityTraces'])
+  // 默认 DashBoard Tab：只拉指标与监控聚合，不再全量 Promise.all
+  assert.deepEqual(view.calls.map(([name]) => name), ['getObservabilityMetrics', 'getObsMonitor'])
   let html = await view.html()
   assert.match(html, /Agent 可观测性/)
   assert.match(html, /DashBoard/)
@@ -198,12 +211,18 @@ test('管理员和运维分支保留全站指标与追踪入口', async () => {
     const tab = findNode(view.nodes(), (node) => node.type === 'button' && typeof node.children === 'string' && node.children.trim() === label)
     assert.ok(tab)
     tab.props.onClick()
+    await new Promise((resolve) => setImmediate(resolve))
     return view.html()
   }
   html = await clickTab('指标监控')
   assert.match(html, /Token 消耗/)
   html = await clickTab('链路追踪')
   assert.match(html, /请求追踪/)
+  await new Promise((resolve) => setImmediate(resolve))
+  // 切过的 Tab 才拉对应数据：链路追踪补拉 traces 与工具链
+  const names = view.calls.map(([name]) => name)
+  assert.ok(names.includes('getObservabilityTraces'))
+  assert.ok(names.includes('getObsToolChains'))
 })
 
 test('普通用户加载失败不显示技术错误原文', async () => {

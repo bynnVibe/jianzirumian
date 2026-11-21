@@ -26,7 +26,13 @@
       @close="sidebarOpen = false"
     />
     <main class="main-content" :class="{ 'no-sidebar': !showSidebar, 'sidebar-open': sidebarOpen }">
-      <router-view />
+      <!-- 高频页 KeepAlive 白名单（上限 6）：热切换保留实例与滚动位置，
+           敏感配置表单/上传/预览页不缓存实例 -->
+      <router-view v-slot="{ Component }">
+        <keep-alive :include="KEEP_ALIVE_VIEWS" :max="6">
+          <component :is="Component" />
+        </keep-alive>
+      </router-view>
     </main>
 
     <!-- 知识助手：非对话页面右侧可折叠问答栏（组件内部按路由/登录态自行决定显隐） -->
@@ -39,16 +45,41 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import AppSidebar from '@/components/AppSidebar.vue'
 import WikiAssistant from '@/components/WikiAssistant.vue'
 import GlobalAlertBell from '@/components/GlobalAlertBell.vue'
 import SecurityAlertDialog from '@/components/SecurityAlertDialog.vue'
 import { useAuthStore } from '@/stores/auth'
+import { useQueryCacheStore } from '@/stores/queryCache'
+import { startSync, stopSync } from '@/utils/syncClient'
+import { scheduleIdlePreload } from '@/utils/routePreload'
 
 const route = useRoute()
 const auth = useAuthStore()
+const queryCache = useQueryCacheStore()
+
+// KeepAlive 白名单：仅高频只读/列表页；配置表单、上传、预览、登录注册页不缓存
+const KEEP_ALIVE_VIEWS = [
+  'ChatView', 'SkillsView',
+  'KnowledgeOverviewView', 'GatewayView', 'ObservabilityView',
+]
+
+// 登录态/身份变化：绑定查询缓存身份（切账号/撤权即清空）并启停变更同步
+watch(
+  () => [auth.isAuthenticated, auth.user?.id, auth.user?.role],
+  ([authed]) => {
+    if (authed) {
+      queryCache.setIdentity(auth.user?.id || '', auth.user?.role || '')
+      startSync(queryCache)
+    } else {
+      stopSync()
+      queryCache.setIdentity('', '')
+    }
+  },
+  { immediate: true }
+)
 
 const sidebarOpen = ref(false)
 
@@ -94,6 +125,11 @@ onMounted(() => {
   // 同步恢复登录态（从 localStorage），不阻塞 UI 渲染
   auth.init()
 
+  // 空闲预加载高频页 chunk（最多 2 并发，不阻塞首屏）
+  scheduleIdlePreload(auth.canOps
+    ? ['/admin/gateway', '/admin/observability', '/admin/tools']
+    : ['/skills', '/kb'])
+
   if (auth.isAuthenticated) {
     resetInactivityTimer()
   }
@@ -106,6 +142,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  stopSync()
   window.removeEventListener('resize', handleResize)
   if (inactivityTimer) {
     clearTimeout(inactivityTimer)

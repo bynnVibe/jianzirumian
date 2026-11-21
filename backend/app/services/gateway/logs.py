@@ -37,16 +37,30 @@ def _dumps(obj) -> str:
 
 
 def write_log(entry: dict) -> str:
-    """写入一条网关调用日志，返回 log_id。entry 字段见 gateway_logs 表结构。"""
+    """写入一条网关调用日志，返回 log_id。entry 字段见 gateway_logs 表结构。
+
+    归属字段（user_id/billing_user_id/trace_id/span_id/job_id/origin/
+    attribution_source）由代理 prepare 注入；usage_event_id 幂等：同一用量
+    事件重复落库直接返回已有 log_id，不重复计量。
+    """
     log_id = entry.get("id") or str(uuid.uuid4())
+    usage_event_id = str(entry.get("usage_event_id") or "")
     try:
+        if usage_event_id:
+            existing = db.query_one(
+                "SELECT id FROM gateway_logs WHERE usage_event_id=?", (usage_event_id,))
+            if existing:
+                return existing["id"]
         db.execute(
             "INSERT INTO gateway_logs (id, key_id, key_name, model_requested, model_mapped,"
             " channel_id, channel_name, upstream_url, stream, status_code, status,"
             " prompt_tokens, completion_tokens, cached_tokens, total_tokens, latency_ms, retries,"
             " tool_calls, request_body, response_preview, risk_level, risk_score, risks,"
-            " audit_action, trace_steps, client_ip, error, role, created_at)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING",
+            " audit_action, trace_steps, client_ip, error, role, created_at,"
+            " user_id, billing_user_id, trace_id, span_id, job_id, origin,"
+            " attribution_source, usage_event_id)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+            " ON CONFLICT(id) DO NOTHING",
             (
                 log_id,
                 entry.get("key_id", ""), entry.get("key_name", ""),
@@ -66,6 +80,10 @@ def write_log(entry: dict) -> str:
                 _dumps(entry.get("trace_steps") or []), entry.get("client_ip", ""),
                 _clip(entry.get("error", ""), 500), entry.get("role", ""),
                 entry.get("created_at") or _now(),
+                entry.get("user_id", ""), entry.get("billing_user_id", ""),
+                entry.get("trace_id", ""), entry.get("span_id", ""),
+                entry.get("job_id", ""), entry.get("origin", ""),
+                entry.get("attribution_source", ""), usage_event_id,
             ),
         )
     except Exception as e:
@@ -95,6 +113,16 @@ def _row_to_summary(row: dict) -> dict:
         "client_ip": row.get("client_ip") or "",
         # 业务场景（role）：记忆抽取/意图改写/聊天回答…，空=非业务路由发起
         "role": row.get("role") or "",
+        # 调用归属：发起用户/计费用户/归属来源（空 user_id=未归属到具体用户）
+        "user_id": row.get("user_id") or "",
+        "billing_user_id": row.get("billing_user_id") or "",
+        "attribution_source": row.get("attribution_source") or "",
+        # 四分类（与 stats 口径一致）：列表 SELECT 带计算列时直接用，
+        # 明细 SELECT * 无该列时按用户/来源推导
+        "attribution": row.get("attribution") or (
+            "user" if row.get("user_id") else
+            {"system_internal": "system", "public_shared": "public"}.get(
+                row.get("attribution_source") or "", "unattributed")),
         "created_at": row.get("created_at"),
     }
 
@@ -115,18 +143,50 @@ def get_log(log_id: str) -> Optional[dict]:
         "tool_calls": json.loads(row.get("tool_calls") or "[]"),
         "risks": json.loads(row.get("risks") or "[]"),
         "trace_steps": json.loads(row.get("trace_steps") or "[]"),
+        # 全链路关联：与可观测性 trace 同源（签名上下文注入）
+        "trace_id": row.get("trace_id") or "",
+        "span_id": row.get("span_id") or "",
+        "job_id": row.get("job_id") or "",
+        "origin": row.get("origin") or "",
+        "usage_event_id": row.get("usage_event_id") or "",
     })
     return d
 
 
+# 归属四分类（界面口径）：用户业务=有归属用户；真实系统=内部密钥；
+# 公共游客=公共密钥且无用户；历史未归属=其余（存量无证据行/密钥已删除）。
+_ATTR_CASE = (
+    "CASE WHEN user_id <> '' THEN 'user'"
+    " WHEN key_id IN (SELECT id FROM gateway_keys WHERE key_type='internal') THEN 'system'"
+    " WHEN key_id IN (SELECT id FROM gateway_keys WHERE key_type='public') THEN 'public'"
+    " ELSE 'unattributed' END"
+)
+_ATTR_CLAUSES = {
+    "user": "user_id <> ''",
+    "system": "user_id = '' AND key_id IN (SELECT id FROM gateway_keys WHERE key_type='internal')",
+    "public": "user_id = '' AND key_id IN (SELECT id FROM gateway_keys WHERE key_type='public')",
+    "unattributed": ("user_id = '' AND key_id NOT IN"
+                     " (SELECT id FROM gateway_keys WHERE key_type IN ('internal','public'))"),
+}
+
+
 def query_logs(key_id: str = "", model: str = "", channel_id: str = "", status: str = "",
                risk_level: str = "", keyword: str = "", start: str = "", end: str = "",
-               role: str = "", limit: int = 30, offset: int = 0) -> dict:
-    """搜索/筛选/分页查询日志列表，返回 {total, items}。"""
+               role: str = "", user_id: str = "", attribution: str = "",
+               limit: int = 30, offset: int = 0) -> dict:
+    """搜索/筛选/分页查询日志列表，返回 {total, items}。
+
+    user_id 精确筛选发起用户；attribution 按四分类筛选
+    （user/system/public/unattributed）。
+    """
     where = ["1=1"]
     params: list = []
     if key_id:
         where.append("key_id = ?"); params.append(key_id)
+    if user_id:
+        where.append("user_id = ?"); params.append(user_id)
+    if attribution in _ATTR_CLAUSES:
+        where.append(_ATTR_CLAUSES[attribution])
     if role:
         where.append("role = ?"); params.append(role)
     if model:
@@ -151,7 +211,8 @@ def query_logs(key_id: str = "", model: str = "", channel_id: str = "", status: 
     clause = " AND ".join(where)
     total = db.query_one(f"SELECT COUNT(*) AS n FROM gateway_logs WHERE {clause}", tuple(params))
     rows = db.query(
-        f"SELECT * FROM gateway_logs WHERE {clause} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+        f"SELECT *, {_ATTR_CASE} AS attribution FROM gateway_logs WHERE {clause}"
+        " ORDER BY created_at DESC LIMIT ? OFFSET ?",
         tuple(params + [max(1, min(limit, 100)), max(0, offset)]),
     )
     return {"total": total["n"] if total else 0, "items": [_row_to_summary(r) for r in rows]}
@@ -214,6 +275,21 @@ def stats(days: int = 7) -> dict:
         " FROM gateway_logs l LEFT JOIN gateway_keys k ON k.id = l.key_id"
         " WHERE l.created_at >= ? AND l.key_name!=''"
         " GROUP BY l.key_id, l.key_name ORDER BY tokens DESC LIMIT 20", (since,))]
+    # 归属统计：用户业务/真实系统/公共游客/历史未归属（不再笼统计入「系统内部调用」）
+    by_attribution = [dict(r) for r in db.query(
+        f"SELECT {_ATTR_CASE} AS category, COUNT(*) AS total,"
+        " COALESCE(SUM(total_tokens),0) AS tokens,"
+        " COALESCE(SUM(prompt_tokens),0) AS prompt_tokens,"
+        " COALESCE(SUM(completion_tokens),0) AS completion_tokens"
+        " FROM gateway_logs WHERE created_at >= ? GROUP BY category", (since,))]
+    by_user = [dict(r) for r in db.query(
+        "SELECT l.user_id, COALESCE(u.username, '') AS username, COUNT(*) AS total,"
+        " COALESCE(SUM(l.total_tokens),0) AS tokens,"
+        " COALESCE(SUM(l.prompt_tokens),0) AS prompt_tokens,"
+        " COALESCE(SUM(l.completion_tokens),0) AS completion_tokens"
+        " FROM gateway_logs l LEFT JOIN users u ON u.id = l.user_id"
+        " WHERE l.created_at >= ? AND l.user_id <> ''"
+        " GROUP BY l.user_id ORDER BY tokens DESC LIMIT 20", (since,))]
     return {
         "days": days,
         "overview": {
@@ -231,6 +307,7 @@ def stats(days: int = 7) -> dict:
         },
         "daily": daily, "by_channel": by_channel, "by_model": by_model,
         "by_risk": by_risk, "top_keys": top_keys, "by_key": by_key,
+        "by_attribution": by_attribution, "by_user": by_user,
     }
 
 

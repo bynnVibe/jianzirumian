@@ -683,7 +683,7 @@
             <b>关联工具依赖</b>：Skill 草稿若声明 <code>allowed-tools</code>，卡片展开<b>「关联工具依赖」</b>。可「刷新可选个人工具」手动绑定已安装工具的特定版本，或点<b>「联网查找并生成工具草稿」</b>自动发现并生成待确认工具草稿（可「取消依赖发现」）；工具须另行确认、配置与测试。全部依赖就绪后点<b>「确认依赖并重新评审」</b>，评审 ready 才启用 Skill。绑定只锁定所展示版本，工具变更／撤权／测试失败会使 Skill 回到未启用；依赖就绪不代表实际需求已验收。
           </div>
           <div class="callout callout-info">
-            <b>聊天添加工具</b>：输入 <code>@tool 功能描述或公开 API 文档链接</code>（兼容 <code>@tools</code>），确认草稿后执行只读样例测试。在「Skill 配置 → 我的工具」查看版本、启停、配置、测试及执行状态；API 凭据只在专用表单填写，不发到聊天。自定义 API／脚本须管理员审批，样例通过才就绪；没有支持原生 Function Calling 的模型会明确拒绝。Python 需专用 Linux 隔离 Worker 并通过真实验收，默认关闭，不回退到业务主机执行。取消待确认不代表已终止，请刷新执行记录核验。
+            <b>聊天添加工具（仅管理员）</b>：管理员输入 <code>@tool 功能描述或公开 API 文档链接</code>（兼容 <code>@tools</code>），确认草稿后执行只读样例测试；普通用户不开放 <code>@tool</code>，请通过 <code>@skills</code> 添加技能并按需派生工具。工具以<b>功能名</b>注册（如 <code>get_current_weather</code>，小写英文 snake_case，不再使用随机码），随后进入<b>「工具治理中心」</b>（见第 15 节）按六步工作流完成 配置审批 → 样例测试 → 标准化评测 → 启用 → 注册调用，全部通过后才进入「标准化工具注册表」，默认全员可调用、可按工具限制特定用户。在「Skill 配置 → 我的工具」查看版本、启停、配置、测试、评测及执行状态；API 凭据只在专用表单填写，不发到聊天。自定义 API／脚本须管理员审批，样例与评测通过才就绪；没有支持原生 Function Calling 的模型会明确拒绝。Python 需专用 Linux 隔离 Worker 并通过真实验收，默认关闭，不回退到业务主机执行。取消待确认不代表已终止，请刷新执行记录核验。
           </div>
         </div>
         <div class="card">
@@ -701,10 +701,47 @@
         </div>
       </section>
 
-      <!-- 部署与 CI/CD 工作流 -->
+      <!-- 工具治理中心 -->
       <section class="guide-section">
         <h2 class="section-title">
           <span class="section-num">15</span>
+          工具治理中心：六步评测工作流与功能名注册表（管理员/运维）
+        </h2>
+        <div class="card">
+          <h3 class="card-title">个人工具的唯一集中入口</h3>
+          <p class="card-text">
+            「系统管理 → 工具治理中心」（<code>/admin/tools</code>）是个人工具生命周期的<b>唯一集中入口</b>：
+            聊天 <code>@tool</code> 发起后，这里按<b>六步工作流</b>跑完并展示全部配置与评测记录；
+            工具须样例测试与标准化评测全部通过、启用且就绪后才进入注册表。展开任一工具即可看到逐步状态，
+            「运行完整工作流」可一键重跑 测试 → 评测 → 启用 全链路。
+          </p>
+          <ol class="step-list">
+            <li><b>创建与确认</b>：规格／执行器（连接器 / HTTP / Python）／版本记录。工具以<b>功能名</b>注册（如 <code>get_current_weather</code>、<code>compute_bmi</code>），小写英文 snake_case、拒绝随机码，跨版本稳定、全局唯一（同名冲突自动追加确定数字后缀）。</li>
+            <li><b>配置与审批</b>：阻塞项／条款接受／加密凭据／隔离执行配置，缺项明确标记待配置，不冒充成功。</li>
+            <li><b>只读样例测试</b>：真实调用上游的执行入口与测试历史。</li>
+            <li><b>标准化评测</b>：按版本声明派生用例，逐用例真实调用 + 断言校验，全部通过才放行。</li>
+            <li><b>启用</b>：启停开关，与评测/审批门禁联动。</li>
+            <li><b>注册与调用</b>：注册状态 + 用户黑名单 + 最近执行记录；执行、数据校验、需求满足三态独立展示。</li>
+          </ol>
+        </div>
+        <div class="card">
+          <h3 class="card-title">功能名注册表与按工具限制用户</h3>
+          <ul class="bullet-list">
+            <li><b>功能名展示</b>：注册表主显工具中文名 + 功能名标识（如 <code>get_current_weather</code>），不再使用 <code>pt_随机码</code> 形式；连接器按内置功能名映射（天气→<code>get_current_weather</code>、预报→<code>get_weather_forecast</code>、地理编码→<code>geocode_city</code>、海拔→<code>get_elevation</code>、新闻→<code>search_news</code>），HTTP/Python 工具由模型按功能声明。历史随机码工具在升级时自动迁移为功能名。</li>
+            <li><b>默认全员可调用</b>：注册工具对所有用户可见可调用，聊天中由模型以原生 tool_calls 按功能名调用。</li>
+            <li><b>按工具限制用户</b>：管理员在注册表「调用范围」列点<b>「限制」</b>，勾选不允许使用的用户（属主除外）保存——被限制用户的工具目录与执行门禁<b>同时拒绝</b>，其他用户不受影响；工作流第 6 步亦可配置同一黑名单。</li>
+            <li><b>管理侧属主隔离</b>：工具的详情、编辑、测试等管理操作仍仅属主（及治理入口的管理员/运维）可执行。</li>
+          </ul>
+          <div class="callout callout-info">
+            工具调用需模型网关配置支持原生 Function Calling 的 <code>tool_decision</code> 角色，模型不兼容时明确拒绝，不回退文本 JSON。个人 API 的已授予网络权限独立于普通聊天联网开关；首版不开放发邮件、支付、外部删除等副作用。
+          </div>
+        </div>
+      </section>
+
+      <!-- 部署与 CI/CD 工作流 -->
+      <section class="guide-section">
+        <h2 class="section-title">
+          <span class="section-num">16</span>
           阿里云 ECS 部署与 CI/CD 工作流（运维）
         </h2>
         <div class="card">
@@ -732,7 +769,7 @@
       <!-- 移动端使用 -->
       <section class="guide-section">
         <h2 class="section-title">
-          <span class="section-num">16</span>
+          <span class="section-num">17</span>
           移动端使用（手机 / 平板）
         </h2>
         <div class="card">
@@ -770,7 +807,7 @@
       <!-- 常见问题 -->
       <section class="guide-section">
         <h2 class="section-title">
-          <span class="section-num">17</span>
+          <span class="section-num">18</span>
           常见问题
         </h2>
         <div class="faq-list">
@@ -809,6 +846,10 @@
           <details class="faq-item">
             <summary>上传的笔记为什么没有出现百科词条？</summary>
             <p>知识编译在保存成功后后台异步执行，通常需几十秒到几分钟。若长时间未出现：可能是笔记内容过短（不足编译门槛会跳过）、编译开关被关闭，或 LLM 暂时限流失败——前两种可在系统设置「llm-wiki 知识编译」区块确认开关并用「存量补编译」补齐，第三种稍后重试即可，均不影响原始资料与正常检索。</p>
+          </details>
+          <details class="faq-item">
+            <summary>个人工具的名字为什么是英文功能名？如何限制某些用户使用？</summary>
+            <p>工具以功能命名（如 <code>get_current_weather</code>），不再使用随机码，便于模型原生 tool_calls 识别与跨版本稳定调用；同名冲突自动追加确定数字后缀。管理员在「工具治理中心」注册表「调用范围」列点「限制」，勾选不允许使用的用户保存即可——被限制用户的工具目录与执行门禁同时拒绝，其他用户不受影响。</p>
           </details>
           <details class="faq-item">
             <summary>游客模式有什么限制？</summary>

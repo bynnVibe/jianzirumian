@@ -4,6 +4,7 @@
   - Ollama 本地嵌入模型 (如 bge-m3, nomic-embed-text)
   - OpenAI 兼容 API (text-embedding-3-small 等)
 """
+import hashlib
 import logging
 import math
 import time
@@ -256,14 +257,17 @@ class EmbeddingFactory:
 
     @staticmethod
     def _gateway_embeddings_client(role: str = "embed"):
-        """构建经网关的 OpenAIEmbeddings（base_url=网关内部地址，api_key=内部密钥）。
+        """构建经网关的 OpenAIEmbeddings（base_url=网关内部地址，api_key=按用户解析）。
 
         仅当存在启用的 embedding 上游、可解析出模型且选路有候选时返回实例，否则 None。
+        凭据随请求级 CallContext 归属用户解析（绑定用户密钥 > 公共 > 内部），
+        缓存键含密钥指纹维度：不同用户不共用同一客户端，不冻结单用户 key。
         """
         try:
             from app.services.gateway import keys as key_svc
             from app.services.gateway import rules as rule_svc
             from app.services.gateway import upstreams as up_svc
+            from app.core import call_context
             ups = [u for u in up_svc.list_upstreams(category="embedding") if u.get("enabled")]
             if not ups:
                 return None
@@ -278,21 +282,23 @@ class EmbeddingFactory:
             _, candidates = rule_svc.select_upstreams(model, role=role)
             if not candidates:
                 return None
+            plain, _key_type = key_svc.resolve_outbound_key(call_context.current_user_id())
             key = ("gateway", settings.GATEWAY_INTERNAL_URL, model, role,
-                   settings.EMBEDDING_REQUEST_TIMEOUT)
+                   settings.EMBEDDING_REQUEST_TIMEOUT,
+                   hashlib.sha256(plain.encode("utf-8")).hexdigest()[:16])
             cached = _instance_cache.get(key)
             if cached is not None:
                 return cached
             instance = OpenAIEmbeddings(
                 base_url=settings.GATEWAY_INTERNAL_URL,
-                api_key=key_svc.ensure_internal_key(),
+                api_key=plain,
                 model=model,
                 check_embedding_ctx_length=False,
                 request_timeout=settings.EMBEDDING_REQUEST_TIMEOUT,
                 max_retries=0,
                 chunk_size=10,
             )
-            if len(_instance_cache) >= 8:
+            if len(_instance_cache) >= 32:
                 _instance_cache.clear()
             _instance_cache[key] = instance
             logger.info("[业务路由] embedding 经网关出网: role=%s model=%s", role, model)
