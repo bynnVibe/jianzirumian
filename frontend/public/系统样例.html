@@ -412,7 +412,7 @@ body {
     <button class="nav-btn" data-view="login" onclick="switchView('login', this)">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>登录 / 注册页</button>
     <div class="side-title"><span>对话历史</span><span>4</span></div>
-    <div class="history-item active" onclick="openChat(this)" style="display:flex;align-items:center;gap:6px"><span style="flex:1;overflow:hidden;text-overflow:ellipsis">丰隆穴有什么功效？怎么按摩？</span><span title="会话笔记（五层记忆 L3）" onclick="event.stopPropagation();openModal('noteModal')" style="cursor:pointer;flex-shrink:0">📝</span></div>
+    <div class="history-item active" onclick="openChat(this)" style="display:flex;align-items:center;gap:6px"><span style="flex:1;overflow:hidden;text-overflow:ellipsis">丰隆穴有什么功效？怎么按摩？</span><span title="会话笔记（九节结构化摘要 · SESSION.md 持久）" onclick="event.stopPropagation();openModal('noteModal')" style="cursor:pointer;flex-shrink:0">📝</span></div>
     <div class="history-item" onclick="openChat(this)">增值税的纳税人包括哪些？</div>
     <div class="history-item" onclick="openChat(this)">结合我的笔记谈谈幸福观</div>
     <div class="history-item" onclick="openChat(this)">淘米水能治皮肤瘙痒吗</div>
@@ -1117,6 +1117,8 @@ body {
             <p class="note">仅展示自己的业务指标，无其他用户记录或技术调用详情。完成率不计进行中和主动取消的操作，不代表答案准确率。</p></div>
           <div class="panel demo-section"><h3>我的上下文 & 记忆概览（点数值钻取）</h3>
             <div class="demo-stats"><div class="demo-stat"><strong>6 / 200</strong><span>记忆条数 / 上限</span></div><div class="demo-stat"><strong>3</strong><span>画像卡候选</span></div><div class="demo-stat"><strong>4</strong><span>被检索命中</span></div><div class="demo-stat"><strong>2</strong><span>从未使用</span></div><div class="demo-stat"><strong>0.692</strong><span>平均重要度</span></div><div class="demo-stat"><strong>1.8</strong><span>平均置信度</span></div></div>
+            <div class="demo-stats" style="margin-top:8px"><div class="demo-stat" style="cursor:pointer" onclick="openDrillExample('压缩链明细')"><strong>11.8k</strong><span>压缩节省 Token</span></div><div class="demo-stat"><strong>84.3%</strong><span>摘要压缩率</span></div><div class="demo-stat"><strong style="color:#b05555">0</strong><span>熔断会话</span></div><div class="demo-stat" style="cursor:pointer" onclick="openDrillExample('记忆写路径明细')"><strong>7</strong><span>写路径事件</span></div></div>
+            <p class="note">三级压缩链：microCompact（三档截断 + 空闲 ≥60 分钟读时衰减）→ autoCompact（token headroom 触发九节摘要，连败 3 次熔断）→ SessionMemoryCompact（摘要持久于 SESSION.md，DB 缺失时文件恢复）。点击「压缩节省 Token / 写路径事件」或「压缩链明细 / 记忆写路径明细」按钮钻取事件流。</p>
             <div class="demo-table-wrap"><table class="demo-table"><thead><tr><th>类型</th><th>条数</th><th>钻取</th></tr></thead>
               <tbody><tr><td>偏好</td><td>1</td><td><a href="#">查看明细</a></td></tr><tr><td>事实</td><td>5</td><td><a href="#">查看明细</a></td></tr><tr><td>目标</td><td>0</td><td><a href="#">查看明细</a></td></tr><tr><td>纠正</td><td>0</td><td><a href="#">查看明细</a></td></tr></tbody></table></div>
             <details class="demo-section"><summary>记忆钻取弹窗示例（从未使用 · 2 条）</summary>
@@ -1124,16 +1126,27 @@ body {
                 <tbody><tr><td>事实</td><td>用户关注睡眠质量改善</td><td>0.6</td><td>1</td><td>—</td></tr><tr><td>事实</td><td>用户习惯晚间散步</td><td>0.5</td><td>2</td><td>—</td></tr></tbody></table></div>
               <p class="note"><b>口径说明：</b>从未使用 = last_used_at 为空的记忆条数；与概览卡「从未使用」同源。置信度 = 反复确认递增（上限 5），召回评分含 0.1×置信度 因子。真实系统点击数值卡或类型条即打开钻取弹窗，底部附口径说明。</p>
             </details>
-            <details class="demo-section"><summary>五层记忆架构示意（指令层 / 自动记忆 / 会话笔记 / 助手记忆 / 相关记忆）</summary>
-              <div class="demo-table-wrap"><table class="demo-table"><thead><tr><th>层</th><th>载体</th><th>示例</th></tr></thead>
+            <details class="demo-section"><summary>五层 Markdown 记忆存储示意（参考 Claude Code 存储分级，剔除团队层）</summary>
+              <div class="demo-table-wrap"><table class="demo-table"><thead><tr><th>层</th><th>Markdown 载体（&lt;db父目录&gt;/memory/ 下）</th><th>写权限 / 说明</th></tr></thead>
                 <tbody>
-                  <tr><td>① 指令层</td><td>我的指令（≤500 字）</td><td>「回答先给结论再给依据；涉及剂量务必标注来源」——优先级高于系统默认约定</td></tr>
-                  <tr><td>② 自动记忆</td><td>用户记忆四类</td><td>偏好/事实/目标/纠正，带置信度与新鲜度提醒（陈旧记忆标注「时点观察」）</td></tr>
-                  <tr><td>③ 会话笔记</td><td>五节结构化摘要</td><td>意图/结论/约束/未决/下一步；用户编辑后自动压缩不再覆盖</td></tr>
-                  <tr><td>④ 助手记忆</td><td>按助手分域隔离</td><td>知识助手：常分析「睡眠/穴位」主题、偏好「先结论后依据」风格</td></tr>
-                  <tr><td>⑤ 相关记忆</td><td>按问题召回</td><td>同一会话内去重，压缩后自然重置</td></tr>
+                  <tr><td>① Managed 平台强制</td><td>managed/MANAGED.md</td><td>仅管理员可演进；平台级记忆策略种子化，注入于指令之前</td></tr>
+                  <tr><td>② User 个人全局</td><td>users/&lt;uid&gt;/USER.md</td><td>「我的指令」镜像（≤500 字），本人可写，优先级高于系统默认</td></tr>
+                  <tr><td>③ Project 项目共享</td><td>kb/&lt;kb_id&gt;/PROJECT.md</td><td>按知识库共享的项目约定，KB 属主/管理员可写</td></tr>
+                  <tr><td>④ Local 本地私有</td><td>users/&lt;uid&gt;/local/&lt;kb&gt;.md</td><td>本人在某知识库下的私有笔记，仅本人可见可写</td></tr>
+                  <tr><td>⑤ AutoMem AI 自学</td><td>users/&lt;uid&gt;/auto/MEMORY.md 索引 + &lt;type&gt;_&lt;id8&gt;.md</td><td>对话自动抽取，每条记忆独立 topic 文件 + 索引（- [文件](文件) — 描述）；偏好/事实/目标/纠正四类，带置信度与新鲜度提醒</td></tr>
+                  <tr><td>附：SessionMemory</td><td>sessions/&lt;sid&gt;/SESSION.md</td><td>会话九节结构化摘要持久载体（意图/结论/约束/未决/下一步 + 用户消息枚举/知识来源/当前工作/错误与纠正）；用户编辑后自动压缩不再覆盖</td></tr>
+                  <tr><td>附：助手分域镜像</td><td>users/&lt;uid&gt;/agents/&lt;agent&gt;.md</td><td>知识助手/聊天助手记忆按域隔离演进</td></tr>
                 </tbody></table></div>
-              <p class="note"><b>口径说明：</b>此为静态示意。真实系统「我的指令」在用户菜单预写，「我的记忆」弹窗含用户/助手两页签，会话笔记在对话历史每条会话的笔记图标查看/编辑。</p>
+              <p class="note"><b>口径说明：</b>Markdown 是持久记录载体，SQLite 是查询镜像（写路径双写、恢复路径文件优先）；记忆根目录与 SQLite 同址。功能视角保留指令层/自动记忆/会话笔记/助手记忆/相关记忆五能力，注入顺序 Managed（指令前）→ User → Project → Local → AutoMem 画像卡 + 相关检索。真实系统「我的记忆」弹窗含<b>用户/助手/五层文件</b>三页签：五层文件页签展示各层字符量/落盘状态，静态层按权限编辑 Markdown，AutoMem 经记忆 CRUD 演进。</p>
+            </details>
+            <details class="demo-section"><summary>三级压缩链示意（microCompact → autoCompact → SessionMemoryCompact）</summary>
+              <div class="demo-table-wrap"><table class="demo-table"><thead><tr><th>级</th><th>触发</th><th>机制</th></tr></thead>
+                <tbody>
+                  <tr><td>microCompact</td><td>读时投影，不落库</td><td>历史消息三档分级截断；会话空闲 ≥60 分钟时旧消息读时压到 200 字、最近 5 条保留全文（事件 kind=micro）</td></tr>
+                  <tr><td>autoCompact</td><td>token headroom 阈值（小会话豁免 + 条数/字符兜底）</td><td>全量历史送摘要器（单条 2000 字/总量 20000 字预算）产出九节结构化摘要；递归守卫 + 连续失败 3 次熔断（手动 force 可绕过）；落库 compact_kind/before_tokens 边界标记</td></tr>
+                  <tr><td>SessionMemoryCompact</td><td>摘要落库时 / DB 缺失时</td><td>摘要同步写 SESSION.md；DB 摘要缺失时读文件恢复（restored_from_file）；压缩后注入「摘要 + continuation 指令」再水化，自动模式抑制不必要的追问</td></tr>
+                </tbody></table></div>
+              <p class="note"><b>口径说明：</b>此为静态示意。手动「压缩历史」按钮（可填侧重点）保留；压缩节省 Token = Σ(before_tokens − after_tokens)，摘要压缩率 = 1 − Σafter/Σbefore（仅 auto/manual 摘要计入口径）；熔断会话 = fail_streak ≥3 的会话数，手动压缩成功后清零。全部事件落 context_compact_events 供钻取。</p>
             </details>
           </div>
         </div>
@@ -1291,6 +1304,14 @@ body {
               <div class="demo-stat"><strong>26</strong><span>百科页面</span></div>
               <div class="demo-stat"><strong>18</strong><span>记忆条数</span></div>
             </div>
+            <div class="aspect-title">记忆与上下文治理（写路径事件 / 压缩链事件 / 节省 Token / 熔断会话）</div>
+            <div class="demo-stats">
+              <div class="demo-stat" style="cursor:pointer" onclick="openDrillExample('记忆写路径明细')"><strong>7</strong><span>记忆写路径事件</span></div>
+              <div class="demo-stat" style="cursor:pointer" onclick="openDrillExample('压缩链明细')"><strong>12</strong><span>压缩链事件</span></div>
+              <div class="demo-stat"><strong>11.8k</strong><span>压缩节省 Token</span></div>
+              <div class="demo-stat"><strong style="color:#b05555">0</strong><span>熔断会话</span></div>
+            </div>
+            <p class="note">治理分布：写路径按层（Managed 0 / User 2 / Project 1 / Local 1 / AutoMem 3）与按动作（新增 3 / 更新 2 / 删除 1 / 簇合并 1 / 超限遗忘 0）；压缩链按类型（micro 5 / auto 4 / manual 2 / 失败 1 / 熔断 0）。点击卡片钻取全站逐条事件（时间/用户/动作/记忆层/类型/明细 或 压缩前后 token）。</p>
             <div class="panel"><h3>Token 用量分析 <span class="tag green" style="margin-left:6px">▼ 12% 较前期</span></h3>
               <div class="token-compare">
                 <div><span class="compare-num">717</span><span class="compare-label">近期平均 Token/请求</span></div>
@@ -1880,24 +1901,28 @@ body {
     <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end"><button class="btn btn-outline" onclick="closeModal('instructionModal')">取消</button><button class="btn btn-primary" onclick="closeModal('instructionModal')">保存</button></div>
   </div>
 </div>
-<!-- 会话笔记（五层记忆 L3） -->
+<!-- 会话笔记（九节结构化摘要 · SESSION.md 持久） -->
 <div class="modal-mask" id="noteModal" onclick="if(event.target===this)closeModal('noteModal')">
   <div class="modal" style="width:min(520px,92vw)">
     <h3>会话笔记 <span class="close-x" onclick="closeModal('noteModal')">×</span></h3>
-    <p class="note" style="margin-top:0">系统把较早对话压缩为五节结构化摘要（意图 / 结论 / 约束 / 未决 / 下一步），重新打开会话时据此续接上下文。编辑保存后自动压缩不再覆盖你的笔记。</p>
-    <div class="form-row"><textarea rows="8" placeholder="五节结构化摘要：意图 / 结论 / 约束 / 未决 / 下一步">意图：了解丰隆穴功效与按摩方法
+    <p class="note" style="margin-top:0">系统把较早对话压缩为九节结构化摘要（1-5 节：意图 / 结论 / 约束 / 未决 / 下一步；6-9 节：用户消息枚举 / 知识来源与附件状态 / 当前工作 / 错误与纠正），同步持久于 SESSION.md，重新打开会话时据此续接上下文（DB 缺失时文件恢复）。编辑保存后自动压缩不再覆盖你的笔记。</p>
+    <div class="form-row"><textarea rows="10" placeholder="九节结构化摘要：意图 / 结论 / 约束 / 未决 / 下一步 / 用户消息 / 知识来源 / 当前工作 / 错误与纠正">意图：了解丰隆穴功效与按摩方法
 结论：祛痰要穴，拇指按揉 3~5 分钟，两侧交替
 约束：仅从知识库检索，未开联网
 未决：配伍穴位（足三里 / 委中）细节
-下一步：补充足三里资料后追问</textarea></div>
+下一步：补充足三里资料后追问
+用户消息：①丰隆穴有什么功效？②怎么按摩？③能配足三里吗？
+知识来源：丰隆穴.md（2 片段）；无附件
+当前工作：等待用户确认是否检索足三里资料
+错误与纠正：无</textarea></div>
     <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end"><button class="btn btn-outline" onclick="closeModal('noteModal')">取消</button><button class="btn btn-primary" onclick="closeModal('noteModal')">保存</button></div>
   </div>
 </div>
-<!-- 我的记忆（用户 / 助手两页签） -->
+<!-- 我的记忆（用户 / 助手 / 五层文件三页签） -->
 <div class="modal-mask" id="memoryModal" onclick="if(event.target===this)closeModal('memoryModal')">
   <div class="modal">
     <h3>我的记忆 <span class="close-x" onclick="closeModal('memoryModal')">×</span></h3>
-    <div class="subtabs"><button class="subtab active" data-mem-tab="user" onclick="switchSub('mem','user',this)">用户记忆</button><button class="subtab" data-mem-tab="agent" onclick="switchSub('mem','agent',this)">助手记忆</button></div>
+    <div class="subtabs"><button class="subtab active" data-mem-tab="user" onclick="switchSub('mem','user',this)">用户记忆</button><button class="subtab" data-mem-tab="agent" onclick="switchSub('mem','agent',this)">助手记忆</button><button class="subtab" data-mem-tab="layers" onclick="switchSub('mem','layers',this)">五层文件</button></div>
     <div class="subpanel" id="mem-sub-user">
       <p class="note" style="margin-top:0">记忆用于跨会话个性化回答（饮食偏好 / 健康目标）。敏感信息不记录，可随时编辑 / 删除。</p>
       <div class="file-row" style="background:#fffdf9"><span class="fname">近 30 天对话 86 轮 · 记忆召回率 42% · 技能应用率 28%</span></div>
@@ -1911,6 +1936,18 @@ body {
       <div class="form-row"><label>助手域</label><select><option>知识助手</option><option>主问答</option></select></div>
       <div class="file-row"><span class="tag">事实</span><span class="fname">常分析「睡眠 / 穴位」主题</span><button class="btn btn-outline btn-sm">编辑</button><button class="btn btn-outline btn-sm" style="color:#b05555">删除</button></div>
       <div class="file-row"><span class="tag green">偏好</span><span class="fname">偏好「先结论后依据」风格</span><button class="btn btn-outline btn-sm">编辑</button><button class="btn btn-outline btn-sm" style="color:#b05555">删除</button></div>
+    </div>
+    <div class="subpanel" id="mem-sub-layers" hidden>
+      <p class="note" style="margin-top:0">五层 Markdown 存储概览（参考 Claude Code，剔除团队层）：Markdown 是持久记录载体，SQLite 是查询镜像。选择知识库后加载 Project / Local 层；静态层按权限编辑，AutoMem 经记忆 CRUD 演进。</p>
+      <div class="form-row"><label>知识库（Project / Local 层）</label><select><option>个人笔记库</option><option>中医穴位库</option></select></div>
+      <div class="file-row" style="flex-wrap:wrap"><span class="tag blue">Managed 420 字</span><span class="tag green">User 86 字</span><span class="tag">Project 350 字</span><span class="tag">Local 120 字</span><span class="tag green">AutoMem 6 条</span></div>
+      <div class="form-row"><label>编辑静态层</label><select><option>Local 本地私有（本人可写）</option><option>Project 项目共享（属主/管理员）</option><option>User 个人全局（委托我的指令）</option><option disabled>Managed 平台强制（仅管理员）</option></select></div>
+      <div class="form-row"><textarea rows="5" placeholder="Markdown 正文（单层写入预算 4000 字）"># 本地笔记
+- 丰隆穴配伍足三里需进一步核对原文</textarea></div>
+      <div style="display:flex;justify-content:flex-end"><button class="btn btn-primary btn-sm">保存该层</button></div>
+      <p class="note"><b>AutoMem 文件视图</b>：MEMORY.md 索引 + 每条记忆独立 topic 文件（frontmatter 元数据）。</p>
+      <div class="file-row"><span class="fname">MEMORY.md · - [fact_a1b2c3d4.md](fact_a1b2c3d4.md) — 用户关注睡眠质量改善</span></div>
+      <div class="file-row"><span class="fname">preference_e5f6a7b8.md · 回答先给结论再给依据（置信 3）</span></div>
     </div>
     <div style="margin-top:12px;display:flex;justify-content:flex-end"><button class="btn btn-outline" onclick="closeModal('memoryModal')">关闭</button></div>
   </div>

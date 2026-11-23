@@ -221,16 +221,23 @@ def test_extract_prompt_has_what_not_to_save(mem_db, monkeypatch):
 
 
 def test_manual_write_mutex_skips_extraction(mem_db, monkeypatch):
-    """主副互斥：近期手动写入后，后台抽取跳过（LLM 不被调用）。"""
+    """主副互斥（新口径）：近期手动写入后跳过 LLM 抽取层（LLM 不被调用）。
+
+    互斥范围已从「整轮抽取」收窄为「仅 LLM 层」：用户显式「记住/忘记…」走确定性
+    信号层，不受互斥拦截（否则显式指令会被静默丢弃）；该行为由
+    test_memory_extract_pipeline 覆盖。本例用无显式信号的一次性查询验证互斥门控。
+    """
     _patch_llm(monkeypatch, json.dumps([
         {"content": "用户喜欢徒步", "importance": 0.6, "type": "fact", "action": "add", "target_hint": ""},
     ], ensure_ascii=False))
     memory_module.note_manual_write("u1")
-    asyncio.run(MemoryService.extract_from_turn("u1", "s1", "我喜欢徒步", "好的"))
-    assert MemoryService.list_memories("u1") == []  # 跳过抽取
+    prompt_before = FakeLLM.last_prompt
+    asyncio.run(MemoryService.extract_from_turn("u1", "s1", "今天天气如何", "晴天"))
+    assert MemoryService.list_memories("u1") == []  # LLM 层被互斥跳过
+    assert FakeLLM.last_prompt == prompt_before  # LLM 未被调用
     # 窗口过期后恢复抽取
     memory_module._manual_write_at["u1"] = time.time() - (memory_module._MANUAL_WRITE_MUTEX_SECONDS + 10)
-    asyncio.run(MemoryService.extract_from_turn("u1", "s1", "我喜欢徒步", "好的"))
+    asyncio.run(MemoryService.extract_from_turn("u1", "s1", "今天天气如何", "晴天"))
     assert len(MemoryService.list_memories("u1")) == 1
 
 

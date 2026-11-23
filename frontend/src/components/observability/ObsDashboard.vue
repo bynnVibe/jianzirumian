@@ -171,8 +171,8 @@ const props = defineProps({
 // 指标数字钻取：父组件打开明细弹窗
 const emit = defineEmits(['drill'])
 
-const GROUPS = ['性能', '质量', '安全', '业务']
-const GROUP_CLS = { 性能: 'g-perf', 质量: 'g-quality', 安全: 'g-sec', 业务: 'g-biz' }
+const GROUPS = ['性能', '质量', '安全', '业务', '治理']
+const GROUP_CLS = { 性能: 'g-perf', 质量: 'g-quality', 安全: 'g-sec', 业务: 'g-biz', 治理: 'g-gov' }
 const TREND_RANGES = [7, 14, 30]
 const DEFAULT_CARDS = ['total', 'success_rate', 'avg_latency', 'tokens', 'likes', 'sec_events', 'sessions', 'active_users']
 
@@ -214,6 +214,11 @@ const CATALOG = [
   { id: 'kbs', group: '业务', label: '知识库', drill: 'kbs', hint: '知识库总数', get: (d) => String(d.mon?.business?.counts?.knowledge_bases ?? 0) },
   { id: 'wiki', group: '业务', label: '百科页面', drill: 'wiki', hint: 'llm-wiki 编译页面数', get: (d) => String(d.mon?.business?.counts?.wiki_pages ?? 0) },
   { id: 'memories', group: '业务', label: '记忆条数', drill: 'memories', hint: '跨会话用户记忆条数', get: (d) => String(d.mon?.business?.counts?.memories ?? 0) },
+  { id: 'memory_events', group: '治理', label: '记忆写路径事件', drill: 'memory_events', hint: '五层 Markdown 双写埋点（新增/更新/删除/合并/遗忘，不含抽取运行）', get: (d) => String(d.mon?.memory_context?.write_events_total ?? 0) },
+  { id: 'memory_extract', group: '治理', label: '记忆抽取运行', drill: 'memory_extract', hint: '每轮对话后台抽取事件；运行>0 而写入=0 即「跑了但零产出」', warnIf: (d) => (d.mon?.memory_context?.extract_runs?.total ?? 0) > 0 && (d.mon?.memory_context?.write_events_total ?? 0) === 0, get: (d) => String(d.mon?.memory_context?.extract_runs?.total ?? 0) },
+  { id: 'compact_events', group: '治理', label: '压缩链事件', drill: 'compact_events', hint: '三级压缩链：micro 空闲衰减 / auto / manual / 失败与熔断', get: (d) => String(d.mon?.memory_context?.compact_events?.total ?? 0) },
+  { id: 'tokens_saved', group: '治理', label: '压缩节省 Token', hint: 'auto/manual 压缩 Σ(压缩前 − 压缩后)', get: (d) => formatNum(d.mon?.memory_context?.tokens_saved ?? 0) },
+  { id: 'breaker_sessions', group: '治理', label: '熔断会话', hint: '自动压缩连败≥3 被熔断的会话（手动可绕过）', warnIf: (d) => (d.mon?.memory_context?.breaker_sessions ?? 0) > 0, get: (d) => String(d.mon?.memory_context?.breaker_sessions ?? 0) },
 ]
 
 const prefs = ref(null) // null=未加载；[]=用户清空
@@ -286,6 +291,7 @@ const visibleCards = computed(() => {
 // ---- 概况面板 ----
 const businessRows = computed(() => {
   const c = props.monitor?.business?.counts || {}
+  const mc = props.monitor?.memory_context || {}
   return [
     { label: '会话总数', value: c.sessions ?? 0, drill: 'sessions' },
     { label: '消息总数', value: c.messages ?? 0, drill: 'messages' },
@@ -294,6 +300,11 @@ const businessRows = computed(() => {
     { label: '百科页面', value: c.wiki_pages ?? 0, drill: 'wiki' },
     { label: '记忆条数', value: c.memories ?? 0, drill: 'memories' },
     { label: '上传记录', value: c.uploads ?? 0, drill: 'uploads' },
+    { label: '记忆写路径事件', value: mc.write_events_total ?? 0, drill: 'memory_events' },
+    { label: '记忆抽取运行', value: mc.extract_runs?.total ?? 0, warn: (mc.extract_runs?.total ?? 0) > 0 && (mc.write_events_total ?? 0) === 0, drill: 'memory_extract' },
+    { label: '压缩链事件', value: mc.compact_events?.total ?? 0, drill: 'compact_events' },
+    { label: '压缩节省 Token', value: formatNum(mc.tokens_saved ?? 0) },
+    { label: '熔断会话（连败≥3）', value: mc.breaker_sessions ?? 0 },
   ]
 })
 const qualityRows = computed(() => {
@@ -377,6 +388,7 @@ async function save() {
 .stat-icon.g-quality { background: #e6f4ea; color: #2e7d46; }
 .stat-icon.g-sec { background: #efe6fd; color: #7c3aed; }
 .stat-icon.g-biz { background: #fdf0d8; color: #e08a00; }
+.stat-icon.g-gov { background: #e0f2ef; color: #0f766e; }
 .stat-body { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
 .stat-num { font-size: 22px; font-weight: 700; color: var(--color-text); line-height: 1.15; font-variant-numeric: tabular-nums; }
 .stat-num.warn { color: #c62828; }

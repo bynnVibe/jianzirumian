@@ -222,8 +222,20 @@ cmd_upload() {
     fi
 
     info "上传到 ${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_DIR}/"
-    info "连接测试中..."
-    ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new "${REMOTE_USER}@${REMOTE_HOST}" "mkdir -p ${REMOTE_DIR}/scripts" || {
+    # 单过程上传：SSH 连接复用（ControlMaster），密码/验证只输入一次，
+    # 主包与辅助文件共用同一条已认证连接，避免大文件传完后二次弹密码超时失败。
+    CTRL_DIR="$(mktemp -d "${TMPDIR:-/tmp}/jzrm-ssh-XXXXXX")"
+    CTRL_SOCK="$CTRL_DIR/cm.sock"
+    SSH_MUX=(-o ControlPath="$CTRL_SOCK" -o StrictHostKeyChecking=accept-new)
+    cleanup_mux() {
+        ssh -O exit -o ControlPath="$CTRL_SOCK" "${REMOTE_USER}@${REMOTE_HOST}" 2>/dev/null || true
+        rm -rf "$CTRL_DIR"
+    }
+    trap cleanup_mux EXIT
+
+    info "建立 SSH 主连接（仅需一次密码/验证，后续上传复用）..."
+    ssh "${SSH_MUX[@]}" -o ConnectTimeout=10 -o ControlMaster=yes -o ControlPersist=yes \
+        -fN "${REMOTE_USER}@${REMOTE_HOST}" || {
         err "SSH 连接失败，请检查："
         err "  1. 服务器地址: ${REMOTE_HOST}"
         err "  2. 用户名: ${REMOTE_USER}"
@@ -231,14 +243,15 @@ cmd_upload() {
         err "  4. 是否已配置 SSH 密钥登录"
         exit 1
     }
+    ssh "${SSH_MUX[@]}" -o ConnectTimeout=5 "${REMOTE_USER}@${REMOTE_HOST}" "mkdir -p ${REMOTE_DIR}/scripts" || {
+        err "远程目录创建失败: ${REMOTE_DIR}/scripts"
+        exit 1
+    }
 
-    info "上传部署包（大文件可能需要几分钟）..."
-    scp "$DEPLOY_PACKAGE" "${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_DIR}/"
-    log "上传完成"
-
-    info "上传部署辅助文件..."
-    scp "$PROJECT_DIR/scripts/deploy-aliyun.sh" "${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_DIR}/scripts/"
-    log "上传完成"
+    info "上传部署包 + 部署辅助文件（同一连接、单过程完成，大文件可能需要几分钟）..."
+    scp "${SSH_MUX[@]}" "$DEPLOY_PACKAGE" "${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_DIR}/"
+    scp "${SSH_MUX[@]}" "$PROJECT_DIR/scripts/deploy-aliyun.sh" "${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_DIR}/scripts/"
+    log "上传完成（部署包与辅助文件已在同一过程传完）"
 
     echo ""
     warn "=========================================="

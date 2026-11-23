@@ -306,6 +306,14 @@ export function getModuleRecall(days = 30) {
 }
 
 /**
+ * 记忆自动抽取运行状态（近 N 天）：运行次数 / 写入条数 / 最近明细与无产出原因，
+ * 供「我的记忆」空态解释（未运行 / 跑了判空 / 模型失败 / 正常产出）
+ */
+export function getMemoryExtractStatus(days = 7) {
+  return api.get('/me/memory/extract-status', { params: { days } })
+}
+
+/**
  * Skill 配置：列表 / 新建 / 编辑（含开关） / 删除
  * kind: prompt（对话提示注入） | playbook（链接抓取策略）；内置技能仅可开关
  */
@@ -1321,6 +1329,27 @@ export function getMyContextSessions(days = 7, limit = 20, range = 'days') {
 /** 记忆概览钻取：kind=all/profile/retrieved/never_used/importance/type:<t> */
 export function getMyMemoryDrill(kind = 'all') {
   return api.get('/observability/my-context/memory-drill', { params: { kind } })
+}
+
+/**
+ * 五层记忆 Markdown 视图（对齐 Claude Code 存储分级，剔除 Team）：
+ * 层概览 + 静态层正文 + AutoMem 文件视图；静态层按权限编辑（AutoMem 经记忆 CRUD 演进）
+ */
+export function getMyMemoryLayers(kbId = '') {
+  return api.get('/me/memory/layers', { params: { kb_id: kbId } })
+}
+
+export function updateMyMemoryLayer(layer, content, kbId = '') {
+  return api.put(`/me/memory/layers/${layer}`, { content, kb_id: kbId })
+}
+
+/** 个人可观测性钻取：三级压缩链事件流 + 会话摘要边界标记 / 五层记忆写路径事件 */
+export function getMyCompactDrill(limit = 30) {
+  return api.get('/observability/my-context/compact-drill', { params: { limit } })
+}
+
+export function getMyMemoryEvents(limit = 30) {
+  return api.get('/observability/my-context/memory-events', { params: { limit } })
 }
 
 /**

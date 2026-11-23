@@ -648,6 +648,22 @@ class ChatService:
         # segment 级 token 度量：系统提示段
         obs.note_segment("system", "\n".join(m.get("content", "") for m in llm_messages))
 
+        # 五层记忆读取路径（Claude Code 存储分级，剔除 Team）：Managed→User→Project→Local
+        # 自下而上叠加注入，靠后注入优先级更高（recency bias）；markdown 持久层读时投影。
+        # Project/Local 仅在 kb_id 存在且对当前用户可见（public 或本人私有库）时注入。
+        from app.services import memory_store
+        kb_visible_id = ""
+        if kb_id and user_id and user_id != "guest":
+            from app.services import kb as kb_service
+            _kb_row = kb_service.get_kb(kb_id)
+            if _kb_row and (_kb_row.get("visibility") == "public" or _kb_row.get("owner_id") == user_id):
+                kb_visible_id = kb_id
+        static_layers = memory_store.static_layer_messages(user_id, kb_visible_id)
+        for _layer_msg in static_layers:
+            if _layer_msg["segment"] == "memory_managed":
+                llm_messages.append({"role": "system", "content": _layer_msg["content"]})
+                obs.note_segment("memory_managed", _layer_msg["content"])
+
         # L1 用户指令层（类比 CLAUDE.md User 层）：静态头之后、画像卡之前注入，
         # 靠后注入优先级更高（Managed < User，recency bias）；同用户跨会话稳定，前缀缓存友好。
         instruction_text = user_instructions.get_instruction(user_id)
@@ -655,6 +671,12 @@ class ChatService:
         if instruction_msgs:
             llm_messages.extend(instruction_msgs)
             obs.note_segment("user_instructions", instruction_text)
+
+        # Project/Local 层：用户指令之后注入（优先级高于 User 层），半静态前缀缓存友好
+        for _layer_msg in static_layers:
+            if _layer_msg["segment"] != "memory_managed":
+                llm_messages.append({"role": "system", "content": _layer_msg["content"]})
+                obs.note_segment(_layer_msg["segment"], _layer_msg["content"])
 
         # 记忆两层加载（借鉴 Claude Code：常驻索引层 + 按需检索层），合计受字符预算约束
         memory_text = ""
@@ -1622,8 +1644,14 @@ class ChatService:
         except Exception as e:
             logger.warning("会话摘要任务异常: %s", e)
         try:
+            # 记忆抽取窗口：近 3 条用户消息（含本轮），供跨轮纠正/覆盖判断；
+            # 单轮窗口看不到上下文时模型只能保守判空，是「抽取零产出」的成因之一。
+            recent_user_messages = [
+                m.content for m in session.messages if getattr(m, "role", "") == "user"
+            ][-3:]
             await memory_service.extract_from_turn(
-                session.user_id, session.session_id, user_msg.content, assistant_msg.content
+                session.user_id, session.session_id, user_msg.content, assistant_msg.content,
+                recent_user_messages=recent_user_messages,
             )
         except Exception as e:
             logger.warning("用户记忆抽取任务异常: %s", e)

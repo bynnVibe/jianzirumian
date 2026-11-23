@@ -13,7 +13,6 @@
 import json
 import logging
 import math
-import re
 import uuid
 from datetime import datetime
 from typing import List, Optional
@@ -27,12 +26,19 @@ from app.services.memory import (
     _DECAY_DAYS,
     _DUP_KEYWORD_OVERLAP,
     _DUP_SIMILARITY,
+    _LOCATE_RELAX_SIMILARITY,
+    _LOCATE_RELAX_OVERLAP,
+    _LOCATE_MIN_SIMILARITY,
+    _LOCATE_DELETE_SIMILARITY,
+    _LOCATE_DELETE_OVERLAP,
+    _LOCATE_DELETE_MIN_SIMILARITY,
     _tokenize_keywords,
     _content_similarity,
     _is_sensitive,
     _clamp_importance,
     _clamp_confidence,
     _days_since,
+    _parse_extraction_items,
     memory_line,
 )
 
@@ -53,6 +59,14 @@ def _valid_agent(agent_key: str) -> bool:
     return agent_key in AGENT_KEYS
 
 
+def _sync_mirror(user_id: str, agent_key: str, action: str):
+    """双写：助手分域 markdown 镜像重生成 + 写路径观测事件（文件为持久记录）。"""
+    from app.services import memory_store
+
+    memory_store.sync_agent_memory(user_id, agent_key)
+    memory_store.log_memory_event(user_id, action, "agent", detail=agent_key)
+
+
 class AgentMemoryService:
     @staticmethod
     def list_memories(user_id: str, agent_key: str) -> List[dict]:
@@ -70,10 +84,13 @@ class AgentMemoryService:
     @staticmethod
     def delete_memory(user_id: str, agent_key: str, memory_id: str) -> bool:
         # 行级隔离：user_id + agent_key 双条件，杜绝跨域/越权删除
-        return db.execute(
+        ok = db.execute(
             "DELETE FROM agent_memories WHERE id = ? AND user_id = ? AND agent_key = ?",
             (memory_id, user_id, agent_key),
         ) > 0
+        if ok:
+            _sync_mirror(user_id, agent_key, "delete")
+        return ok
 
     @staticmethod
     def update_memory(
@@ -112,6 +129,7 @@ class AgentMemoryService:
                 now, memory_id, user_id, agent_key,
             ),
         )
+        _sync_mirror(user_id, agent_key, "update")
         return {"id": memory_id, "content": content or row["content"], "updated": True}
 
     @staticmethod
@@ -128,6 +146,33 @@ class AgentMemoryService:
                 key = (overlap, sim)
                 if key > best_key:
                     best, best_key = m, key
+        return best
+
+    @staticmethod
+    def _locate_for_action(user_id: str, agent_key: str, hint: str,
+                           memory_type: str = None, for_delete: bool = False) -> Optional[dict]:
+        """update/delete 目标定位：严格查重未命中时按放宽阈值回退（与用户层同源口径）。"""
+        hit = AgentMemoryService.find_similar(user_id, agent_key, hint, memory_type)
+        if hit:
+            return hit
+        hint = (hint or "").strip()
+        if not hint:
+            return None
+        keywords = set(_tokenize_keywords(hint))
+        best, best_key = None, (0, 0.0)
+        for m in AgentMemoryService.list_memories(user_id, agent_key):
+            if memory_type and (m.get("memory_type") or "fact") != memory_type:
+                continue
+            overlap = len(keywords & set(m.get("keywords") or []))
+            sim = _content_similarity(hint, m.get("content") or "")
+            if for_delete:
+                ok = (sim > _LOCATE_DELETE_SIMILARITY
+                      or (overlap >= _LOCATE_DELETE_OVERLAP and sim > _LOCATE_DELETE_MIN_SIMILARITY))
+            else:
+                ok = (sim > _LOCATE_RELAX_SIMILARITY
+                      or (overlap >= _LOCATE_RELAX_OVERLAP and sim > _LOCATE_MIN_SIMILARITY))
+            if ok and (overlap, sim) > best_key:
+                best, best_key = m, (overlap, sim)
         return best
 
     @staticmethod
@@ -169,6 +214,7 @@ class AgentMemoryService:
                 _clamp_importance(importance), 1.0, source_session_id, now, now,
             ),
         )
+        _sync_mirror(user_id, agent_key, "add")
         AgentMemoryService._trim(user_id, agent_key)
         return {"id": memory_id, "content": content, "memory_type": memory_type}
 
@@ -188,6 +234,8 @@ class AgentMemoryService:
         )
         for row in stale:
             db.execute("DELETE FROM agent_memories WHERE id = ?", (row["id"],))
+        if stale:
+            _sync_mirror(user_id, agent_key, "forget")
 
     @staticmethod
     def retrieve_relevant(
@@ -255,13 +303,13 @@ class AgentMemoryService:
             importance = _clamp_importance(item.get("importance", 0.5))
             hint = (item.get("target_hint") or content).strip()
             if action == "delete":
-                hit = AgentMemoryService.find_similar(user_id, agent_key, hint)
+                hit = AgentMemoryService._locate_for_action(user_id, agent_key, hint, for_delete=True)
                 if hit:
                     AgentMemoryService.delete_memory(user_id, agent_key, hit["id"])
                     stats["delete"] += 1
                 continue
             if action == "update":
-                hit = AgentMemoryService.find_similar(user_id, agent_key, hint)
+                hit = AgentMemoryService._locate_for_action(user_id, agent_key, hint)
                 if hit:
                     AgentMemoryService.update_memory(
                         user_id, agent_key, hit["id"], content=content or None,
@@ -281,40 +329,71 @@ class AgentMemoryService:
         return stats
 
     @staticmethod
-    async def extract_from_turn(user_id: str, agent_key: str, session_id: str, user_message, assistant_message):
-        """助手域后台抽取（失败静默）。wiki_assistant 专属：只记助手相关偏好/主题，
-        明确不记用户个人健康/身份事实（那归用户记忆层 L2，避免双写漂移）。"""
-        if not user_id or user_id == "guest" or not _valid_agent(agent_key):
-            return
+    async def _llm_extract(user_message: str, assistant_message: str):
+        """助手域 LLM 抽取：返回 (items, reason)，解析与用户层同源（避免逻辑漂移）。"""
         try:
             from app.core.llm import LLMFactory
 
             llm = LLMFactory.create_for_role("memory_extract")
-            prompt = (
-                "从下面这一轮「文档助手」对话中，提取该助手值得长期记住的专属信息（仅助手域）。"
-                "只记：用户常分析的文档主题/领域、对分析风格与输出格式的偏好、反复出现的分析诉求。"
-                "明确不记：用户个人健康/身份/疾病等事实（那归用户记忆层，不归助手域）、"
-                "一次性提问、可从文档或上下文直接推导的内容、密码/密钥/证件等敏感信息。"
-                "若用户纠正了此前的分析偏好，输出 action=update 并用 target_hint 描述原记忆；"
-                "若要求遗忘，输出 action=delete。type 取值：preference/fact/goal/feedback。"
-                "仅输出 JSON 数组，每项 {\"content\": str, \"importance\": 0~1, \"type\": str, "
-                "\"action\": \"add|update|delete\", \"target_hint\": str}；没有则输出 []。\n\n"
-                f"用户: {user_message[:500]}\n助手: {assistant_message[:500]}"
-            )
+        except Exception as e:
+            logger.warning("助手域记忆抽取初始化失败（忽略）: %s", e)
+            return [], "llm_unavailable"
+        prompt = (
+            "从下面这一轮「文档助手」对话中，提取该助手值得长期记住的专属信息（仅助手域）。"
+            "只记：用户常分析的文档主题/领域、对分析风格与输出格式的偏好、反复出现的分析诉求。"
+            "明确不记：用户个人健康/身份/疾病等事实（那归用户记忆层，不归助手域）、"
+            "一次性提问、可从文档或上下文直接推导的内容、密码/密钥/证件等敏感信息。"
+            "若用户纠正了此前的分析偏好，输出 action=update 并用 target_hint 描述原记忆；"
+            "若要求遗忘，输出 action=delete。type 取值：preference/fact/goal/feedback。"
+            "content 用第三人称（「用户…」）陈述，不要写成问句。"
+            "仅输出 JSON 数组，每项 {\"content\": str, \"importance\": 0~1, \"type\": str, "
+            "\"action\": \"add|update|delete\", \"target_hint\": str}；确实无可保存内容才输出 []。\n\n"
+            f"用户: {user_message[:500]}\n助手: {assistant_message[:500]}"
+        )
+        try:
             collected = ""
             async for chunk in llm.chat([{"role": "user", "content": prompt}], stream=False):
                 collected += chunk
-            match = re.search(r"\[.*\]", collected, re.S)
-            if not match:
-                return
-            items = json.loads(match.group(0))
-            if not isinstance(items, list):
-                return
-            stats = AgentMemoryService.apply_extraction(user_id, agent_key, session_id, items)
-            if sum(stats.values()):
-                logger.info("用户 %s 助手 %s 域记忆抽取动作: %s", user_id, agent_key, stats)
         except Exception as e:
-            logger.warning("助手域记忆抽取失败（忽略，不影响对话）: %s", e)
+            logger.warning("助手域记忆抽取调用失败（忽略，不影响问答）: %s", e)
+            return [], "llm_error"
+        items, reason = _parse_extraction_items(collected)
+        if reason == "parse_error":
+            logger.warning("助手域记忆抽取输出无法解析（已忽略）: %s", (collected or "")[:200])
+        return items[:3], reason
+
+    @staticmethod
+    async def extract_from_turn(user_id: str, agent_key: str, session_id: str, user_message, assistant_message):
+        """助手域后台抽取：健壮解析 + 每轮落「抽取运行」事件，返回统计 dict。
+
+        wiki_assistant 专属：只记助手相关偏好/主题，明确不记用户个人健康/身份事实
+        （那归用户记忆层 L2，避免双写漂移）。模型判空/不可用/解析失败不再静默——
+        reason 写进运行事件 detail，使「助手域无记忆」可被解释。异常不影响问答主链路。
+        """
+        from app.services import memory_store
+
+        result = {"ran": False, "llm": 0, "reason": "", "add": 0, "update": 0, "delete": 0}
+        if not user_id or user_id in {"guest", "system", "-"} or not _valid_agent(agent_key):
+            result["reason"] = "no_user"
+            return result
+        user_text = (user_message or "").strip()
+        if not user_text:
+            result["reason"] = "empty_turn"
+            return result
+        result["ran"] = True
+        items, reason = await AgentMemoryService._llm_extract(user_text, (assistant_message or "").strip())
+        result["llm"] = len(items)
+        result["reason"] = reason
+        stats = AgentMemoryService.apply_extraction(user_id, agent_key, session_id, items)
+        result.update(stats)
+        detail = (f"{agent_key}:模型{len(items)}条→"
+                  f"新增{stats['add']}更新{stats['update']}删除{stats['delete']}")
+        if reason:
+            detail += f"（模型层:{reason}）"
+        memory_store.log_memory_event(user_id, "extract", "agent", detail=detail)
+        if sum(stats.values()):
+            logger.info("用户 %s 助手 %s 域记忆抽取动作: %s（%s）", user_id, agent_key, stats, detail)
+        return result
 
 
 agent_memory_service = AgentMemoryService()

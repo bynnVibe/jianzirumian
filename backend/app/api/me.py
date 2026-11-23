@@ -168,3 +168,159 @@ async def delete_my_agent_memory(memory_id: str, agent: str = "wiki_assistant", 
     if not agent_memory_service.delete_memory(user["id"], agent, memory_id):
         raise HTTPException(status_code=404, detail="记忆不存在或无权删除")
     return {"success": True, "message": "助手记忆已删除"}
+
+
+# ---------------------------------------------------------------------------
+# 五层记忆 Markdown 视图（/api/me/memory）：Claude Code 存储分级（剔除 Team 层）
+# Managed 仅管理员可写；Project 限 KB 属主/管理员；User/Local 限本人。
+# ---------------------------------------------------------------------------
+
+class LayerUpdateRequest(BaseModel):
+    content: str = ""
+    kb_id: str = ""
+
+
+def _layer_writable(layer: str, user: dict, kb_id: str) -> bool:
+    """按层写权限：managed=admin；project=KB 属主/admin；user/local=本人（local 需 kb_id）。"""
+    from app.services import kb as kb_service
+
+    uid = user["id"]
+    is_admin = user.get("role") == "admin"
+    if layer == "managed":
+        return is_admin
+    if layer == "user":
+        return True
+    if layer == "project":
+        if not kb_id:
+            return False
+        row = kb_service.get_kb(kb_id)
+        return bool(row) and (is_admin or row.get("owner_id") == uid)
+    if layer == "local":
+        return bool(kb_id)
+    return False
+
+
+@router.get("/memory/layers")
+async def my_memory_layers(kb_id: str = "", user: dict = Depends(get_current_user)):
+    """五层存储概览 + 各层 markdown 正文 + AutoMem 文件视图（只读）。"""
+    from app.services import memory_store
+
+    uid = user["id"]
+    contents = {layer: memory_store.read_layer(layer, user_id=uid, kb_id=kb_id)
+                for layer in ("managed", "user", "project", "local")}
+    return {
+        "layers": memory_store.layers_overview(uid, kb_id),
+        "contents": contents,
+        "auto": memory_store.auto_files(uid),
+        "writable": {layer: _layer_writable(layer, user, kb_id)
+                     for layer in ("managed", "user", "project", "local")},
+        "max_write_chars": memory_store.MAX_LAYER_WRITE_CHARS,
+    }
+
+
+@router.put("/memory/layers/{layer}")
+async def update_memory_layer(layer: str, body: LayerUpdateRequest, user: dict = Depends(get_current_user)):
+    """编辑静态层 markdown（Managed/User/Project/Local）；敏感内容拒绝。
+
+    User 层委托 user_instructions（DB 镜像同源，500 字预算）；其余层文件即持久记录。
+    AutoMem 层不开放直编：经 /memories CRUD 演进（每记忆独立 topic 文件 + 索引重建）。
+    """
+    from app.services import memory_store
+    from app.services.memory import _is_sensitive
+
+    if layer not in ("managed", "user", "project", "local"):
+        raise HTTPException(status_code=400, detail="该层不支持直接编辑（AutoMem 请经记忆 CRUD 演进）")
+    if not _layer_writable(layer, user, body.kb_id):
+        raise HTTPException(status_code=403, detail="无权编辑该记忆层")
+    content = (body.content or "").strip()
+    if content and _is_sensitive(content):
+        raise HTTPException(status_code=400, detail="内容包含敏感信息（密码/证件号等），不予记录")
+    if layer == "user":
+        from app.services import user_instructions
+
+        res = user_instructions.set_instruction(user["id"], content)
+        if res is None:
+            raise HTTPException(status_code=400, detail="指令写入失败")
+        return {"success": True, "layer": layer, "content": res["content"]}
+    if len(content) > memory_store.MAX_LAYER_WRITE_CHARS:
+        raise HTTPException(status_code=400,
+                            detail=f"内容过长（上限 {memory_store.MAX_LAYER_WRITE_CHARS} 字符）")
+    if not memory_store.write_layer(layer, content, user_id=user["id"], kb_id=body.kb_id):
+        raise HTTPException(status_code=500, detail="记忆文件写入失败")
+    memory_store.log_memory_event(user["id"], "update", layer, detail=body.kb_id)
+    return {"success": True, "layer": layer, "content": content}
+
+
+@router.get("/memory/auto-files")
+async def my_memory_auto_files(user: dict = Depends(get_current_user)):
+    """AutoMem 文件视图：MEMORY.md 索引正文 + 每记忆独立 topic 文件（含元数据）。"""
+    from app.services import memory_store
+
+    return memory_store.auto_files(user["id"])
+
+
+def _extract_run_reason(detail: str) -> str:
+    """从运行事件 detail 判定本轮结果（供空态解释）。
+
+    以「整轮是否写入」为准而非仅看模型层：显式信号层落库而模型判空时，
+    本轮仍属正常产出（否则面板会误报「无值得保存的内容」）。
+    """
+    m = re.search(r"新增(\d+)更新(\d+)删除(\d+)", detail or "")
+    if m and sum(int(g) for g in m.groups()) > 0:
+        return "produced"
+    r = re.search(r"模型层:([a-z_]+)", detail or "")
+    if r:
+        return r.group(1)
+    # 无模型层原因后缀且零写入：有候选但被查重/敏感词门禁拦下或超单轮上限
+    return "filtered"
+
+
+@router.get("/memory/extract-status")
+async def my_memory_extract_status(days: int = 7, user: dict = Depends(get_current_user)):
+    """自动抽取运行状态（近 N 天）：让「暂无记忆」可解释。
+
+    区分四种情形：从未运行（runs=0）/ 跑了但模型判空（empty）/
+    模型不可用或调用失败（llm_unavailable・llm_error）/ 正常产出（produced）。
+    口径与可观测性同源：memory_write_events 中 action=extract 为运行事件，
+    add/update/delete/merge 为实际写入事件（两者拆开，避免运行数污染写路径指标）。
+    """
+    from datetime import datetime, timedelta
+
+    from app.core import db
+
+    uid = user["id"]
+    days = max(1, min(90, int(days or 7)))
+    empty = {"enabled": False, "days": days, "runs": 0, "writes": 0,
+             "writes_by_action": {}, "by_reason": {},
+             "last_run_at": None, "last_detail": "", "last_reason": ""}
+    if not uid or uid in {"guest", "system", "-"}:
+        return empty
+    since = (datetime.now() - timedelta(days=days)).isoformat()
+    rows = db.query(
+        "SELECT action, detail, created_at FROM memory_write_events"
+        " WHERE user_id = ? AND created_at >= ? ORDER BY created_at DESC",
+        (uid, since),
+    )
+    runs = [r for r in rows if r.get("action") == "extract"]
+    writes_by_action: dict = {}
+    for r in rows:
+        act = r.get("action") or ""
+        if act in ("add", "update", "delete", "merge"):
+            writes_by_action[act] = writes_by_action.get(act, 0) + 1
+    by_reason: dict = {}
+    for r in runs:
+        reason = _extract_run_reason(r.get("detail") or "")
+        by_reason[reason] = by_reason.get(reason, 0) + 1
+    last = runs[0] if runs else {}
+    last_detail = last.get("detail") or ""
+    return {
+        "enabled": True,
+        "days": days,
+        "runs": len(runs),
+        "writes": sum(writes_by_action.values()),
+        "writes_by_action": writes_by_action,
+        "by_reason": by_reason,
+        "last_run_at": last.get("created_at"),
+        "last_detail": last_detail,
+        "last_reason": _extract_run_reason(last_detail) if runs else "",
+    }

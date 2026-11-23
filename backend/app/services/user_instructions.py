@@ -51,6 +51,11 @@ def set_instruction(user_id: str, content: str) -> Optional[dict]:
         " ON CONFLICT(user_id) DO UPDATE SET content=excluded.content, updated_at=excluded.updated_at",
         (str(uuid.uuid4()), user_id, content, now),
     )
+    # 双写：User 层 markdown 镜像（USER.md 为持久记录，DB 为查询镜像）
+    from app.services import memory_store
+
+    memory_store.sync_instruction(user_id, content)
+    memory_store.log_memory_event(user_id, "update" if content else "delete", "user")
     return {"content": content, "updated_at": now}
 
 

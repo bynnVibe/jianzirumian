@@ -295,6 +295,55 @@
         <div class="metric-card drillable" title="记忆条数，点击查看明细" @click="openDrill('memories', '记忆条数')"><span class="metric-num">{{ monitor.business.counts.memories || 0 }}</span><span class="metric-label">记忆条数</span></div>
       </section>
 
+      <!-- ============ 记忆与上下文治理（需求4：五层 Markdown 写路径 × 三级压缩链） ============ -->
+      <div class="aspect-title">记忆与上下文治理（五层 Markdown 写路径 × 三级压缩链）</div>
+      <section class="cards" v-if="monitor && monitor.memory_context">
+        <div class="metric-card drillable" title="记忆写路径事件，点击查看明细" @click="openDrill('memory_events', '记忆写路径事件')">
+          <span class="metric-num">{{ monitor.memory_context.write_events_total }}</span>
+          <span class="metric-label">记忆写路径事件</span>
+        </div>
+        <div class="metric-card drillable" title="记忆抽取运行（每轮对话必落一条），点击查看运行明细与无产出原因" @click="openDrill('memory_extract', '记忆抽取运行')">
+          <span class="metric-num" :class="{ warn: extractZeroYield }">{{ monitor.memory_context.extract_runs?.total ?? 0 }}</span>
+          <span class="metric-label">记忆抽取运行</span>
+        </div>
+        <div class="metric-card drillable" title="压缩链事件，点击查看明细" @click="openDrill('compact_events', '上下文压缩链事件')">
+          <span class="metric-num">{{ monitor.memory_context.compact_events.total }}</span>
+          <span class="metric-label">压缩链事件</span>
+        </div>
+        <div class="metric-card">
+          <span class="metric-num">{{ formatNum(monitor.memory_context.tokens_saved) }}</span>
+          <span class="metric-label">压缩节省 Token</span>
+        </div>
+        <div class="metric-card">
+          <span class="metric-num" :class="{ warn: monitor.memory_context.breaker_sessions }">{{ monitor.memory_context.breaker_sessions }}</span>
+          <span class="metric-label">熔断会话（连败≥3）</span>
+        </div>
+      </section>
+      <section class="panel" v-if="monitor && monitor.memory_context">
+        <div class="panel-head"><span class="panel-title">治理分布（{{ rangeLabel }}）</span></div>
+        <div class="chain-chips">
+          <span class="chain-chip">微压缩·空闲衰减 {{ monitor.memory_context.compact_events.micro }}</span>
+          <span class="chain-chip">自动压缩 {{ monitor.memory_context.compact_events.auto }}</span>
+          <span class="chain-chip">手动压缩 {{ monitor.memory_context.compact_events.manual }}</span>
+          <span class="chain-chip" :class="{ warn: monitor.memory_context.compact_events.fail }">失败 {{ monitor.memory_context.compact_events.fail }}</span>
+          <span class="chain-chip" :class="{ warn: monitor.memory_context.compact_events.blocked }">熔断拦截 {{ monitor.memory_context.compact_events.blocked }}</span>
+        </div>
+        <div class="chain-chips">
+          <span v-for="w in monitor.memory_context.write_by_layer" :key="w.layer" class="chain-chip">{{ w.label }} {{ w.count }}</span>
+          <span v-for="(n, a) in monitor.memory_context.write_by_action" :key="a" class="chain-chip">{{ memActionLabel(a) }} {{ n }}</span>
+        </div>
+        <div class="chain-chips" v-if="monitor.memory_context.extract_runs?.total">
+          <span class="chain-chip" :class="{ warn: extractZeroYield }">抽取运行 {{ monitor.memory_context.extract_runs.total }}</span>
+          <span class="chain-chip" v-if="monitor.memory_context.extract_runs.last_at">最近 {{ String(monitor.memory_context.extract_runs.last_at).slice(5, 16).replace('T', ' ') }}</span>
+          <span class="chain-chip" v-if="monitor.memory_context.extract_runs.last_detail" :title="monitor.memory_context.extract_runs.last_detail">{{ monitor.memory_context.extract_runs.last_detail }}</span>
+        </div>
+        <p class="ctx-hint">
+          写路径 = 五层 Markdown 双写埋点（新增/更新/删除/簇合并/超限遗忘，含助手分域镜像）；
+          抽取运行 = 每轮对话后台抽取事件（与写入拆口径：运行数 &gt; 0 而写入数 = 0 即「跑了但零产出」，明细含模型层无产出原因）；
+          压缩链 = micro 空闲衰减 / auto 九节摘要 / manual 手动 / 失败与熔断拦截。点击卡片查看逐条明细与口径说明。
+        </p>
+      </section>
+
       <!-- ============ 语义缓存监控（命中率 / 节省 / 空间 / 语义详情） ============ -->
       <ObsCachePanel :days="days" />
 
@@ -581,12 +630,43 @@
             <span class="metric-num">{{ myContext.compression.sessions_with_summary }}</span>
             <span class="metric-label">已压缩会话</span>
           </div>
+          <div class="metric-card drillable" title="点击查看三级压缩链明细" @click="openGovDrill('compact')">
+            <span class="metric-num">{{ formatNum(myContext.compression.tokens_saved) }}</span>
+            <span class="metric-label">压缩节省 Token</span>
+          </div>
+          <div class="metric-card">
+            <span class="metric-num">{{ ((myContext.compression.compress_ratio || 0) * 100).toFixed(1) }}%</span>
+            <span class="metric-label">摘要压缩率（auto/manual）</span>
+          </div>
+          <div class="metric-card">
+            <span class="metric-num" :class="{ warn: myContext.compression.breaker_sessions }">{{ myContext.compression.breaker_sessions }}</span>
+            <span class="metric-label">熔断会话（连败≥3）</span>
+          </div>
         </div>
         <p class="ctx-hint">
           上下文告警水位 {{ formatNum(myContext.context_window.warn_threshold) }} Token/请求 ·
           记忆注入预算 {{ myContext.context_window.memory_ctx_chars_budget }} 字符 ·
           历史压缩触发 {{ formatNum(myContext.compression.trigger_tokens) }} Token，当前摘要占用 {{ formatNum(myContext.compression.summary_tokens) }} Token。
         </p>
+
+        <div class="ctx-sub-title">三级压缩链（microCompact → autoCompact → SessionMemoryCompact）</div>
+        <div class="chain-chips">
+          <span class="chain-chip">微压缩·空闲衰减 {{ myContext.compression.chain_events?.micro || 0 }}</span>
+          <span class="chain-chip">自动压缩 {{ myContext.compression.chain_events?.auto || 0 }}</span>
+          <span class="chain-chip">手动压缩 {{ myContext.compression.chain_events?.manual || 0 }}</span>
+          <span class="chain-chip" :class="{ warn: myContext.compression.chain_events?.auto_fail }">失败 {{ myContext.compression.chain_events?.auto_fail || 0 }}</span>
+          <span class="chain-chip" :class="{ warn: myContext.compression.chain_events?.auto_blocked }">熔断拦截 {{ myContext.compression.chain_events?.auto_blocked || 0 }}</span>
+          <span class="chain-chip">边界标记 auto {{ myContext.compression.kind_counts?.auto || 0 }} / manual {{ myContext.compression.kind_counts?.manual || 0 }} / note {{ myContext.compression.kind_counts?.note || 0 }}</span>
+        </div>
+        <p class="ctx-hint">
+          空闲 ≥ {{ myContext.compression.idle_decay_minutes }} 分钟触发读时衰减（最近 5 条保留全文，不落库）；
+          自动压缩连续失败 3 次熔断（手动可绕过，当前最大连败 {{ myContext.compression.fail_streak_max }}）；
+          摘要持久于 SESSION.md，数据库缺失时按文件恢复。
+        </p>
+        <div class="gov-actions">
+          <button class="btn btn-ghost sm" @click="openGovDrill('compact')">压缩链明细</button>
+          <button class="btn btn-ghost sm" @click="openGovDrill('memory')">记忆写路径明细</button>
+        </div>
 
         <div class="ctx-sub-title">按对话查看上下文与记忆</div>
         <p class="ctx-hint">
@@ -601,6 +681,7 @@
           <div class="metric-card drillable" title="点击查看被检索命中明细" @click="openMemoryDrill('retrieved', '被检索命中')"><span class="metric-num">{{ myContext.memory.retrieved_count }}</span><span class="metric-label">被检索命中</span></div>
           <div class="metric-card drillable" title="点击查看从未使用明细" @click="openMemoryDrill('never_used', '从未使用')"><span class="metric-num">{{ myContext.memory.never_used_count }}</span><span class="metric-label">从未使用</span></div>
           <div class="metric-card drillable" title="点击查看重要度明细" @click="openMemoryDrill('importance', '平均重要度')"><span class="metric-num">{{ myContext.memory.avg_importance }}</span><span class="metric-label">平均重要度</span></div>
+          <div class="metric-card drillable" title="点击查看五层 Markdown 写路径事件" @click="openGovDrill('memory')"><span class="metric-num">{{ myContext.memory.write_events?.total || 0 }}</span><span class="metric-label">写路径事件（{{ rangeLabel }}）</span></div>
         </div>
         <div v-if="myContext.memory.total" class="mem-types">
           <div v-for="t in myContext.memory.by_type" :key="t.type" class="mem-type-row drillable" :title="'点击查看「' + t.label + '」类记忆明细'" @click="openMemoryDrill('type:' + t.type, t.label + '类记忆')">
@@ -615,6 +696,16 @@
           </p>
         </div>
         <p v-else class="empty-hint">还没有沉淀任何跨会话记忆。多轮对话后系统会自动抽取你的偏好与事实。</p>
+
+        <div class="ctx-sub-title">五层 Markdown 存储（参考 Claude Code，剔除团队层）</div>
+        <div class="layer-chips">
+          <span v-for="l in myContext.memory.layers || []" :key="l.layer" class="layer-chip" :class="{ on: l.exists }"
+                :title="l.path ? '文件：memory/' + l.path : '尚未落盘'">{{ l.label }} · {{ l.chars }} 字</span>
+        </div>
+        <p class="ctx-hint">
+          写路径按动作：<template v-for="(n, a) in myContext.memory.write_events?.by_action || {}" :key="a">{{ memActionLabel(a) }} {{ n }} · </template>
+          双写 SQLite 查询镜像与 markdown 文件（AutoMem 每记忆独立 topic .md + MEMORY.md 索引）。可在侧栏「我的记忆 → 五层文件」查看与编辑。
+        </p>
       </section>
 
       <!-- ============ 对话维度统一视图（需求2+3：上下文构成 × 请求追踪 × 调用链 合并） ============ -->
@@ -938,6 +1029,75 @@
         </template>
       </div>
     </div>
+
+    <!-- 需求4：记忆/上下文治理钻取弹窗（三级压缩链事件流 + 摘要边界标记 / 五层写路径事件） -->
+    <div v-if="govDrill" class="modal-overlay" @click.self="govDrill = null">
+      <div class="modal-box drill-box" role="dialog" :aria-label="govDrill.label">
+        <div class="trace-head">
+          <h3 class="modal-title">{{ govDrill.label }}</h3>
+          <button class="icon-btn" title="关闭" @click="govDrill = null">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+              <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          </button>
+        </div>
+        <div v-if="govDrill.loading" class="mini-loading">加载中…</div>
+        <div v-else-if="govDrill.error" class="inline-error">{{ govDrill.error }}</div>
+        <template v-else>
+          <template v-if="govDrill.kind === 'compact'">
+            <div class="ctx-sub-title">压缩链事件流（最近 {{ govDrill.events.length }} 条）</div>
+            <table v-if="govDrill.events.length" class="obs-table">
+              <thead><tr><th>时间</th><th>类型</th><th>压缩前 Token</th><th>压缩后 Token</th><th>明细</th></tr></thead>
+              <tbody>
+                <tr v-for="(e, i) in govDrill.events" :key="i">
+                  <td>{{ e.created_at }}</td>
+                  <td>{{ e.label }}</td>
+                  <td>{{ e.before_tokens || '-' }}</td>
+                  <td>{{ e.after_tokens || '-' }}</td>
+                  <td class="cell-input" :title="e.detail">{{ e.detail || '-' }}</td>
+                </tr>
+              </tbody>
+            </table>
+            <p v-else class="empty-hint">暂无压缩链事件。发起多轮对话或手动压缩后即可看到。</p>
+            <div class="ctx-sub-title">会话摘要边界标记（compact_kind / 压缩前 token / 熔断计数）</div>
+            <table v-if="govDrill.summaries.length" class="obs-table">
+              <thead><tr><th>会话</th><th>类型</th><th>压缩前 Token</th><th>摘要 Token</th><th>连败</th><th>用户编辑</th><th>更新时间</th></tr></thead>
+              <tbody>
+                <tr v-for="s in govDrill.summaries" :key="s.session_id">
+                  <td class="cell-input" :title="s.session_id">{{ (s.session_id || '').slice(0, 8) }}</td>
+                  <td>{{ compactKindLabel(s.compact_kind) }}</td>
+                  <td>{{ s.before_tokens || '-' }}</td>
+                  <td>{{ s.token_estimate }}</td>
+                  <td :class="{ 'cell-err': s.fail_streak >= 3 }">{{ s.fail_streak }}</td>
+                  <td>{{ Number(s.edited_by_user) ? '✓' : '—' }}</td>
+                  <td>{{ s.updated_at }}</td>
+                </tr>
+              </tbody>
+            </table>
+            <p v-else class="empty-hint">暂无会话摘要。</p>
+          </template>
+          <template v-else>
+            <table v-if="govDrill.events.length" class="obs-table">
+              <thead><tr><th>时间</th><th>动作</th><th>记忆层</th><th>类型</th><th>明细</th></tr></thead>
+              <tbody>
+                <tr v-for="(e, i) in govDrill.events" :key="i">
+                  <td>{{ e.created_at }}</td>
+                  <td>{{ e.action_label }}</td>
+                  <td>{{ e.layer_label }}</td>
+                  <td>{{ e.memory_type || '-' }}</td>
+                  <td class="cell-input" :title="e.detail">{{ e.detail || '-' }}</td>
+                </tr>
+              </tbody>
+            </table>
+            <p v-else class="empty-hint">暂无写路径事件。记忆增删改与静态层编辑都会在此留痕。</p>
+          </template>
+          <div class="drill-explain">
+            <span class="drill-explain-title">📐 口径说明</span>
+            <p>{{ govDrill.explanation }}</p>
+          </div>
+        </template>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -950,7 +1110,7 @@ import ObsDashboard from '@/components/observability/ObsDashboard.vue'
 import ObsLogs from '@/components/observability/ObsLogs.vue'
 import ObsAlerts from '@/components/observability/ObsAlerts.vue'
 import ObsCachePanel from '@/components/observability/ObsCachePanel.vue'
-import { getMyObservabilityMetrics, getMyContextOverview, getMyContextSessions, getObservabilityMetrics, getObservabilityTraces, getObservabilityTrace, getObservabilityTraceLogs, getSkillReviews, getToolRoutingMetrics, getSessionObservability, getSedimentSuggestions, getObsMonitor, getObsToolChains, getObsDrill, getMyMemoryDrill } from '@/api'
+import { getMyObservabilityMetrics, getMyContextOverview, getMyContextSessions, getObservabilityMetrics, getObservabilityTraces, getObservabilityTrace, getObservabilityTraceLogs, getSkillReviews, getToolRoutingMetrics, getSessionObservability, getSedimentSuggestions, getObsMonitor, getObsToolChains, getObsDrill, getMyMemoryDrill, getMyCompactDrill, getMyMemoryEvents } from '@/api'
 
 const auth = useAuthStore()
 const queryCache = useQueryCacheStore()
@@ -1213,6 +1373,38 @@ async function openMemoryDrill(kind, label) {
 
 function closeMemoryDrill() {
   memDrill.value = null
+}
+
+// ---- 需求4：记忆/上下文治理钻取（三级压缩链 / 五层写路径，仅本人数据）----
+const govDrill = ref(null)
+
+function memActionLabel(a) {
+  return { add: '新增', update: '更新', delete: '删除', merge: '簇合并', forget: '超限遗忘', extract: '抽取运行' }[a] || a || '-'
+}
+
+// 抽取跑了但零写入：写路径事件为 0 而运行数 > 0，是「记忆面板永远为空」的直接信号
+const extractZeroYield = computed(() => {
+  const mc = monitor.value?.memory_context
+  return !!mc && (mc.extract_runs?.total ?? 0) > 0 && (mc.write_events_total ?? 0) === 0
+})
+
+function compactKindLabel(k) {
+  return { auto: '自动压缩', manual: '手动压缩', note: '会话笔记' }[k] || k || '-'
+}
+
+async function openGovDrill(kind) {
+  const label = kind === 'compact' ? '三级压缩链明细' : '记忆写路径明细'
+  govDrill.value = { kind, label, loading: true, error: '', events: [], summaries: [], explanation: '' }
+  try {
+    const res = kind === 'compact' ? await getMyCompactDrill(50) : await getMyMemoryEvents(50)
+    const d = res.data
+    govDrill.value = {
+      kind, label, loading: false, error: '',
+      events: d.events || [], summaries: d.summaries || [], explanation: d.explanation || '',
+    }
+  } catch (e) {
+    govDrill.value = { kind, label, loading: false, error: e.response?.data?.detail || '加载治理明细失败', events: [], summaries: [], explanation: '' }
+  }
 }
 
 // ---- 对话维度统一视图（需求2：上下文构成 × 请求追踪 × 调用链 合并）----
@@ -2284,6 +2476,32 @@ function dayTipLines(row) {
 /* ---- 当前用户：上下文窗口 + 记忆概览 ---- */
 .my-context-panel { margin-top: 16px; }
 .ctx-cards, .mem-cards { margin: 4px 0 8px; }
+/* 需求4：治理指标 chips（压缩链事件分布 / 五层存储概览）与钻取入口 */
+.chain-chips, .layer-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 4px 0 8px;
+}
+.chain-chip, .layer-chip {
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--color-border, rgba(0, 0, 0, 0.12));
+  color: var(--color-text-secondary);
+  background: var(--color-bg-soft, rgba(0, 0, 0, 0.02));
+}
+.chain-chip.warn {
+  color: var(--color-danger, #b3402e);
+  border-color: var(--color-danger, #b3402e);
+}
+.layer-chip { border-style: dashed; background: transparent; }
+.layer-chip.on {
+  border-style: solid;
+  color: var(--color-text);
+  background: var(--color-bg-soft, rgba(0, 0, 0, 0.03));
+}
+.gov-actions { display: flex; gap: 8px; margin: 0 0 10px; }
 .ctx-hint {
   margin: 2px 0 12px;
   font-size: 12px;

@@ -274,6 +274,7 @@
         <div class="memory-tabs">
           <button class="memory-tab" :class="{ active: memoryTab === 'user' }" @click="switchMemoryTab('user')">用户记忆</button>
           <button class="memory-tab" :class="{ active: memoryTab === 'agent' }" @click="switchMemoryTab('agent')">助手记忆</button>
+          <button class="memory-tab" :class="{ active: memoryTab === 'layers' }" @click="switchMemoryTab('layers')">五层文件</button>
         </div>
         <template v-if="memoryTab === 'user'">
           <p class="memory-desc">
@@ -290,8 +291,23 @@
               <span>技能：应用时点赞 {{ rate(recallStats.skill.like_rate_with) }} / 未应用 {{ rate(recallStats.skill.like_rate_without) }}</span>
             </div>
           </div>
+          <!-- 自动抽取运行状态：让「暂无记忆」可解释（未运行 / 跑了判空 / 模型失败 / 正常产出） -->
+          <div v-if="extractStatus && extractStatus.enabled" class="memory-extract-status" :class="'ex-' + extractTone">
+            <div class="mes-row">
+              <span class="mes-dot"></span>
+              <span>自动抽取近 {{ extractStatus.days }} 天运行 {{ extractStatus.runs }} 次 · 写入 {{ extractStatus.writes }} 条</span>
+              <button class="mes-refresh" :disabled="extractLoading" @click="loadExtractStatus">
+                {{ extractLoading ? '刷新中' : '刷新' }}
+              </button>
+            </div>
+            <div v-if="extractStatus.last_detail" class="mes-detail">
+              最近：{{ extractStatus.last_detail }}
+              <span v-if="extractStatus.last_run_at"> · {{ shortTime(extractStatus.last_run_at) }}</span>
+            </div>
+            <div class="mes-hint">{{ extractHint }}</div>
+          </div>
         </template>
-        <template v-else>
+        <template v-else-if="memoryTab === 'agent'">
           <p class="memory-desc">
             助手记忆按助手分域隔离（如知识助手常分析的文档主题、分析风格偏好），不与用户个人记忆混用。敏感信息同样不会被记录。
           </p>
@@ -302,6 +318,65 @@
             </select>
           </div>
         </template>
+        <template v-else>
+          <p class="memory-desc">
+            记忆以 Markdown 文件持久记录并持续演进（参考 Claude Code 存储分级，剔除团队层）：平台强制 Managed → 个人全局 User → 项目共享 Project → 本地私有 Local → AI 自学 AutoMem，对话时按序叠加注入；数据库仅作查询镜像。
+          </p>
+          <div class="memory-agent-select">
+            <label class="form-label">项目（知识库）</label>
+            <select class="form-input" v-model="layerKbId" @change="loadMemoryLayers">
+              <option value="">未选择（Project / Local 层不加载）</option>
+              <option v-for="kb in layerKbOptions" :key="kb.id" :value="kb.id">{{ kb.name }}</option>
+            </select>
+          </div>
+          <div v-if="layersLoading" class="usage-loading">加载中...</div>
+          <p v-else-if="layersError" class="modal-error">{{ layersError }}</p>
+          <template v-else-if="layersData">
+            <div class="layer-chips">
+              <span v-for="l in layersData.layers" :key="l.layer" class="layer-chip" :class="{ on: l.exists }"
+                    :title="l.path ? '文件：memory/' + l.path : '尚未落盘'">
+                {{ l.label }} · {{ l.chars }} 字
+              </span>
+            </div>
+            <div class="layer-editor">
+              <div class="layer-editor-head">
+                <select class="form-input memory-type-select" v-model="layerEditKey" @change="onLayerEditKeyChange">
+                  <option v-for="k in layerEditOptions" :key="k.value" :value="k.value">{{ k.label }}</option>
+                </select>
+                <span class="memory-meta">{{ layersData.writable[layerEditKey] ? '可编辑' : '只读（无该层编辑权限）' }}</span>
+              </div>
+              <textarea
+                class="form-input instruction-input"
+                v-model="layerEditContent"
+                rows="6"
+                :disabled="!layersData.writable[layerEditKey]"
+                :maxlength="layerEditKey === 'user' ? 500 : layersData.max_write_chars"
+                placeholder="该层暂无内容。静态层按权限直接编辑 Markdown 正文；AutoMem 层请在「用户记忆」页签经记忆增删改演进。"
+              ></textarea>
+              <div class="instruction-count">{{ layerEditContent.length }} / {{ layerEditKey === 'user' ? 500 : layersData.max_write_chars }}</div>
+              <p v-if="layerSaveError" class="modal-error">{{ layerSaveError }}</p>
+              <p v-if="layerSaved" class="modal-success">已保存，Markdown 文件与查询镜像同步更新。</p>
+              <div v-if="layersData.writable[layerEditKey]" class="memory-edit-actions">
+                <button class="modal-btn modal-btn-confirm" :disabled="layerSaving" @click="saveMemoryLayer">
+                  {{ layerSaving ? '保存中...' : '保存该层' }}
+                </button>
+              </div>
+            </div>
+            <div class="layer-auto">
+              <p class="memory-desc">AutoMem 文件视图：每条记忆一个独立 topic .md + MEMORY.md 索引（格式 `- [文件](文件) — 描述`），随记忆增删改自动重建。</p>
+              <pre v-if="layersData.auto.index" class="layer-md">{{ layersData.auto.index }}</pre>
+              <ul v-if="layersData.auto.files.length" class="memory-list">
+                <li v-for="f in layersData.auto.files" :key="f.name" class="memory-item">
+                  <span class="memory-type" :class="'mt-' + (f.meta.memory_type || 'fact')">{{ memoryTypeLabel(f.meta.memory_type) }}</span>
+                  <span class="memory-content" :title="f.content">{{ f.name }} — {{ f.content }}</span>
+                  <span class="memory-meta">{{ f.chars }} 字</span>
+                </li>
+              </ul>
+              <p v-else class="memory-empty">暂无 AutoMem 文件。对话中出现的偏好与事实会自动抽取落盘。</p>
+            </div>
+          </template>
+        </template>
+        <template v-if="memoryTab !== 'layers'">
         <div class="memory-add">
           <input
             class="form-input"
@@ -313,7 +388,7 @@
         </div>
         <p v-if="memoryError" class="modal-error">{{ memoryError }}</p>
         <div v-if="memoryLoading" class="usage-loading">加载中...</div>
-        <div v-else-if="!currentMemories.length" class="memory-empty">暂无记忆。对话中出现的偏好与事实会自动记录，也可在上方主动写入。</div>
+        <div v-else-if="!currentMemories.length" class="memory-empty">{{ memoryEmptyText }}</div>
         <ul v-else class="memory-list">
           <li v-for="m in currentMemories" :key="m.id" class="memory-item">
             <template v-if="memoryEditingId === m.id">
@@ -339,6 +414,7 @@
             </template>
           </li>
         </ul>
+        </template>
         <div class="modal-actions">
           <button class="modal-btn modal-btn-cancel" @click="showMemoryModal = false">关闭</button>
         </div>
@@ -378,7 +454,7 @@
       <div class="modal-box">
         <h3 class="modal-title">会话笔记</h3>
         <p class="memory-desc">
-          系统把较早对话压缩为五节结构化摘要（意图/结论/约束/未决/下一步），重新打开会话时据此续接上下文。你可编辑保存；编辑后自动压缩不再覆盖你的笔记。
+          系统把较早对话压缩为九节结构化摘要（意图/结论/约束/未决/下一步 + 用户消息枚举/知识来源/当前工作/错误与纠正），持久于 SESSION.md，重新打开会话时据此续接上下文。你可编辑保存；编辑后自动压缩不再覆盖你的笔记。
         </p>
         <p v-if="noteEditedByUser" class="modal-success">用户已编辑，自动压缩不再覆盖。</p>
         <div class="form-field">
@@ -594,7 +670,7 @@ import { useRouter, useRoute } from 'vue-router'
 import { useChatStore } from '@/stores/chat'
 import { useAuthStore } from '@/stores/auth'
 import { preloadPath } from '@/utils/routePreload'
-import { healthCheck, updateProfile, getMyUsageStats, compactSession, listMyMemories, createMyMemory, updateMyMemory, deleteMyMemory, getModuleRecall, getSemanticCache, clearSemanticCache, deleteSemanticCacheEntry, getMyInstructions, saveMyInstructions, listMyAgentMemories, createMyAgentMemory, updateMyAgentMemory, deleteMyAgentMemory, getSessionNote, updateSessionNote } from '@/api'
+import { healthCheck, updateProfile, getMyUsageStats, compactSession, listMyMemories, createMyMemory, updateMyMemory, deleteMyMemory, getModuleRecall, getMemoryExtractStatus, getSemanticCache, clearSemanticCache, deleteSemanticCacheEntry, getMyInstructions, saveMyInstructions, listMyAgentMemories, createMyAgentMemory, updateMyAgentMemory, deleteMyAgentMemory, getSessionNote, updateSessionNote, getMyMemoryLayers, updateMyMemoryLayer, listKnowledgeBases } from '@/api'
 
 const props = defineProps({
   open: { type: Boolean, default: false },
@@ -797,7 +873,7 @@ const memoryNewContent = ref('')
 const memoryEditingId = ref('')
 const memoryEditContent = ref('')
 const memoryEditType = ref('fact')
-// 记忆页签：user（用户记忆 L2）/ agent（助手分域记忆 L4）
+// 记忆页签：user（用户记忆 AutoMem）/ agent（助手分域记忆）/ layers（五层 Markdown 文件视图）
 const memoryTab = ref('user')
 const agentKey = ref('wiki_assistant')
 const agentMemories = ref([])
@@ -813,7 +889,12 @@ function switchMemoryTab(tab) {
   memoryEditingId.value = ''
   memoryNewContent.value = ''
   memoryError.value = ''
-  loadMemories()
+  if (tab === 'layers') {
+    loadMemoryLayers()
+    loadLayerKbOptions()
+  } else {
+    loadMemories()
+  }
 }
 const memoryTypeOptions = [
   { value: 'preference', label: '偏好' },
@@ -851,6 +932,86 @@ async function loadModuleRecall() {
   }
 }
 
+// 自动抽取运行状态（近 7 天）：区分「未运行 / 跑了无产出 / 模型失败 / 正常产出」，
+// 避免用户看到「暂无记忆 + 召回率 0%」时无法判断链路是否在工作。
+const extractStatus = ref(null)
+const extractLoading = ref(false)
+
+const _EXTRACT_REASON_LABELS = {
+  produced: '模型正常产出',
+  empty: '模型判定本轮无长期价值内容',
+  llm_error: '抽取模型调用失败',
+  llm_unavailable: '抽取模型角色未绑定可用上游',
+  parse_error: '模型输出无法解析',
+  manual_mutex: '刚手动写入，本轮自动抽取按主副互斥跳过',
+  filtered: '候选被查重/敏感词门禁拦下',
+}
+
+function extractReasonLabel(r) {
+  return _EXTRACT_REASON_LABELS[r] || r || '无产出'
+}
+
+function shortTime(iso) {
+  return String(iso || '').slice(5, 16).replace('T', ' ')
+}
+
+const extractTone = computed(() => {
+  const s = extractStatus.value
+  if (!s || !s.enabled) return 'idle'
+  if (['llm_error', 'llm_unavailable', 'parse_error'].includes(s.last_reason)) return 'bad'
+  if (!s.runs) return 'idle'
+  return s.writes > 0 ? 'ok' : 'warn'
+})
+
+const extractHint = computed(() => {
+  const s = extractStatus.value
+  if (!s || !s.enabled) return ''
+  if (!s.runs) return '尚未运行过自动抽取：完成一轮对话后会在后台抽取；也可在上方输入「记住：…」立即写入。'
+  switch (s.last_reason) {
+    case 'llm_unavailable':
+      return '抽取模型角色（memory_extract）未绑定可用上游，请在网关角色路由中绑定；显式「记住：…」不受影响。'
+    case 'llm_error':
+      return '最近一次抽取调用失败（网关/上游异常），可在可观测性查看网关日志；显式「记住：…」仍会落库。'
+    case 'parse_error':
+      return '最近一次模型输出无法解析为 JSON，已忽略；显式指令通道不受影响。'
+    case 'manual_mutex':
+      return '刚手动写入记忆，本轮自动抽取按主副互斥跳过（避免重复写），下一轮对话恢复。'
+    case 'empty':
+      return '抽取已运行但本轮无值得长期保存的内容（一次性查询不入库）。直接说「记住：我对海鲜过敏」必定记录。'
+    default:
+      return s.writes > 0
+        ? '抽取正常产出，记忆已写入并在下方列出。'
+        : '抽取有候选但被查重/敏感词门禁拦下或已达单轮上限，可在下方手动补充。'
+  }
+})
+
+const memoryEmptyText = computed(() => {
+  if (memoryTab.value === 'agent') {
+    return '暂无助手记忆。可在上方主动写入，或在对应助手对话中沉淀分析偏好。'
+  }
+  const s = extractStatus.value
+  if (!s || !s.enabled) return '暂无记忆。对话中出现的偏好与事实会自动记录，也可在上方主动写入。'
+  if (!s.runs) {
+    return '暂无记忆：自动抽取尚未运行过。完成一轮对话后会在后台抽取；也可在上方输入「记住：我对海鲜过敏」立即写入。'
+  }
+  if (s.writes > 0) {
+    return '暂无记忆：近期写入的记忆可能已被删除或超上限遗忘（低重要度 + 长期未用优先清理），可在上方重新写入。'
+  }
+  return `暂无记忆：自动抽取已运行 ${s.runs} 次但未产出（${extractReasonLabel(s.last_reason)}）。一次性查询不会入库；直接说「记住：…」必定记录。`
+})
+
+async function loadExtractStatus() {
+  extractLoading.value = true
+  try {
+    const res = await getMemoryExtractStatus(7)
+    extractStatus.value = res?.data || null
+  } catch (e) {
+    extractStatus.value = null
+  } finally {
+    extractLoading.value = false
+  }
+}
+
 async function loadMemories() {
   memoryLoading.value = true
   memoryError.value = ''
@@ -877,6 +1038,7 @@ function openMemoryModal() {
   memoryEditingId.value = ''
   loadMemories()
   loadModuleRecall()
+  loadExtractStatus()
 }
 
 async function submitMemoryAdd() {
@@ -891,6 +1053,7 @@ async function submitMemoryAdd() {
     }
     memoryNewContent.value = ''
     await loadMemories()
+    if (memoryTab.value === 'user') loadExtractStatus()
   } catch (e) {
     memoryError.value = e?.response?.data?.detail || e?.message || '写入记忆失败'
   } finally {
@@ -939,6 +1102,78 @@ async function submitMemoryDelete(m) {
     memoryError.value = e?.response?.data?.detail || e?.message || '删除失败'
   } finally {
     memorySaving.value = false
+  }
+}
+
+// ============================================
+// 五层 Markdown 文件视图（Managed/User/Project/Local/AutoMem，剔除团队层）
+// ============================================
+const layersData = ref(null)
+const layersLoading = ref(false)
+const layersError = ref('')
+const layerKbId = ref('')
+const layerKbOptions = ref([])
+const layerEditKey = ref('user')
+const layerEditContent = ref('')
+const layerSaving = ref(false)
+const layerSaved = ref(false)
+const layerSaveError = ref('')
+const layerEditOptions = [
+  { value: 'managed', label: '平台强制 Managed' },
+  { value: 'user', label: '个人全局 User' },
+  { value: 'project', label: '项目共享 Project' },
+  { value: 'local', label: '本地私有 Local' },
+]
+
+async function loadLayerKbOptions() {
+  if (layerKbOptions.value.length) return
+  try {
+    const res = await listKnowledgeBases()
+    layerKbOptions.value = res?.data?.bases || []
+  } catch (e) {
+    layerKbOptions.value = []
+  }
+}
+
+async function loadMemoryLayers() {
+  layersLoading.value = true
+  layersError.value = ''
+  layerSaved.value = false
+  layerSaveError.value = ''
+  try {
+    const res = await getMyMemoryLayers(layerKbId.value)
+    layersData.value = res?.data || null
+    layerEditContent.value = layersData.value?.contents?.[layerEditKey.value] || ''
+  } catch (e) {
+    layersError.value = e?.response?.data?.detail || e?.message || '加载五层记忆失败'
+    layersData.value = null
+  } finally {
+    layersLoading.value = false
+  }
+}
+
+function onLayerEditKeyChange() {
+  layerSaved.value = false
+  layerSaveError.value = ''
+  layerEditContent.value = layersData.value?.contents?.[layerEditKey.value] || ''
+}
+
+async function saveMemoryLayer() {
+  if (layerSaving.value || !layersData.value?.writable?.[layerEditKey.value]) return
+  layerSaving.value = true
+  layerSaved.value = false
+  layerSaveError.value = ''
+  try {
+    const res = await updateMyMemoryLayer(layerEditKey.value, layerEditContent.value, layerKbId.value)
+    layerEditContent.value = res?.data?.content ?? layerEditContent.value
+    layerSaved.value = true
+    // 保存后刷新层概览（字符量/落盘状态/镜像同步结果）
+    const overview = await getMyMemoryLayers(layerKbId.value)
+    layersData.value = overview?.data || layersData.value
+  } catch (e) {
+    layerSaveError.value = e?.response?.data?.detail || e?.message || '保存记忆层失败'
+  } finally {
+    layerSaving.value = false
   }
 }
 
@@ -1566,6 +1801,52 @@ function chartTooltip(row) {
   opacity: 0.85;
 }
 
+/* 自动抽取运行状态条：左侧色条区分 正常/无产出/失败/未运行 */
+.memory-extract-status {
+  background: var(--color-bg-soft, rgba(0, 0, 0, 0.03));
+  border: 1px solid var(--color-border, rgba(0, 0, 0, 0.1));
+  border-left: 3px solid #8a8f98;
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin: 0 0 10px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+.memory-extract-status .mes-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+}
+.memory-extract-status .mes-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: none;
+}
+.memory-extract-status .mes-refresh {
+  margin-left: auto;
+  padding: 1px 9px;
+  font-size: 11px;
+  color: inherit;
+  background: transparent;
+  border: 1px solid var(--color-border, rgba(0, 0, 0, 0.18));
+  border-radius: 999px;
+  cursor: pointer;
+}
+.memory-extract-status .mes-refresh:hover:not(:disabled) {
+  border-color: var(--color-primary, #c98a4b);
+  color: var(--color-primary, #c98a4b);
+}
+.memory-extract-status .mes-refresh:disabled { opacity: 0.6; cursor: default; }
+.memory-extract-status .mes-detail { margin-top: 4px; opacity: 0.85; word-break: break-all; }
+.memory-extract-status .mes-hint { margin-top: 4px; line-height: 1.55; }
+.memory-extract-status.ex-ok { border-left-color: #2e9e5b; }
+.memory-extract-status.ex-warn { border-left-color: #d99100; }
+.memory-extract-status.ex-bad { border-left-color: #d9534f; }
+.memory-extract-status.ex-idle { border-left-color: #8a8f98; }
+
 .memory-add {
   display: flex;
   gap: 8px;
@@ -1581,6 +1862,57 @@ function chartTooltip(row) {
   color: var(--color-text-secondary);
   padding: 18px 0;
   text-align: center;
+}
+
+/* 五层 Markdown 文件视图 */
+.layer-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 12px;
+}
+.layer-chip {
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px dashed var(--color-border, rgba(0, 0, 0, 0.18));
+  color: var(--color-text-secondary);
+  background: transparent;
+}
+.layer-chip.on {
+  border-style: solid;
+  color: var(--color-text, inherit);
+  background: var(--color-bg-soft, rgba(0, 0, 0, 0.03));
+}
+.layer-editor {
+  margin: 0 0 14px;
+}
+.layer-editor-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+.layer-editor-head .memory-type-select {
+  width: auto;
+  flex: 0 0 auto;
+}
+.layer-auto {
+  border-top: 1px dashed var(--color-border, rgba(0, 0, 0, 0.15));
+  padding-top: 10px;
+}
+.layer-md {
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-all;
+  background: var(--color-bg-soft, rgba(0, 0, 0, 0.03));
+  border: 1px solid var(--color-border, rgba(0, 0, 0, 0.1));
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin: 0 0 10px;
+  max-height: 160px;
+  overflow-y: auto;
 }
 
 .memory-list {

@@ -25,6 +25,7 @@ _conn: Optional[sqlite3.Connection] = None
 def get_conn() -> sqlite3.Connection:
     """获取全局 SQLite 连接（懒初始化，WAL 模式）"""
     global _conn
+    first_init = False
     with _lock:
         if _conn is None:
             DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -50,7 +51,16 @@ def get_conn() -> sqlite3.Connection:
                 conn.close()
                 raise
             _conn = conn
-        return _conn
+            first_init = True
+        conn = _conn
+    if first_init:
+        # Managed 层种子化（锁外执行：seed 经 base_dir→get_conn 会重入 _lock）
+        try:
+            from app.services import memory_store
+            memory_store.seed_managed()
+        except Exception:
+            pass
+    return conn
 
 
 def init_db(conn: sqlite3.Connection):
@@ -230,7 +240,8 @@ def init_db(conn: sqlite3.Connection):
             confidence        REAL NOT NULL DEFAULT 1,
             created_at        TEXT NOT NULL,
             updated_at        TEXT NOT NULL,
-            last_used_at      TEXT
+            last_used_at      TEXT,
+            file_path         TEXT NOT NULL DEFAULT ''
         );
         CREATE INDEX IF NOT EXISTS idx_user_memories_user ON user_memories(user_id, updated_at);
 
@@ -310,8 +321,34 @@ def init_db(conn: sqlite3.Connection):
             token_estimate           INTEGER NOT NULL DEFAULT 0,
             edited_by_user           INTEGER NOT NULL DEFAULT 0,
             created_at               TEXT NOT NULL,
-            updated_at               TEXT NOT NULL
+            updated_at               TEXT NOT NULL,
+            compact_kind             TEXT NOT NULL DEFAULT 'auto',
+            before_tokens            INTEGER NOT NULL DEFAULT 0,
+            fail_streak              INTEGER NOT NULL DEFAULT 0
         );
+
+        CREATE TABLE IF NOT EXISTS memory_write_events (
+            id          TEXT PRIMARY KEY,
+            user_id     TEXT NOT NULL DEFAULT '',
+            action      TEXT NOT NULL,
+            layer       TEXT NOT NULL DEFAULT '',
+            memory_type TEXT NOT NULL DEFAULT '',
+            detail      TEXT NOT NULL DEFAULT '',
+            created_at  TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_memory_write_events_user ON memory_write_events(user_id, created_at);
+
+        CREATE TABLE IF NOT EXISTS context_compact_events (
+            id            TEXT PRIMARY KEY,
+            session_id    TEXT NOT NULL DEFAULT '',
+            user_id       TEXT NOT NULL DEFAULT '',
+            kind          TEXT NOT NULL,
+            before_tokens INTEGER NOT NULL DEFAULT 0,
+            after_tokens  INTEGER NOT NULL DEFAULT 0,
+            detail        TEXT NOT NULL DEFAULT '',
+            created_at    TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_context_compact_events_session ON context_compact_events(session_id, created_at);
 
         CREATE TABLE IF NOT EXISTS chat_checkpoints (
             id              TEXT PRIMARY KEY,
@@ -1811,6 +1848,36 @@ def init_db(conn: sqlite3.Connection):
         # 未触碰个人知识库的回答，个人域按 user_id 隔离且命中优先本人。
         conn.execute("DELETE FROM semantic_cache WHERE user_id = '__public__'")
         conn.execute("INSERT INTO schema_migrations VALUES ('semcache_isolation_v1',?)",
+                     (datetime.now().isoformat(),))
+    if not conn.execute("SELECT 1 FROM schema_migrations WHERE version='memory_markdown_v1'").fetchone():
+        # 五层记忆 Markdown 化（Claude Code 存储分级，剔除 Team 层）：
+        # - user_memories 补 file_path 列（AutoMem topic 文件镜像路径）；
+        # - chat_session_summaries 补 compact_kind/before_tokens/fail_streak
+        #   （三级压缩链边界标记、压缩前 token 与连续失败熔断计数）；
+        # - 存量记忆/指令/助手记忆导出为 markdown 文件（文件为持久记录，DB 为查询镜像）。
+        # 注意：此处处于 init_db 期间（全局 _conn 未赋值且 _lock 已持有），
+        # 迁移必须直接用传入 conn，不得经 db.query/get_conn（会死锁）。
+        mem_cols = {r[1] for r in conn.execute("PRAGMA table_info(user_memories)")}
+        if "file_path" not in mem_cols:
+            conn.execute("ALTER TABLE user_memories ADD COLUMN file_path TEXT NOT NULL DEFAULT ''")
+            logger.info("user_memories 补加列: file_path")
+        sum_cols = {r[1] for r in conn.execute("PRAGMA table_info(chat_session_summaries)")}
+        for col, ddl in (("compact_kind", "TEXT NOT NULL DEFAULT 'auto'"),
+                         ("before_tokens", "INTEGER NOT NULL DEFAULT 0"),
+                         ("fail_streak", "INTEGER NOT NULL DEFAULT 0")):
+            if col not in sum_cols:
+                conn.execute(f"ALTER TABLE chat_session_summaries ADD COLUMN {col} {ddl}")
+                logger.info("chat_session_summaries 补加列: %s", col)
+        from app.services import memory_store
+        memory_store.migrate_from_conn(conn)
+        conn.execute("INSERT INTO schema_migrations VALUES ('memory_markdown_v1',?)",
+                     (datetime.now().isoformat(),))
+    if not conn.execute("SELECT 1 FROM schema_migrations WHERE version='memory_markdown_v2'").fetchone():
+        # v1 只将存量记忆导出为 topic 文件，未回填 user_memories.file_path 镜像列，
+        # 导致五层文件视图/观测与 DB 镜像口径不一致；此处按文件存在性一次性回填。
+        from app.services import memory_store
+        memory_store.backfill_file_paths(conn)
+        conn.execute("INSERT INTO schema_migrations VALUES ('memory_markdown_v2',?)",
                      (datetime.now().isoformat(),))
     from app.core.cache_schema import migrate as migrate_cache
     migrate_cache(conn)

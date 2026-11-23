@@ -156,6 +156,88 @@ def get_my_memory_drill(
     return {"success": True, **memory_service.drill_memories(user_id, kind)}
 
 
+# 压缩链事件中文展示名（与 session_summary 埋点 kind 同源）
+_COMPACT_KIND_LABELS = {
+    "micro": "微压缩·空闲衰减", "auto": "自动压缩", "manual": "手动压缩",
+    "auto_fail": "自动压缩失败", "auto_blocked": "熔断拦截",
+}
+_MEMORY_ACTION_LABELS = {
+    "add": "新增", "update": "更新", "delete": "删除", "merge": "簇合并", "forget": "超限遗忘",
+    "extract": "抽取运行",
+}
+
+
+@router.get("/my-context/compact-drill")
+def get_my_compact_drill(
+    response: Response,
+    limit: int = Query(30, ge=1, le=100),
+    user: dict = Depends(get_current_user),
+):
+    """三级压缩链钻取：本人压缩事件流 + 会话摘要边界标记（类型/压缩前 token/熔断计数）。"""
+    user_id = user.get("id")
+    if user.get("role") not in ("user", "admin", "ops") or not user_id or user_id in ("guest", "system", "-"):
+        raise HTTPException(status_code=403, detail="请使用正式账号查看压缩链明细")
+    response.headers["Cache-Control"] = "no-store"
+    events = db.query(
+        "SELECT kind, before_tokens, after_tokens, detail, session_id, created_at"
+        " FROM context_compact_events WHERE user_id = ?"
+        " ORDER BY created_at DESC LIMIT ?", (user_id, limit))
+    for r in events:
+        r["label"] = _COMPACT_KIND_LABELS.get(r["kind"], r["kind"])
+        r["created_at"] = (r["created_at"] or "")[:16]
+    summaries = db.query(
+        "SELECT session_id, compact_kind, before_tokens, token_estimate, fail_streak,"
+        " covered_until_message_id, edited_by_user, updated_at"
+        " FROM chat_session_summaries WHERE user_id = ? ORDER BY updated_at DESC LIMIT ?",
+        (user_id, limit))
+    for r in summaries:
+        r["updated_at"] = (r["updated_at"] or "")[:16]
+    return {
+        "success": True,
+        "events": events,
+        "summaries": summaries,
+        "explanation": (
+            "三级压缩链：microCompact（空闲衰减，读时投影不落库）→ autoCompact（token 阈值触发的"
+            "九节结构化摘要，连续失败 3 次熔断）→ SessionMemoryCompact（SESSION.md 持久载体，"
+            "DB 缺失时文件恢复）。tokens_saved = 自动/手动压缩事件 Σ(before_tokens − after_tokens)。"
+        ),
+    }
+
+
+@router.get("/my-context/memory-events")
+def get_my_memory_events(
+    response: Response,
+    limit: int = Query(30, ge=1, le=100),
+    user: dict = Depends(get_current_user),
+):
+    """五层记忆写路径钻取：本人 Markdown 双写事件流（动作/层/类型/明细）。"""
+    from app.services.memory_store import LAYER_LABELS
+
+    user_id = user.get("id")
+    if user.get("role") not in ("user", "admin", "ops") or not user_id or user_id in ("guest", "system", "-"):
+        raise HTTPException(status_code=403, detail="请使用正式账号查看记忆写路径明细")
+    response.headers["Cache-Control"] = "no-store"
+    events = db.query(
+        "SELECT action, layer, memory_type, detail, created_at"
+        " FROM memory_write_events WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
+        (user_id, limit))
+    for r in events:
+        r["action_label"] = _MEMORY_ACTION_LABELS.get(r["action"], r["action"])
+        r["layer_label"] = LAYER_LABELS.get(r["layer"], r["layer"])
+        r["created_at"] = (r["created_at"] or "")[:16]
+    return {
+        "success": True,
+        "events": events,
+        "explanation": (
+            "记忆写路径（对齐 Claude Code stopHook→fork extract）：对话结束后台抽取与手动 CRUD "
+            "共用单一写点，双写 SQLite 镜像与 markdown 文件（AutoMem 每记忆独立 topic .md + "
+            "MEMORY.md 索引；User/Project/Local/Managed 静态层按权限编辑）。"
+            "本列表仅含实际写入动作（新增/更新/删除/合并/遗忘）；"
+            "每轮对话的「抽取运行」事件另见抽取运行钻取（含显式/模型产出数与无产出原因）。"
+        ),
+    }
+
+
 @router.get("/context-explorer")
 async def get_context_explorer(
     session_id: str = Query("", max_length=64),
@@ -586,9 +668,9 @@ async def put_dashboard(body: dict, user: dict = Depends(get_current_user)):
 # 指标钻取：DashBoard/概况面板数字点击 → 明细列表（通用列定义 + 行）
 # ---------------------------------------------------------------------------
 _DRILL_TYPES = (
-    "sessions|messages|active_users|uploads|kbs|wiki|memories|feedbacks"
-    "|eval_runs|sec_events|tool_calls|tool_blocked|traces|skill_reviews"
-    "|llm_spans|tool_spans"
+    "sessions|messages|active_users|uploads|kbs|wiki|memories|memory_events|memory_extract"
+    "|compact_events|feedbacks|eval_runs|sec_events|tool_calls|tool_blocked"
+    "|traces|skill_reviews|llm_spans|tool_spans"
 )
 
 # 需求2：各钻取类型的口径说明（呈现在明细表格下方，告知用户该数值如何算出）
@@ -605,6 +687,9 @@ _DRILL_EXPLAIN = {
     "kbs": "知识库 = 区间内创建的知识库（knowledge_bases）个数。",
     "wiki": "百科页面 = 区间内创建的 llm-wiki 编译页面（wiki_pages）个数。",
     "memories": "记忆条数 = 区间内抽取的跨会话用户记忆（user_memories）条数。",
+    "memory_events": "记忆写路径事件 = 区间内五层 Markdown 双写埋点（memory_write_events，排除抽取运行），按动作（新增/更新/删除/合并/遗忘）与层（Managed/User/Project/Local/AutoMem/助手分域）聚合。",
+    "memory_extract": "记忆抽取运行 = 区间内 action='extract' 的运行事件（每轮对话后台抽取必落一条），明细含「显式N条/模型M条→新增a更新u删除d」与模型层无产出原因（empty 判空/llm_error 调用失败/llm_unavailable 角色未绑定/manual_mutex 主副互斥/parse_error 解析失败）；运行数 > 0 而写入数 = 0 即「跑了但零产出」。",
+    "compact_events": "上下文压缩链事件 = 区间内三级压缩链埋点（context_compact_events）：micro 空闲衰减/auto 自动压缩/manual 手动压缩/auto_fail 失败/auto_blocked 熔断拦截，含压缩前后 token。",
     "feedbacks": "点赞/点踩 = 区间内用户反馈（message_feedbacks）记录，rating 区分赞/踩。",
     "eval_runs": "回归评测运行 = 区间内发起的评测运行（eval_runs）次数，摘要含成功率与相关度均值。",
     "skill_reviews": "Skill 预审 = 区间内添加/修改技能时的安全与能力可行性评审记录，verdict=reject 计为高危拒绝。",
@@ -902,6 +987,52 @@ def _drill_query(drill_type: str, limit: int, names: dict, since: str = "", offs
             r["username"] = names.get(r.pop("user_id", ""), "-")
             r["content"] = (r["content"] or "").replace("\n", " ")[:120]
             r["updated_at"] = (r["updated_at"] or "")[:16]
+        return cols, rows, total
+    if drill_type == "memory_events":
+        from app.services.memory_store import LAYER_LABELS
+
+        cols = [{"key": "created_at", "label": "时间"}, {"key": "username", "label": "用户"},
+                {"key": "action_label", "label": "动作"}, {"key": "layer_label", "label": "记忆层"},
+                {"key": "memory_type", "label": "类型"}, {"key": "detail", "label": "明细"}]
+        w, p = _w("created_at")
+        # 与卡片口径同源：写路径不含抽取运行事件（后者另列 memory_extract 钻取）
+        w = (w + " AND action != 'extract'") if w else " WHERE action != 'extract'"
+        rows = db.query(
+            "SELECT created_at, user_id, action, layer, memory_type, detail"
+            f" FROM memory_write_events{w} ORDER BY created_at DESC LIMIT ? OFFSET ?", (*p, limit, offset))
+        total = db.query_one(f"SELECT COUNT(*) AS c FROM memory_write_events{w}", p)["c"]
+        for r in rows:
+            r["username"] = names.get(r.pop("user_id", ""), "-")
+            r["action_label"] = _MEMORY_ACTION_LABELS.get(r.pop("action", ""), "-")
+            r["layer_label"] = LAYER_LABELS.get(r.pop("layer", ""), "助手分域")
+            r["created_at"] = (r["created_at"] or "")[:16]
+        return cols, rows, total
+    if drill_type == "memory_extract":
+        cols = [{"key": "created_at", "label": "时间"}, {"key": "username", "label": "用户"},
+                {"key": "detail", "label": "运行明细（显式/模型产出 → 写入动作）"}]
+        w, p = _w("created_at")
+        w = (w + " AND action = 'extract'") if w else " WHERE action = 'extract'"
+        rows = db.query(
+            "SELECT created_at, user_id, detail"
+            f" FROM memory_write_events{w} ORDER BY created_at DESC LIMIT ? OFFSET ?", (*p, limit, offset))
+        total = db.query_one(f"SELECT COUNT(*) AS c FROM memory_write_events{w}", p)["c"]
+        for r in rows:
+            r["username"] = names.get(r.pop("user_id", ""), "-")
+            r["created_at"] = (r["created_at"] or "")[:16]
+        return cols, rows, total
+    if drill_type == "compact_events":
+        cols = [{"key": "created_at", "label": "时间"}, {"key": "username", "label": "用户"},
+                {"key": "label", "label": "压缩类型"}, {"key": "before_tokens", "label": "压缩前 token"},
+                {"key": "after_tokens", "label": "压缩后 token"}, {"key": "detail", "label": "明细"}]
+        w, p = _w("created_at")
+        rows = db.query(
+            "SELECT created_at, user_id, kind, before_tokens, after_tokens, detail"
+            f" FROM context_compact_events{w} ORDER BY created_at DESC LIMIT ? OFFSET ?", (*p, limit, offset))
+        total = db.query_one(f"SELECT COUNT(*) AS c FROM context_compact_events{w}", p)["c"]
+        for r in rows:
+            r["username"] = names.get(r.pop("user_id", ""), "-")
+            r["label"] = _COMPACT_KIND_LABELS.get(r.pop("kind", ""), "-")
+            r["created_at"] = (r["created_at"] or "")[:16]
         return cols, rows, total
     if drill_type == "feedbacks":
         cols = [{"key": "created_at", "label": "时间"}, {"key": "username", "label": "用户"},
