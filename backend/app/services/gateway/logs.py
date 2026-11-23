@@ -161,6 +161,12 @@ _ATTR_CASE = (
     " WHEN key_id IN (SELECT id FROM gateway_keys WHERE key_type='public') THEN 'public'"
     " ELSE 'unattributed' END"
 )
+# 缓存未命中输入 Token：厂商 usage 的 prompt_tokens 扣除前缀缓存命中量
+# （cached_tokens 来自 prompt_tokens_details.cached_tokens / prompt_cache_hit_tokens）。
+_UNCACHED_SUM = ("COALESCE(SUM(CASE WHEN prompt_tokens > cached_tokens"
+                 " THEN prompt_tokens - cached_tokens ELSE 0 END),0)")
+_UNCACHED_SUM_L = ("COALESCE(SUM(CASE WHEN l.prompt_tokens > l.cached_tokens"
+                   " THEN l.prompt_tokens - l.cached_tokens ELSE 0 END),0)")
 _ATTR_CLAUSES = {
     "user": "user_id <> ''",
     "system": "user_id = '' AND key_id IN (SELECT id FROM gateway_keys WHERE key_type='internal')",
@@ -230,6 +236,10 @@ def stats(days: int = 7) -> dict:
         " COALESCE(SUM(status='cancelled'),0) AS cancelled,"
         " COALESCE(SUM(status='timeout'),0) AS timeout,"
         " COALESCE(SUM(total_tokens),0) AS tokens,"
+        " COALESCE(SUM(prompt_tokens),0) AS prompt_tokens,"
+        " COALESCE(SUM(completion_tokens),0) AS completion_tokens,"
+        " COALESCE(SUM(cached_tokens),0) AS cached_tokens,"
+        f" {_UNCACHED_SUM} AS uncached_tokens,"
         " COALESCE(AVG(latency_ms),0) AS avg_latency,"
         " COALESCE(SUM(risk_level!='none'),0) AS risky"
         " FROM gateway_logs WHERE created_at >= ?", (since,),
@@ -254,7 +264,11 @@ def stats(days: int = 7) -> dict:
         " GROUP BY channel_name ORDER BY total DESC", (since,))]
     by_model = [dict(r) for r in db.query(
         "SELECT model_requested AS name, COUNT(*) AS total,"
-        " COALESCE(SUM(total_tokens),0) AS tokens"
+        " COALESCE(SUM(total_tokens),0) AS tokens,"
+        " COALESCE(SUM(prompt_tokens),0) AS prompt_tokens,"
+        " COALESCE(SUM(completion_tokens),0) AS completion_tokens,"
+        " COALESCE(SUM(cached_tokens),0) AS cached_tokens,"
+        f" {_UNCACHED_SUM} AS uncached_tokens"
         " FROM gateway_logs WHERE created_at >= ? AND model_requested!=''"
         " GROUP BY model_requested ORDER BY total DESC LIMIT 10", (since,))]
     by_risk = [dict(r) for r in db.query(
@@ -270,11 +284,25 @@ def stats(days: int = 7) -> dict:
         "SELECT l.key_id, l.key_name AS name, COALESCE(k.key_type, '') AS key_type,"
         " COUNT(*) AS total, COALESCE(SUM(l.prompt_tokens),0) AS prompt_tokens,"
         " COALESCE(SUM(l.completion_tokens),0) AS completion_tokens,"
+        " COALESCE(SUM(l.cached_tokens),0) AS cached_tokens,"
+        f" {_UNCACHED_SUM_L} AS uncached_tokens,"
         " COALESCE(SUM(l.total_tokens),0) AS tokens,"
         " COALESCE(SUM(l.risk_level!='none'),0) AS risky"
         " FROM gateway_logs l LEFT JOIN gateway_keys k ON k.id = l.key_id"
         " WHERE l.created_at >= ? AND l.key_name!=''"
         " GROUP BY l.key_id, l.key_name ORDER BY tokens DESC LIMIT 20", (since,))]
+    # 业务路由维度：按 role（chat_answer/wiki_compile/memory_extract…）聚合用量，
+    # 与密钥归属同源（后台任务已按发起人恢复 CallContext），供密钥用量分析下钻
+    by_role = [dict(r) for r in db.query(
+        "SELECT role AS name, COUNT(*) AS total,"
+        " COALESCE(SUM(total_tokens),0) AS tokens,"
+        " COALESCE(SUM(prompt_tokens),0) AS prompt_tokens,"
+        " COALESCE(SUM(completion_tokens),0) AS completion_tokens,"
+        " COALESCE(SUM(cached_tokens),0) AS cached_tokens,"
+        f" {_UNCACHED_SUM} AS uncached_tokens,"
+        " COALESCE(SUM(user_id!=''),0) AS attributed"
+        " FROM gateway_logs WHERE created_at >= ? AND role!=''"
+        " GROUP BY role ORDER BY tokens DESC LIMIT 20", (since,))]
     # 归属统计：用户业务/真实系统/公共游客/历史未归属（不再笼统计入「系统内部调用」）
     by_attribution = [dict(r) for r in db.query(
         f"SELECT {_ATTR_CASE} AS category, COUNT(*) AS total,"
@@ -302,35 +330,43 @@ def stats(days: int = 7) -> dict:
             "p95_latency_ms": int(p95),
             "risky": int(overview.get("risky", 0)),
             "tokens": int(overview.get("tokens", 0)),
+            "prompt_tokens": int(overview.get("prompt_tokens", 0)),
+            "completion_tokens": int(overview.get("completion_tokens", 0)),
+            "cached_tokens": int(overview.get("cached_tokens", 0)),
+            "uncached_tokens": int(overview.get("uncached_tokens", 0)),
             "avg_latency_ms": int(overview.get("avg_latency", 0)),
             "success_rate": round(int(overview.get("ok", 0)) / total, 4) if total else 0.0,
         },
         "daily": daily, "by_channel": by_channel, "by_model": by_model,
         "by_risk": by_risk, "top_keys": top_keys, "by_key": by_key,
+        "by_role": by_role,
         "by_attribution": by_attribution, "by_user": by_user,
     }
 
 
 def token_requests(days: int = 7, model: str = "", channel_name: str = "",
-                   limit: int = 200) -> dict:
-    """Token 分析钻取：某模型 或 某渠道（路由规则）在时间窗内每次请求的 Token 明细。
+                   limit: int = 200, role: str = "") -> dict:
+    """Token 分析钻取：某模型 / 某渠道（路由规则）/ 某业务角色在时间窗内每次请求的 Token 明细。
 
-    供 Token 分析面板「按模型 / 按渠道」表格行点击钻取：返回该维度下逐条请求的
-    时间/模型/渠道/密钥/业务角色/状态/延迟/prompt/completion/total Token。
-    model 与 channel_name 二选一（同时传以 model 优先），均按精确匹配（与 stats 的
-    GROUP BY model_requested / channel_name 口径一致）；缺省或都空则返回空集。
+    供 Token 分析面板「按模型 / 按渠道 / 按业务路由」表格行点击钻取：返回该维度下逐条请求的
+    时间/模型/渠道/密钥/业务角色/状态/延迟/输入/输出/缓存命中/缓存未命中/total Token。
+    model / channel_name / role 三选一（同时传以 model > channel > role 优先），均按精确匹配
+    （与 stats 的 GROUP BY 口径一致）；缺省或都空则返回空集。
     """
     days = max(1, min(days, 90))
     since = (datetime.now() - timedelta(days=days - 1)).replace(
         hour=0, minute=0, second=0, microsecond=0).isoformat()
     model = (model or "").strip()
     channel_name = (channel_name or "").strip()
+    role = (role or "").strip()
     if model:
         clause, params = "created_at >= ? AND model_requested = ?", (since, model)
     elif channel_name:
         clause, params = "created_at >= ? AND channel_name = ?", (since, channel_name)
+    elif role:
+        clause, params = "created_at >= ? AND role = ?", (since, role)
     else:
-        return {"days": days, "model": "", "channel_name": "",
+        return {"days": days, "model": "", "channel_name": "", "role": "",
                 "count": 0, "tokens": 0, "requests": []}
     lim = max(1, min(limit, 500))
     rows = db.query(
@@ -349,11 +385,12 @@ def token_requests(days: int = 7, model: str = "", channel_name: str = "",
         "prompt_tokens": int(r.get("prompt_tokens") or 0),
         "completion_tokens": int(r.get("completion_tokens") or 0),
         "cached_tokens": int(r.get("cached_tokens") or 0),
+        "uncached_tokens": max(0, int(r.get("prompt_tokens") or 0) - int(r.get("cached_tokens") or 0)),
         "total_tokens": int(r.get("total_tokens") or 0),
         "risk_level": r.get("risk_level") or "none",
     } for r in rows]
     return {
-        "days": days, "model": model, "channel_name": channel_name,
+        "days": days, "model": model, "channel_name": channel_name, "role": role,
         "count": len(requests),
         "tokens": sum(x["total_tokens"] for x in requests),
         "requests": requests,

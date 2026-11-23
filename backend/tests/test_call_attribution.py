@@ -254,3 +254,55 @@ def test_heavy_pool_propagates_call_context(mem_db):
             call_context.deactivate(token)
 
     assert asyncio.run(run()) == "u-bg"
+
+
+# ============================================
+# 后台编译队列：发起人随队列持久化，worker 逐任务恢复归属
+# （admin 触发笔记整理 → 编译出网计入 admin 绑定密钥而非系统内部）
+# ============================================
+
+def test_wiki_schedule_persists_actor(mem_db, monkeypatch):
+    from app.services import wiki as wiki_mod
+    monkeypatch.setattr(wiki_mod, "wiki_compile_enabled", lambda: True)
+    monkeypatch.setattr(wiki_mod.wiki_service, "_ensure_worker", lambda: None)
+    token = call_context.activate(actor_user_id="admin")
+    try:
+        wiki_mod.wiki_service.schedule_compile(
+            source_image="note.png", full_text="养生笔记内容" * 200, kb_id="kb1",
+            visibility="private", owner_id="owner-x", source_type="image", title="笔记")
+    finally:
+        call_context.deactivate(token)
+    row = db.query_one("SELECT payload FROM wiki_compile_queue")
+    payload = json.loads(row["payload"])
+    assert payload["actor_user_id"] == "admin"  # 请求上下文优先于 owner
+
+
+def test_wiki_worker_restores_actor_attribution(mem_db, monkeypatch):
+    from datetime import datetime
+    from app.services import wiki as wiki_mod
+    seen = []
+
+    async def _fake_core(self, **payload):
+        seen.append(call_context.current_user_id())
+        return {"id": "p1"}
+
+    monkeypatch.setattr(wiki_mod.WikiService, "_compile_core", _fake_core)
+    now = datetime.now().isoformat()
+    # 任务1：显式发起人 admin；任务2：旧队列无 actor 字段 → 回落 owner_id
+    for qid, actor, owner in (("q1", "admin", "owner-x"), ("q2", "", "u2")):
+        payload = {"source_image": "img", "full_text": "t", "kb_id": "kb1",
+                   "visibility": "private", "owner_id": owner, "source_type": "image",
+                   "title": "笔记", "pdf_preview_path": None, "force": False,
+                   "source_metadata": {}}
+        if actor:
+            payload["actor_user_id"] = actor
+        db.execute(
+            "INSERT INTO wiki_compile_queue (id, source_image, source_hash, payload,"
+            " status, attempts, error, created_at, updated_at)"
+            " VALUES (?, 'img', 'sha', ?, 'pending', 0, '', ?, ?)",
+            (qid, json.dumps(payload, ensure_ascii=False), now, now))
+    asyncio.run(wiki_mod.wiki_service._worker_loop())
+    assert seen == ["admin", "u2"]  # 逐任务恢复发起人，不再全走系统内部
+    assert call_context.current_user_id() == ""  # worker 结束后上下文还原，不串归属
+    statuses = {r["id"]: r["status"] for r in db.query("SELECT id, status FROM wiki_compile_queue")}
+    assert statuses == {"q1": "done", "q2": "done"}

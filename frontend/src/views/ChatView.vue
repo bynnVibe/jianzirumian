@@ -80,7 +80,7 @@
             <template #cards>
               <ChatActionCard v-for="action in msg.actions || []" :key="action.id" :action="action" @update="store.updateAction" />
               <CapabilityGapCard v-if="msg.capability_gap" :gap="msg.capability_gap"
-                @enable-search="(q) => store.enableSearchAndResend(q)" @retry="(q) => store.sendMessage(q)" />
+                @enable-search="(q) => store.enableSearchAndResend(q, msg.capability_gap)" @retry="(q) => store.sendMessage(q)" />
               <SkillDraftCard v-for="d in msg.skill_drafts || []" :key="d.id" :draft="d" @update="store.updateSkillDraft" />
               <ToolDraftCard v-for="d in msg.tool_drafts || []" :key="d.id" :draft="d" @update="store.updateToolDraft" />
             </template>

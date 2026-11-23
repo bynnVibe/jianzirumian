@@ -27,13 +27,14 @@ def mem_db(monkeypatch):
 
 
 def _log(log_id, key_id, key_name, prompt, completion, risk="none",
-         model="qwen-max", channel="阿里云"):
+         model="qwen-max", channel="阿里云", cached=0, role="", user_id=""):
     db.execute(
         "INSERT INTO gateway_logs (id, key_id, key_name, model_requested, channel_name,"
         " status, prompt_tokens, completion_tokens, total_tokens, latency_ms,"
-        " risk_level, created_at) VALUES (?,?,?,?,?,'ok',?,?,?,?,?,?)",
+        " risk_level, cached_tokens, role, user_id, created_at)"
+        " VALUES (?,?,?,?,?,'ok',?,?,?,?,?,?,?,?,?)",
         (log_id, key_id, key_name, model, channel, prompt, completion,
-         prompt + completion, 100, risk, datetime.now().isoformat()))
+         prompt + completion, 100, risk, cached, role, user_id, datetime.now().isoformat()))
 
 
 def _gw_app():
@@ -236,3 +237,74 @@ def test_token_requests_forbidden_for_regular_user(mem_db, monkeypatch):
                                     params={"model": "qwen-max"})
             assert resp.status_code == 403
     asyncio.run(run())
+
+
+# ============================================
+# T6 四维度（输入/输出/命中缓存/未命中缓存，厂商 usage 为准）+ 业务路由维度
+# ============================================
+def test_stats_four_dimensions_and_by_role(mem_db):
+    from app.services.gateway import logs as log_svc
+    _log("f1", "k1", "admin专属", 1000, 200, cached=800, role="wiki_compile", user_id="admin")
+    _log("f2", "k1", "admin专属", 500, 100, cached=0, role="wiki_compile", user_id="admin")
+    _log("f3", "k2", "系统内部", 300, 50, cached=100, role="online_eval", user_id="")
+    stats = log_svc.stats(7)
+    ov = stats["overview"]
+    assert ov["prompt_tokens"] == 1800 and ov["completion_tokens"] == 350
+    assert ov["cached_tokens"] == 900 and ov["uncached_tokens"] == 900  # 未命中 = 输入 − 命中
+    m = stats["by_model"][0]
+    assert m["prompt_tokens"] == 1800 and m["completion_tokens"] == 350
+    assert m["cached_tokens"] == 900 and m["uncached_tokens"] == 900
+    k = {r["name"]: r for r in stats["by_key"]}["admin专属"]
+    assert k["cached_tokens"] == 800 and k["uncached_tokens"] == 700
+    roles = {r["name"]: r for r in stats["by_role"]}
+    assert roles["wiki_compile"]["total"] == 2 and roles["wiki_compile"]["attributed"] == 2
+    assert roles["wiki_compile"]["tokens"] == 1800
+    assert roles["wiki_compile"]["cached_tokens"] == 800
+    assert roles["online_eval"]["attributed"] == 0  # 无发起人的周期任务才计系统内部
+
+
+def test_token_requests_role_drill_and_uncached(mem_db):
+    from app.services.gateway import logs as log_svc
+    _log("r1", "k1", "admin专属", 1000, 200, cached=800, role="wiki_compile", user_id="admin")
+    _log("r2", "k1", "admin专属", 100, 20, role="chat_answer", user_id="u1")
+    r = log_svc.token_requests(7, role="wiki_compile")
+    assert r["count"] == 1 and r["role"] == "wiki_compile"
+    row = r["requests"][0]
+    assert row["role"] == "wiki_compile"
+    assert row["cached_tokens"] == 800 and row["uncached_tokens"] == 200
+    # model > channel > role 优先级
+    r2 = log_svc.token_requests(7, model="qwen-max", role="wiki_compile")
+    assert r2["count"] == 2 and r2["model"] == "qwen-max"
+
+
+def test_token_requests_endpoint_role_drill(mem_db):
+    import httpx
+    from app.api import deps
+    app = _gw_app()
+    app.dependency_overrides[deps.require_ops] = lambda: {"id": "a1", "role": "admin"}
+    _log("g1", "k1", "admin专属", 1000, 200, cached=800, role="wiki_compile", user_id="admin")
+
+    async def run():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            r = await client.get("/api/gateway/token-requests",
+                                 params={"days": 7, "role": "wiki_compile"})
+            assert r.status_code == 200
+            body = r.json()
+            assert body["count"] == 1
+            assert body["requests"][0]["uncached_tokens"] == 200
+            # token-analysis 端点返回 by_role 维度
+            ta = (await client.get("/api/gateway/token-analysis")).json()
+            assert ta["gateway"]["by_role"][0]["name"] == "wiki_compile"
+    asyncio.run(run())
+
+
+def test_usage_cached_vendor_shapes():
+    """缓存命中以厂商 usage 为准：OpenAI details.cached_tokens 优先，DeepSeek 字段兑底。"""
+    from app.services.gateway import proxy
+    assert proxy._usage_cached({"prompt_tokens_details": {"cached_tokens": 128}}) == 128
+    assert proxy._usage_cached({"prompt_cache_hit_tokens": 64}) == 64
+    assert proxy._usage_cached({"prompt_tokens_details": {"cached_tokens": 128},
+                                "prompt_cache_hit_tokens": 64}) == 128
+    assert proxy._usage_cached({}) == 0
+    assert proxy._usage_cached({"prompt_tokens_details": {"cached_tokens": -5}}) == 0

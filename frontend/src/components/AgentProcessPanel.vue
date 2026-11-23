@@ -25,7 +25,7 @@
         <p v-if="error.message" class="process-error-msg">{{ error.message }}</p>
         <small v-if="error.retryable" class="process-error-retry">该错误可重试：请检查配置或稍后重新提问</small>
       </div>
-      <ol v-if="v2Steps.length" class="process-stage-list">
+      <ol v-if="v2Steps.length && !isPlanMode" class="process-stage-list">
         <li v-for="s in v2Steps" :key="s.step_id" :class="'stage-' + s.state">
           <span class="process-stage-name">{{ stageLabel(s.stage) }}</span>
           <span class="process-stage-state">{{ stageStateLabel(s.state) }}</span>
@@ -34,20 +34,35 @@
           <small v-else-if="s.error" class="process-stage-detail err">{{ s.error }}</small>
         </li>
       </ol>
-      <ol v-else-if="steps.length && !tools.length" class="process-plan-list">
+      <ol v-else-if="steps.length && !tools.length && !isPlanMode" class="process-plan-list">
         <li v-for="step in steps.filter(s => s.state !== 'pending')" :key="step.key">{{ step.label }} · {{ step.state === 'done' ? '已完成' : '处理中' }}</li>
       </ol>
-      <div v-if="plan.length" class="process-block">
-        <div class="process-block-title">解题计划</div>
-        <ol class="process-plan-list">
-          <li v-for="(s, i) in plan" :key="i">
-            <span class="process-tag">{{ s.tool }}</span>
-            <span class="process-plan-text">{{ s.purpose || s.query }}</span>
+      <!-- Plan&Execute：步骤待办。只呈现步骤说明与实时完成态，不暴露工具名/内部阶段名 -->
+      <div v-if="isPlanMode" class="process-block">
+        <div class="process-block-title">步骤待办</div>
+        <ul class="process-todo-list">
+          <li v-for="t in planTodos" :key="t.key" class="process-todo" :class="'todo-' + t.state">
+            <span class="process-todo-mark" aria-hidden="true">
+              <svg v-if="t.state === 'done'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" width="9" height="9">
+                <polyline points="5 13 10 18 19 7"/>
+              </svg>
+              <svg v-else-if="t.state === 'failed'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" width="9" height="9">
+                <path d="M7 7l10 10M17 7L7 17"/>
+              </svg>
+              <span v-else-if="t.state === 'running'" class="process-spinner"></span>
+            </span>
+            <span class="process-todo-body">
+              <span class="process-todo-text">{{ t.text }}</span>
+              <small v-if="t.detail" class="process-todo-detail" :class="{ err: t.state === 'failed' }">{{ t.detail }}</small>
+            </span>
+            <span class="process-todo-state">
+              {{ todoStateLabel(t.state) }}<template v-if="t.state === 'done' && Number.isFinite(t.elapsed) && t.elapsed > 0"> · {{ (t.elapsed / 1000).toFixed(1) }} 秒</template>
+            </span>
           </li>
-        </ol>
+        </ul>
       </div>
 
-      <div v-if="tools.length" class="process-block">
+      <div v-if="tools.length && !isPlanMode" class="process-block">
         <div class="process-block-title">工具调用</div>
         <div v-for="(t, i) in tools" :key="i" class="process-tool-row" :class="{ failed: t.failed }">
           <span class="process-tag" :title="t.tool">{{ t.tool }}</span>
@@ -67,6 +82,7 @@
 
 <script setup>
 import { computed } from 'vue'
+import { buildPlanTodos, planTodoSummary, todoStateLabel } from '../utils/agentTodos.js'
 
 const props = defineProps({
   plan: { type: Array, default: () => [] },
@@ -95,10 +111,15 @@ const STAGE_LABELS = {
   answer_generation: '回答生成', web_search: '联网搜索', search_knowledge: '知识检索',
   chat_agent: 'Agent 分流', skill_distill_route: 'Skill 沉淀路由', plan: '规划',
   model_selection: '模型选择', tool_execution: '工具执行', agent: 'Agent 轮次',
+  complexity_classify: '复杂度判定', cache_write_policy: '缓存写入策略',
+  memory_extract: '记忆抽取', session_summary: '会话摘要',
 }
 const stageLabel = name => {
   if (!name) return ''
   if (STAGE_LABELS[name]) return STAGE_LABELS[name]
+  // 多步骤工具阶段（search_knowledge#step2）对用户只呈现「步骤 N」，不暴露方法名
+  const step = /^(?:.*)#step(\d+)$/.exec(String(name))
+  if (step) return `步骤 ${step[1]}`
   if (String(name).startsWith('pt_')) return '个人工具'
   if (String(name).startsWith('decision')) return '工具决策'
   return name
@@ -108,6 +129,10 @@ const stageStateLabel = state => ({ ok: '完成', skipped: '已跳过', error: '
 const summaryText = computed(() => {
   const parts = []
   if (props.error) parts.push(`失败：${stageLabel(props.error.stage) || props.error.code || '未知步骤'}`)
+  if (isPlanMode.value) {
+    parts.push(planTodoSummary(planTodos.value))
+    return parts.join(' · ')
+  }
   if (props.plan.length) parts.push(`${props.plan.length} 步计划`)
   if (props.tools.length) {
     const failed = props.tools.filter((t) => t.failed).length
@@ -121,6 +146,14 @@ const summaryText = computed(() => {
   }
   return parts.join(' · ') || (props.live ? '处理中' : '查看执行摘要')
 })
+
+// ---- Plan&Execute 步骤待办 ----
+// 计划步骤与工具进度按序号配对（后端 index 从 1 开始），实时映射为待办完成态；
+// 文案只取步骤说明（purpose），兜底检索词，绝不呈现工具名。
+const isPlanMode = computed(() => (props.plan || []).length > 0)
+const planTodos = computed(() => buildPlanTodos({
+  plan: props.plan, tools: props.tools, live: props.live, error: props.error,
+}))
 </script>
 
 <style scoped>
@@ -243,6 +276,37 @@ const summaryText = computed(() => {
 }
 @keyframes process-spin { to { transform: rotate(360deg); } }
 
+/* 步骤待办：空心圆→转圈→对勾，完成态实时回填；文案只有步骤说明 */
+.process-todo-list { list-style: none; margin: 2px 0 0; padding: 0; }
+.process-todo {
+  display: flex; align-items: flex-start; gap: 8px;
+  padding: 3px 0; line-height: 1.6;
+}
+.process-todo-mark {
+  flex: none; width: 14px; height: 14px; margin-top: 3px;
+  display: flex; align-items: center; justify-content: center;
+  border: 1.5px solid #cfcfc7; border-radius: 50%;
+  color: #fff; background: transparent;
+}
+.process-todo-body { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
+.process-todo-text { color: #6f6f68; overflow-wrap: anywhere; }
+.process-todo-detail {
+  color: #a3a398; font-size: 11px; line-height: 1.5; overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.process-todo-detail.err { color: #a06a6a; }
+.process-todo-state { flex: none; margin-left: auto; padding-left: 8px; color: #a8a89c; font-size: 11px; white-space: nowrap; }
+.process-todo.todo-running .process-todo-mark { border-color: #8f8f86; }
+.process-todo.todo-running .process-todo-text { color: #5c5c55; font-weight: 600; }
+.process-todo.todo-running .process-todo-state { color: #7a7a70; }
+.process-todo.todo-done .process-todo-mark { border-color: #7fa075; background: #7fa075; }
+.process-todo.todo-done .process-todo-text { color: #8f8f86; }
+.process-todo.todo-done .process-todo-state { color: #6f8f66; }
+.process-todo.todo-failed .process-todo-mark { border-color: #b08a8a; background: #b08a8a; }
+.process-todo.todo-failed .process-todo-text { color: #8a5a52; }
+.process-todo.todo-failed .process-todo-state { color: #a06a6a; font-weight: 600; }
+.process-todo .process-spinner { width: 7px; height: 7px; border-width: 1.5px; }
+
 /* v2 过程快照：意图标签/结构化错误/阶段清单/空态 */
 .process-intent { display: flex; align-items: center; gap: 6px; margin: 4px 0; flex-wrap: wrap; }
 .process-chip {
@@ -276,5 +340,6 @@ const summaryText = computed(() => {
 @media (max-width: 768px) {
   .process-panel { margin-left: 0; }
   .process-tool-query { max-width: 34%; }
+  .process-todo-state { padding-left: 6px; }
 }
 </style>

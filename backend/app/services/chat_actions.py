@@ -10,6 +10,7 @@ from pathlib import Path
 from fastapi import HTTPException
 
 from app.config import settings
+from app.core import call_context
 from app.core import db, observability as obs
 from app.core.agent_runtime import runtime
 from app.services.tools.base import ToolContext
@@ -188,6 +189,10 @@ async def execute(action_id, user_id):
         return
     _EXECUTING.add(action_id)
     obs.start_trace("chat_confirmation", user_id, action_id)
+    # 后台执行（含启动恢复调度）显式恢复发起人归属：OCR/embedding 出网计入用户密钥
+    ctx_token = call_context.activate(
+        actor_user_id=user_id or "", trace_id=obs.current_trace_id(),
+        origin="background", job_id=action_id)
     status, result, error = "failed", {}, ""
     try:
         ctx = ToolContext(user_id=user_id, file_path=row["file_path"], filename=row["filename"], kind=row["kind"],
@@ -213,6 +218,7 @@ async def execute(action_id, user_id):
         error = str(exc)
     finally:
         _EXECUTING.discard(action_id)
+        call_context.deactivate(ctx_token)
         db.execute("UPDATE chat_pending_actions SET status=?,result=?,error=?,updated_at=? WHERE id=? AND status='running'",
                    (status, json.dumps(result, ensure_ascii=False), error, _now(), action_id))
         obs.end_trace(status="ok" if status == "succeeded" else "interrupted" if status == "interrupted" else "error", error=error)

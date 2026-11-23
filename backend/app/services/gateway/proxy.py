@@ -46,6 +46,11 @@ _FAILOVER_STATUS = {401, 403, 408, 429}
 _UTILITY_ROLES = {"intent_rewrite", "evidence_check", "memory_extract", "session_summary"}
 _FIRST_CHUNK_UTILITY = 8.0
 _FIRST_CHUNK_DEFAULT = 15.0
+# 预提交阶段单上游尝试上限：慢滴答（持续产出无正文 chunk）也不得吃满总预算，
+# 超上限仍无有效产出判定慢上游并切换，为主备切换保留预算。
+_PRE_COMMIT_CAP = 90.0
+# 超时后仍发起切换尝试的最低剩余预算：低于此值不再试新上游，直接终态超时。
+_FAILOVER_RESERVE = 3.0
 # Qwen 系上游：工具类角色默认关思考，避免长思考链拖慢工具化流水线
 _NO_THINK_HOSTS = ("modelscope", "dashscope", "aliyuncs")
 
@@ -472,6 +477,16 @@ def _suppress_utility_thinking(ctx: Ctx, eff: dict, payload) -> None:
         payload.setdefault("enable_thinking", False)
 
 
+def _usage_cached(usage: dict) -> int:
+    """厂商反馈的前缀缓存命中 Token：OpenAI 形态 prompt_tokens_details.cached_tokens，
+    DeepSeek 形态 prompt_cache_hit_tokens；一律以厂商 usage 为准，缺失记 0。"""
+    det = usage.get("prompt_tokens_details") or {}
+    cached = int(det.get("cached_tokens") or 0)
+    if not cached:
+        cached = int(usage.get("prompt_cache_hit_tokens") or 0)
+    return max(0, cached)
+
+
 def _finalize(ctx: Ctx, *, status: str, status_code: int, prompt_tokens: int = 0,
               completion_tokens: int = 0, cached_tokens: int = 0, response_preview: str = "",
               tool_calls: Optional[list] = None, error: str = "") -> None:
@@ -669,8 +684,9 @@ async def _json_response(ctx: Ctx) -> tuple[int, dict]:
                 return 200, _synthetic_completion(ctx, cached_answer)
             headers, payload = upstream.build_request(eff, ctx.forward_body, mapped, stream=False)
             _suppress_utility_thinking(ctx, eff, payload)
-            async with httpx.AsyncClient(timeout=_network_timeout(ctx)) as client:
-                resp = await client.post(url, headers=headers, json=payload)
+            async with httpx.AsyncClient(timeout=_network_timeout(ctx, _json_attempt_cap(ctx, candidates))) as client:
+                resp = await asyncio.wait_for(client.post(url, headers=headers, json=payload),
+                                              timeout=_json_attempt_timeout(ctx, candidates))
             sc = resp.status_code
             # 需要故障切换的状态：连接类/鉴权/限流/5xx；其余 4xx 直接返回不重试
             if sc in _FAILOVER_STATUS or sc >= 500:
@@ -691,7 +707,7 @@ async def _json_response(ctx: Ctx) -> tuple[int, dict]:
             # 监控埋点补记：miss 事件按本次真实 usage 补记 Token（失败静默）
             if ctx.cache_event_id and (pt or ct):
                 semantic_cache.update_event_tokens(ctx.cache_event_id, pt + ct)
-            cached = int((usage.get("prompt_tokens_details") or {}).get("cached_tokens") or 0)
+            cached = _usage_cached(usage)
             preview, tool_calls = _extract_preview(normalized)
             # 成功产出正文且非工具调用 → 回写语义缓存（按 public/personal + 实时阶梯 TTL）
             if sc < 400 and not tool_calls and (normalized.get("choices") or [{}])[0].get("finish_reason") == "stop":
@@ -759,8 +775,9 @@ async def _json_response_kind(ctx: Ctx, kind: str) -> tuple[int, dict]:
         try:
             headers, payload = upstream.build_request(eff, ctx.forward_body, mapped,
                                                       stream=False, kind=kind)
-            async with httpx.AsyncClient(timeout=_network_timeout(ctx)) as client:
-                resp = await client.post(url, headers=headers, json=payload)
+            async with httpx.AsyncClient(timeout=_network_timeout(ctx, _json_attempt_cap(ctx, candidates))) as client:
+                resp = await asyncio.wait_for(client.post(url, headers=headers, json=payload),
+                                              timeout=_json_attempt_timeout(ctx, candidates))
             sc = resp.status_code
             if sc in _FAILOVER_STATUS or sc >= 500:
                 raise RuntimeError(f"上游返回 {sc}: {resp.text[:200]}")
@@ -833,13 +850,74 @@ def _meter_kind(ctx: Ctx, kind: str, normalized: dict) -> tuple[int, int, str]:
 # 流式响应
 # ---------------------------------------------------------------------------
 
-def _network_timeout(ctx):
-    budget = remaining(ctx.deadline)
+def _budget_left(ctx) -> float:
+    """剩余预算（不抛错）：失败分支据此判断是否还能切换，预算耗尽时返回 0。
+
+    request_budget.remaining 在耗尽时抛 TimeoutError，不能在 except 分支里调用，
+    否则失败处理自身被打断（既不记失败也不下发终态错误）。
+    """
+    return max(0.0, ctx.deadline - time.monotonic())
+
+
+def _network_timeout(ctx, cap: float = 0.0):
+    budget = _budget_left(ctx)
+    if cap > 0:
+        budget = min(budget, cap)
     return httpx.Timeout(budget, connect=min(10, budget), pool=min(10, budget))
 
 
+def _json_attempt_cap(ctx, candidates) -> float:
+    """非流式单尝试预算：多候选时按候选数均分总预算，保证超时后仍有预算切换；
+    单候选保持全预算（长生成不被误截）。"""
+    if len(candidates) <= 1:
+        return 0.0
+    return max(_FIRST_CHUNK_DEFAULT, _budget_left(ctx) / len(candidates))
+
+
+def _json_attempt_timeout(ctx, candidates) -> float:
+    """非流式单尝试硬期限：不依赖传输层超时实现，保证慢上游可被判定并切换。"""
+    cap = _json_attempt_cap(ctx, candidates)
+    return cap if cap > 0 else max(0.5, _budget_left(ctx))
+
+
+def _extend_backup_candidates(ctx: Ctx, queue: List[dict], tried_ids: List[str]) -> None:
+    """主备规则请求内切换：候选被模型过滤剩主路由时，主失败后按备支持模型重选补入队列。
+
+    队列仍有未试候选时不改写（备支持原模型的常规主备路径）。
+    """
+    rule = ctx.rule
+    if not rule or (rule.get("lb_strategy") or "") != "primary_backup":
+        return
+    if any(u["id"] not in tried_ids for u in queue):
+        return
+    fb_model = rule_svc.request_fallback_model(
+        rule, ctx.model_req, tried_ids,
+        category=rule_svc.ROLE_CATEGORY.get(ctx.role, "llm"))
+    if not fb_model or fb_model == ctx.model_req \
+            or not key_svc.check_model_allowed(ctx.key_row, fb_model):
+        return
+    old_model = ctx.model_req
+    ctx.model_req = fb_model
+    ctx.forward_body["model"] = fb_model
+    _, new_cands = rule_svc.select_upstreams(
+        fb_model, role=ctx.role or None, rule_id=rule["id"], user_id=ctx.user_id or None)
+    added = [u for u in new_cands if u["id"] not in tried_ids]
+    if not added:
+        return
+    queue.extend(added)
+    ctx.tracer.add("route", "主备切换·请求内兜底", "warn",
+                   f"主上游失败，模型「{old_model}」→「{fb_model}」，补入备候选 {len(added)} 个")
+    logger.warning("[网关选路] 主备切换·请求内兜底: role=%s 模型「%s」→「%s」 补入 %d 个备候选",
+                   ctx.role or "-", old_model, fb_model, len(added))
+
+
 async def stream_response(ctx: Ctx) -> AsyncGenerator[str, None]:
-    """收到协议终止信号才成功；产出首块后不切换，所有重试共用预算。"""
+    """收到协议终止信号才成功；产出有效正文/工具调用后不切换，所有重试共用预算。
+
+    未提交（尚无有效正文）前超时/慢上游同样走 failover：记失败健康度
+    （驱动跨请求备升主），预算有余即切换下一候选；主备规则候选被模型
+    过滤剩主路由时，主失败后按备支持模型重选补入队列（请求内兜底）。
+    """
     acc_text: List[str] = []
     usage = {"pt": 0, "ct": 0, "cached": 0, "finish_reason": ""}
     tool_names: List[str] = []
@@ -851,8 +929,14 @@ async def stream_response(ctx: Ctx) -> AsyncGenerator[str, None]:
         final_status, final_code, final_err = "error", 503, _circuit_message(opened)
         ctx.tracer.add("upstream", "熔断检查", "error", final_err)
     try:
-        for idx, up in enumerate(candidates):
-            ctx.retries = idx
+        queue = list(candidates)
+        tried: List[str] = []
+        idx = 0
+        while idx < len(queue) and len(tried) < _max_attempts(ctx):
+            up = queue[idx]
+            idx += 1
+            tried.append(up["id"])
+            ctx.retries = len(tried) - 1
             eff = up_svc.effective(up)
             url = up_svc.build_upstream_url(eff)
             mapped = ctx.model_req
@@ -871,32 +955,45 @@ async def stream_response(ctx: Ctx) -> AsyncGenerator[str, None]:
                 headers, payload = upstream.build_request(eff, ctx.forward_body, mapped, stream=True)
                 _suppress_utility_thinking(ctx, eff, payload)
                 client = httpx.AsyncClient(timeout=_network_timeout(ctx))
-                async with asyncio.timeout(remaining(ctx.deadline)):
-                    req = client.build_request("POST", url, headers=headers, json=payload)
-                    resp = await client.send(req, stream=True)
-                    if resp.status_code >= 400:
-                        body_txt = (await resp.aread()).decode("utf-8", "ignore")[:200]
-                        raise RuntimeError(f"上游 {resp.status_code}: {body_txt}")
+                first_chunk_limit = _first_chunk_limit(ctx)
+                # 响应头阶段同样受首块保护：上游挂起不返回响应头不得吃满总预算
+                # （旧版在此等满预算后直接终态超时，不记失败也不切换）
+                req = client.build_request("POST", url, headers=headers, json=payload)
+                try:
+                    resp = await asyncio.wait_for(
+                        client.send(req, stream=True),
+                        timeout=min(first_chunk_limit, max(0.5, _budget_left(ctx))))
+                except (TimeoutError, asyncio.TimeoutError):
+                    raise RuntimeError(
+                        f"上游 {first_chunk_limit:.0f}s 内未返回响应头，判定慢上游并切换")
+                if resp.status_code >= 400:
+                    body_txt = (await resp.aread()).decode("utf-8", "ignore")[:200]
+                    raise RuntimeError(f"上游 {resp.status_code}: {body_txt}")
                 ctx.tracer.add("upstream", f"调用上游 {up['name']}", "ok", f"{mapped}（流式）")
                 iterator = iterate(upstream.stream_iterator(eff, resp.aiter_lines()), ctx.deadline)
-                first_chunk_limit = _first_chunk_limit(ctx)
                 while True:
                     try:
                         if committed:
                             sse = await iterator.__anext__()
                         else:
-                            # 首块前仍可切换：上游在期限内不产出任何 chunk 视为慢上游失败
+                            # 提交前仍可切换：块间静默保护 + 预提交尝试上限，
+                            # 慢滴答上游（只产无正文 chunk）超上限也判慢上游切换
+                            cap_left = _PRE_COMMIT_CAP - (time.monotonic() - t0)
+                            if cap_left <= 0:
+                                raise RuntimeError(
+                                    f"上游 {_PRE_COMMIT_CAP:.0f}s 仍无有效产出，判定慢上游并切换")
                             sse = await asyncio.wait_for(
                                 iterator.__anext__(),
-                                timeout=min(first_chunk_limit, max(0.5, remaining(ctx.deadline))))
+                                timeout=min(first_chunk_limit, cap_left,
+                                            max(0.5, _budget_left(ctx))))
                     except StopAsyncIteration:
                         break
                     except (TimeoutError, asyncio.TimeoutError):
-                        if committed or remaining(ctx.deadline) <= 0.5:
+                        if committed or _budget_left(ctx) <= 0.5:
                             raise TimeoutError("请求超时或总预算耗尽")
                         raise RuntimeError(
                             f"上游 {first_chunk_limit:.0f}s 内未产出首块，判定慢上游并切换")
-                    _account_sse(sse, acc_text, usage, tool_names)
+                    had_payload = _account_sse(sse, acc_text, usage, tool_names)
                     if any(line.strip() == "data: [DONE]" for line in sse.splitlines()):
                         final_status, final_code, final_err = "ok", resp.status_code, ""
                         up_svc.mark_success(up["id"], int((time.monotonic() - t0) * 1000))
@@ -913,20 +1010,32 @@ async def stream_response(ctx: Ctx) -> AsyncGenerator[str, None]:
                             obj = json.loads(line[5:].strip())
                             if obj.get("error"):
                                 raise RuntimeError(str(obj["error"]))
-                    committed = True
+                    # 仅当 chunk 携带有效正文/工具调用才提交：role-only 等空 chunk
+                    # 不得提前锁定切换（旧版首块即提交，后续挂起只能等满超时）
+                    committed = committed or had_payload
                     yield sse
                 if final_status != "ok":
                     raise RuntimeError("上游流缺少正常结束标志")
                 break
             except (TimeoutError, httpx.TimeoutException):
-                final_status, final_code, final_err = "timeout", 504, "请求超时或总预算耗尽"
-                break
+                final_status, final_code = "timeout", 504
+                final_err = "请求超时或总预算耗尽"
+                up_svc.mark_failure(up["id"], final_err)
+                ctx.tracer.add("upstream", f"调用上游 {up['name']}", "error", final_err)
+                logger.warning("网关上游超时: upstream=%s committed=%s 剩余预算=%.1fs",
+                               up.get("name"), committed, _budget_left(ctx))
+                if committed or _budget_left(ctx) <= _FAILOVER_RESERVE:
+                    break
+                # 未提交且预算有余：超时同样视为上游失败，切换下一候选（含主备兜底）
+                _extend_backup_candidates(ctx, queue, tried)
             except Exception as e:
                 final_err = str(e)
+                final_status, final_code = "error", 502
                 up_svc.mark_failure(up["id"], final_err)
                 ctx.tracer.add("upstream", f"调用上游 {up['name']}", "error", final_err)
                 if committed:
                     break
+                _extend_backup_candidates(ctx, queue, tried)
             finally:
                 await close_resources(iterator, resp, client)
         if final_status != "ok":
@@ -951,8 +1060,13 @@ async def stream_response(ctx: Ctx) -> AsyncGenerator[str, None]:
             semantic_cache.update_event_tokens(ctx.cache_event_id, usage["pt"] + usage["ct"])
 
 
-def _account_sse(sse: str, acc_text: List[str], usage: dict, tool_names: List[str]) -> None:
-    """从 OpenAI 形态 SSE 块累计内容/usage/工具名，用于最终计量。"""
+def _account_sse(sse: str, acc_text: List[str], usage: dict, tool_names: List[str]) -> bool:
+    """从 OpenAI 形态 SSE 块累计内容/usage/工具名，用于最终计量。
+
+    返回本块是否携带有效产出（正文/工具调用）：供流式提交判定，
+    role-only/usage-only 空块不锁定 failover。
+    """
+    had_payload = False
     try:
         for line in sse.split("\n"):
             line = line.strip()
@@ -966,8 +1080,8 @@ def _account_sse(sse: str, acc_text: List[str], usage: dict, tool_names: List[st
                 u = obj["usage"]
                 usage["pt"] = int(u.get("prompt_tokens") or usage["pt"])
                 usage["ct"] = int(u.get("completion_tokens") or usage["ct"])
-                # 前缀缓存命中量（OpenAI 形态 prompt_tokens_details.cached_tokens）
-                cached = int((u.get("prompt_tokens_details") or {}).get("cached_tokens") or 0)
+                # 前缀缓存命中量（OpenAI 形态 prompt_tokens_details.cached_tokens / DeepSeek prompt_cache_hit_tokens）
+                cached = _usage_cached(u)
                 if cached:
                     usage["cached"] = cached
             for choice in obj.get("choices") or []:
@@ -975,10 +1089,13 @@ def _account_sse(sse: str, acc_text: List[str], usage: dict, tool_names: List[st
                     usage["finish_reason"] = choice["finish_reason"]
                 delta = choice.get("delta") or {}
                 if delta.get("content"):
+                    had_payload = True
                     acc_text.append(delta["content"])
                 for tc in delta.get("tool_calls") or []:
+                    had_payload = True
                     name = (tc.get("function") or {}).get("name")
                     if name and name not in tool_names:
                         tool_names.append(name)
     except Exception:
         pass
+    return had_payload

@@ -1,8 +1,9 @@
 """前缀缓存整改阶段一回归测试（内存 DB，不出网）。
 
 覆盖 Prompt 分区装配与前缀稳定性：
-  P1  分区顺序：静态头(S) → 画像(U) → 历史(C) → 相关记忆(D) → 提问；
-  P2  前缀稳定：D 区（相关记忆/提问）每轮变化不污染 S/U/C 前缀；画像更新只动 U 槽位；
+  P1  分区顺序：静态头(S) → 历史(C·追加式) → 画像(U·半动态) → 相关记忆(D) → 提问；
+  P2  前缀稳定：D 区（相关记忆/提问）每轮变化不污染 S/C 前缀；画像被自动抽取重写
+      只替换历史之后的 U 槽位，不失效追加式历史大前缀（P0-2）；
   P3  稳定排序：画像卡按 created_at/id（updated_at 变动不重排）、Skill 按创建序；
   P4  缓存可观测：cached_tokens 采集（OpenAI usage / Anthropic 归一化 / SSE 累计）
       与落库（agent_spans / gateway_logs，prefix_cache_v1 迁移）。
@@ -32,7 +33,7 @@ def mem_db(monkeypatch):
 
 
 # ============================================
-# P1 分区装配顺序（S → U → C → D → 提问）
+# P1 分区装配顺序（S → C → U → D → 提问）
 # ============================================
 
 def test_answer_messages_partition_order():
@@ -41,8 +42,8 @@ def test_answer_messages_partition_order():
                {"role": "assistant", "content": "历史答"}]
     msgs = ca._build_answer_messages(static, "画像内容", "相关记忆内容", history, "本轮提问")
     assert msgs[0] == static[0]
-    assert msgs[1]["role"] == "system" and "【用户画像（常驻）" in msgs[1]["content"]
-    assert msgs[2:4] == history
+    assert msgs[1:3] == history  # C 区追加式历史紧跟静态头（前缀主体）
+    assert msgs[3]["role"] == "system" and "【用户画像（常驻）" in msgs[3]["content"]
     assert msgs[4]["role"] == "system" and "【关于该用户的相关记忆" in msgs[4]["content"]
     assert msgs[5] == {"role": "user", "content": "本轮提问"}
 
@@ -52,10 +53,12 @@ def test_decision_and_plan_partition_order():
     for builder in (ca._build_decision_messages, ca._build_plan_messages):
         msgs = builder("画像内容", "相关记忆内容", history, "本轮提问", True, False)
         assert msgs[0]["role"] == "system"  # 静态决策/规划提示
-        assert "【用户画像（常驻）" in msgs[1]["content"]  # U 区紧跟静态头
+        window = 6 if builder is ca._build_decision_messages else 4
+        assert msgs[1]["content"] == f"问{8 - window}"  # 历史窗口紧跟静态头
+        assert "【用户画像（常驻）" in msgs[-3]["content"]  # U 区在历史之后
         assert msgs[-1] == {"role": "user", "content": "本轮提问"}
-        assert "【关于该用户的相关记忆" in msgs[-2]["content"]  # D 区在历史之后、提问之前
-        assert all("相关记忆" not in m["content"] for m in msgs[2:-2])
+        assert "【关于该用户的相关记忆" in msgs[-2]["content"]  # D 区在画像之后、提问之前
+        assert all("相关记忆" not in m["content"] for m in msgs[1:-3])
 
 
 def test_empty_profile_and_relevant_omitted():
@@ -70,14 +73,14 @@ def test_empty_profile_and_relevant_omitted():
 # ============================================
 
 def test_prefix_stable_across_dynamic_changes():
-    """相关记忆与提问每轮变化，S/U/C 前缀逐字节不变（前缀缓存命中条件）。"""
+    """相关记忆与提问每轮变化，S/C 前缀逐字节不变（前缀缓存命中条件）。"""
     static = [{"role": "system", "content": "静态系统提示" * 50}]
     history = [{"role": "user", "content": f"历史问{i}"} for i in range(6)]
     m1 = ca._build_answer_messages(static, "画像", "相关记忆A", history, "问题1")
     m2 = ca._build_answer_messages(static, "画像", "相关记忆B（本轮检索结果不同）", history, "问题2")
-    prefix_len = len(static) + 1 + len(history)  # S + U + C
+    prefix_len = len(static) + len(history)  # S + C
     assert m1[:prefix_len] == m2[:prefix_len]
-    assert m1[prefix_len:] != m2[prefix_len:]  # 差异仅存在于 D 区与提问
+    assert m1[prefix_len:] != m2[prefix_len:]  # 差异仅存在于 U/D 区与提问
 
 
 def test_profile_update_only_touches_u_slot():
@@ -87,6 +90,18 @@ def test_profile_update_only_touches_u_slot():
     m2 = ca._build_answer_messages(static, "新画像（记忆更新后）", "", [], "问")
     assert m1[0] == m2[0]
     assert m1[1]["content"] != m2[1]["content"]
+
+
+def test_profile_rewrite_does_not_invalidate_history_prefix():
+    """P0-2 回归：自动抽取重写画像（每轮常见）不得失效追加式历史大前缀——
+    旧顺序画像在历史之前，画像一变历史全 miss；新顺序 S+C 前缀逐字节稳定。"""
+    static = [{"role": "system", "content": "静态系统提示" * 50}]
+    history = [{"role": "user", "content": f"历史问{i}"} for i in range(6)]
+    m1 = ca._build_answer_messages(static, "旧画像", "", history, "问")
+    m2 = ca._build_answer_messages(static, "新画像（本轮自动抽取后）", "", history, "问")
+    prefix_len = len(static) + len(history)
+    assert m1[:prefix_len] == m2[:prefix_len]
+    assert m1[prefix_len]["content"] != m2[prefix_len]["content"]  # 差异仅在 U 槽位
 
 
 # ============================================

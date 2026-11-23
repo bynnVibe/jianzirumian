@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from app.config import settings
+from app.core import call_context
 from app.core import db
 from app.core import observability as obs
 from app.core.heavy_executor import run_in_heavy_pool
@@ -243,6 +244,9 @@ class WikiService:
             "pdf_preview_path": pdf_preview_path,
             "force": force,
             "source_metadata": source_metadata or {},
+            # 归属随队列持久化：worker 为常驻后台任务（可能启动于无请求上下文），
+            # 逐任务恢复发起人 CallContext，编译出网计入触发用户绑定密钥而非系统内部密钥
+            "actor_user_id": call_context.current_user_id() or owner_id or "",
         }
         self._enqueue(source_image, sha, payload)
         self._ensure_worker()
@@ -297,6 +301,9 @@ class WikiService:
                 payload = json.loads(row["payload"] or "{}")
             except Exception:
                 payload = {}
+            actor = str(payload.pop("actor_user_id", "") or payload.get("owner_id") or "")
+            ctx_token = call_context.activate(
+                actor_user_id=actor, origin="background", job_id=qid) if actor else None
             try:
                 page = await self._compile_core(**payload)
                 status = "done" if page else "skipped"
@@ -322,6 +329,9 @@ class WikiService:
                     )
                     wiki_store.append_log("fail", "source", payload.get("title", ""), f"error={str(e)[:120]}")
                     logger.error("[WIKI] 编译重试耗尽，标记 failed: %s", e)
+            finally:
+                if ctx_token is not None:
+                    call_context.deactivate(ctx_token)
             await asyncio.sleep(0.1)
         logger.info("[WIKI] 编译队列已清空，worker 退出")
 

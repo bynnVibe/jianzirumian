@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 from fastapi import HTTPException
 
 from app.config import settings
+from app.core import call_context
 from app.core import db, observability as obs
 from app.core.agent_runtime import runtime
 from app.core.heavy_executor import run_in_heavy_pool
@@ -136,7 +137,20 @@ class UrlImportService:
         runtime.require_owner()
         if task_id in self.tasks:
             return
-        task = asyncio.create_task(self.parse(task_id))
+        # 启动恢复调度无请求上下文：按任务 owner 恢复归属，解析出网计入用户密钥
+        row = db.query_one("SELECT owner_id FROM url_imports WHERE id=?", (task_id,))
+        uid = str((row or {}).get("owner_id") or "") or call_context.current_user_id()
+
+        async def _run():
+            tok = call_context.activate(
+                actor_user_id=uid, origin="background", job_id=task_id) if uid else None
+            try:
+                await self.parse(task_id)
+            finally:
+                if tok is not None:
+                    call_context.deactivate(tok)
+
+        task = asyncio.create_task(_run())
         self._track(task_id, task)
 
     def _track(self, task_id, task):
@@ -207,6 +221,10 @@ class UrlImportService:
         if not row:
             return
         obs.start_trace("url_import_confirmation", row["owner_id"], task_id)
+        ctx_token = None
+        if not call_context.current_user_id() and row["owner_id"]:
+            ctx_token = call_context.activate(
+                actor_user_id=row["owner_id"], origin="background", job_id=task_id)
         status, error = "ok", ""
         try:
             with db.transaction() as conn:
@@ -261,6 +279,8 @@ class UrlImportService:
             message = exc.detail if isinstance(exc, HTTPException) else "入库执行失败，可能已部分写入，请核对入库历史及知识库；不会自动重试"
             db.execute("UPDATE url_imports SET status='error',error=?,error_code='ingest_failed',updated_at=? WHERE id=? AND status='ingesting'", (message, now(), task_id))
         finally:
+            if ctx_token is not None:
+                call_context.deactivate(ctx_token)
             obs.end_trace(status, error)
 
     def recover(self):

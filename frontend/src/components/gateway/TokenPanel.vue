@@ -68,7 +68,9 @@
           <thead>
             <tr>
               <th>密钥</th><th>类型</th>
-              <th class="num">窗口请求</th><th class="num">Prompt</th><th class="num">Completion</th><th class="num">窗口 Token</th><th class="num">风险</th>
+              <th class="num">窗口请求</th><th class="num">输入</th><th class="num">输出</th>
+              <th class="num">命中缓存</th><th class="num">未命中缓存</th>
+              <th class="num">窗口 Token</th><th class="num">风险</th>
               <th class="num">累计已用 / 配额</th><th class="quota-cell">配额水位</th>
             </tr>
           </thead>
@@ -79,6 +81,8 @@
               <td class="num">{{ formatNum(k.total) }}</td>
               <td class="num">{{ formatNum(k.prompt_tokens) }}</td>
               <td class="num">{{ formatNum(k.completion_tokens) }}</td>
+              <td class="num">{{ formatNum(k.cached_tokens) }}</td>
+              <td class="num">{{ formatNum(k.uncached_tokens) }}</td>
               <td class="num"><strong>{{ formatNum(k.tokens) }}</strong></td>
               <td class="num"><span v-if="k.risky" class="risk-tag risk-high">{{ k.risky }}</span><span v-else>0</span></td>
               <td class="num">{{ formatNum(k.token_used) }} / {{ k.token_quota ? formatNum(k.token_quota) : '不限' }}</td>
@@ -104,19 +108,26 @@
       <div class="two-col">
         <section class="card">
           <h3 class="card-title">按模型</h3>
-          <table v-if="gw.by_model.length" class="mini-table">
-            <thead><tr><th>模型</th><th class="num">请求</th><th class="num">Token</th><th class="num">占比</th></tr></thead>
+          <div class="table-scroll">
+          <table v-if="gw.by_model.length" class="mini-table wide">
+            <thead><tr><th>模型</th><th class="num">请求</th><th class="num">输入</th><th class="num">输出</th><th class="num">命中缓存</th><th class="num">未命中缓存</th><th class="num">Token</th><th class="num">占比</th></tr></thead>
             <tbody>
               <tr v-for="m in gw.by_model" :key="m.name" class="drill-row"
                   title="点击查看该模型每次请求的 Token 明细" @click="openDrill('model', m.name)">
                 <td>{{ m.name }}</td>
                 <td class="num">{{ formatNum(m.total) }}</td>
+                <td class="num">{{ formatNum(m.prompt_tokens) }}</td>
+                <td class="num">{{ formatNum(m.completion_tokens) }}</td>
+                <td class="num">{{ formatNum(m.cached_tokens) }}</td>
+                <td class="num">{{ formatNum(m.uncached_tokens) }}</td>
                 <td class="num">{{ formatNum(m.tokens) }}</td>
                 <td class="num">{{ gw.overview.tokens ? ((m.tokens / gw.overview.tokens) * 100).toFixed(1) : 0 }}%</td>
               </tr>
             </tbody>
           </table>
-          <div v-else class="mini-empty">暂无数据</div>
+          </div>
+          <div v-if="!gw.by_model.length" class="mini-empty">暂无数据</div>
+          <p class="card-note">输入/输出/命中缓存/未命中缓存均以模型厂商反馈的 usage 为准；未命中 = 输入 − 命中。</p>
         </section>
         <section class="card">
           <h3 class="card-title">按渠道（路由规则）</h3>
@@ -135,6 +146,37 @@
           <div v-else class="mini-empty">暂无数据</div>
         </section>
       </div>
+
+      <!-- ============ 按业务路由（角色）：密钥用量分析的业务口径 ============ -->
+      <section class="card">
+        <h3 class="card-title">按业务路由（角色）</h3>
+        <div class="table-scroll">
+        <table v-if="(gw.by_role || []).length" class="mini-table wide">
+          <thead>
+            <tr>
+              <th>业务场景</th><th class="num">请求</th><th class="num">已归属用户</th>
+              <th class="num">输入</th><th class="num">输出</th>
+              <th class="num">命中缓存</th><th class="num">未命中缓存</th><th class="num">Token</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="r in gw.by_role" :key="r.name" class="drill-row"
+                title="点击查看该业务场景每次请求的 Token 明细" @click="openDrill('role', r.name)">
+              <td><strong>{{ roleLabel(r.name) }}</strong><span class="role-key mono">{{ r.name }}</span></td>
+              <td class="num">{{ formatNum(r.total) }}</td>
+              <td class="num">{{ formatNum(r.attributed) }}</td>
+              <td class="num">{{ formatNum(r.prompt_tokens) }}</td>
+              <td class="num">{{ formatNum(r.completion_tokens) }}</td>
+              <td class="num">{{ formatNum(r.cached_tokens) }}</td>
+              <td class="num">{{ formatNum(r.uncached_tokens) }}</td>
+              <td class="num"><strong>{{ formatNum(r.tokens) }}</strong></td>
+            </tr>
+          </tbody>
+        </table>
+        </div>
+        <div v-if="!(gw.by_role || []).length" class="mini-empty">暂无业务路由调用数据</div>
+        <p class="card-note">后台任务（笔记整理/在线评测等）已按发起人恢复归属：「已归属用户」= 计入该用户绑定密钥的请求数，其余才走系统内部密钥。</p>
+      </section>
 
       <!-- ============ Agent 侧：历史基线对比 ============ -->
       <section class="card" v-if="agent.token_comparison">
@@ -287,7 +329,7 @@
       <div class="drill-panel">
         <div class="drill-head">
           <div>
-            <h3 class="drill-title">{{ drill.dim === 'model' ? '模型' : '渠道' }}：{{ drill.name }}</h3>
+            <h3 class="drill-title">{{ drill.dim === 'model' ? '模型' : (drill.dim === 'role' ? '业务路由' : '渠道') }}：{{ drill.dim === 'role' ? roleLabel(drill.name) : drill.name }}</h3>
             <p class="drill-sub">
               近 {{ days }} 天每次请求的 Token 消耗明细 · 共 {{ formatNum(drill.count) }} 次请求 ·
               合计 {{ formatNum(drill.tokens) }} Token
@@ -303,13 +345,15 @@
             <thead>
               <tr>
                 <th>时间</th>
-                <th v-if="drill.dim === 'channel'">模型</th>
-                <th v-else>渠道</th>
+                <th v-if="drill.dim !== 'model'">模型</th>
+                <th v-if="drill.dim !== 'channel'">渠道</th>
                 <th>密钥</th>
-                <th>角色</th>
+                <th v-if="drill.dim !== 'role'">角色</th>
                 <th>状态</th>
-                <th class="num">Prompt</th>
-                <th class="num">Completion</th>
+                <th class="num">输入</th>
+                <th class="num">输出</th>
+                <th class="num">命中缓存</th>
+                <th class="num">未命中缓存</th>
                 <th class="num">Total</th>
                 <th class="num">延迟</th>
               </tr>
@@ -317,12 +361,15 @@
             <tbody>
               <tr v-for="r in drill.requests" :key="r.id">
                 <td class="nowrap">{{ formatTime(r.created_at) }}</td>
-                <td>{{ drill.dim === 'channel' ? (r.model_requested || '-') : (r.channel_name || '-') }}</td>
+                <td v-if="drill.dim !== 'model'">{{ r.model_requested || '-' }}</td>
+                <td v-if="drill.dim !== 'channel'">{{ r.channel_name || '-' }}</td>
                 <td>{{ r.key_name || '-' }}</td>
-                <td>{{ r.role || '-' }}</td>
+                <td v-if="drill.dim !== 'role'">{{ r.role || '-' }}</td>
                 <td><span class="drill-status" :class="r.status === 'ok' ? 'ok' : 'err'">{{ r.status }}</span></td>
                 <td class="num">{{ formatNum(r.prompt_tokens) }}</td>
                 <td class="num">{{ formatNum(r.completion_tokens) }}</td>
+                <td class="num">{{ formatNum(r.cached_tokens) }}</td>
+                <td class="num">{{ formatNum(r.uncached_tokens != null ? r.uncached_tokens : Math.max(0, (r.prompt_tokens || 0) - (r.cached_tokens || 0))) }}</td>
                 <td class="num strong">{{ formatNum(r.total_tokens) }}</td>
                 <td class="num">{{ r.latency_ms }}ms</td>
               </tr>
@@ -338,6 +385,7 @@
 import { ref, reactive, computed, onMounted } from 'vue'
 import { useQueryCacheStore, TTL_MONITOR } from '@/stores/queryCache'
 import { getGatewayTokenAnalysis, getContextExplorer, getGatewayTokenRequests } from '@/api'
+import { roleLabel } from '@/utils/roleLabels'
 
 const queryCache = useQueryCacheStore()
 
@@ -366,7 +414,7 @@ const explorerTraces = computed(() => explorer.value?.traces || [])
 const explorerDates = computed(() => explorer.value?.dates || [])
 const explorerCompare = computed(() => explorer.value?.compare || null)
 
-const gw = computed(() => data.value?.gateway || { overview: {}, daily: [], by_key: [], by_model: [], by_channel: [] })
+const gw = computed(() => data.value?.gateway || { overview: {}, daily: [], by_key: [], by_model: [], by_channel: [], by_role: [] })
 const agent = computed(() => data.value?.agent || { overview: {}, token_comparison: null, segment_breakdown: [] })
 const segments = computed(() => agent.value.segment_breakdown || [])
 const avgPerRequest = computed(() => {
@@ -383,6 +431,7 @@ const mergedKeys = computed(() => {
       ...k,
       total: u.total || 0, prompt_tokens: u.prompt_tokens || 0,
       completion_tokens: u.completion_tokens || 0, tokens: u.tokens || 0, risky: u.risky || 0,
+      cached_tokens: u.cached_tokens || 0, uncached_tokens: u.uncached_tokens || 0,
     }
   })
   return rows.sort((a, b) => (b.tokens - a.tokens) || (b.token_used - a.token_used))
@@ -440,6 +489,7 @@ async function openDrill(dim, name) {
   try {
     const params = { days: days.value }
     if (dim === 'model') params.model = name
+    else if (dim === 'role') params.role = name
     else params.channel = name
     const res = await getGatewayTokenRequests(params)
     drill.requests = res.data.requests || []
@@ -549,6 +599,9 @@ onMounted(() => {
 .mini-table td { padding: 8px; border-bottom: 1px solid #f4efe8; }
 .mini-table .num { text-align: right; }
 .mini-table th.num { text-align: right; }
+.table-scroll { overflow-x: auto; }
+.mini-table.wide { min-width: 640px; }
+.role-key { font-size: 10.5px; color: var(--color-text-secondary); margin-left: 6px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .key-off { font-size: 10px; color: #a99c8c; background: #eee9e2; padding: 1px 6px; border-radius: 6px; margin-left: 6px; }
 
 /* Token 钻取：可点击行 + 明细模态 */

@@ -366,6 +366,44 @@ def init_db(conn: sqlite3.Connection):
         );
         CREATE INDEX IF NOT EXISTS idx_chat_checkpoints_session ON chat_checkpoints(session_id, status);
 
+        -- 检索快照复用：同一会话同一问题在「开启联网后重发」等场景下，
+        -- 直接复用上一轮知识检索的原始命中/来源/上下文与步骤说明，避免重复检索与重排。
+        -- query_key: 归一化问题的 SHA256；expires_at: TTL 到期时间（过期即失效回落正常检索）
+        CREATE TABLE IF NOT EXISTS chat_retrieval_snapshots (
+            id           TEXT PRIMARY KEY,
+            session_id   TEXT NOT NULL,
+            user_id      TEXT NOT NULL,
+            query_key    TEXT NOT NULL,
+            query        TEXT NOT NULL DEFAULT '',
+            mode         TEXT NOT NULL DEFAULT '',
+            kb_results   TEXT NOT NULL DEFAULT '[]',
+            sources      TEXT NOT NULL DEFAULT '[]',
+            context_text TEXT NOT NULL DEFAULT '',
+            steps        TEXT NOT NULL DEFAULT '[]',
+            created_at   TEXT NOT NULL,
+            updated_at   TEXT NOT NULL,
+            expires_at   TEXT NOT NULL DEFAULT ''
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_chat_retrieval_snapshots_key
+            ON chat_retrieval_snapshots(session_id, user_id, query_key);
+
+        -- 待授权计划：Plan&Execute 规划出含联网搜索的步骤但用户未开联网时，
+        -- 先下发授权询问卡并暂停；用户授权/拒绝后重发同一问题，直接续跑该计划，
+        -- 不重新规划（省一次规划 LLM 调用）。取走即删除，TTL 与检索快照同口径。
+        CREATE TABLE IF NOT EXISTS chat_pending_plans (
+            id           TEXT PRIMARY KEY,
+            session_id   TEXT NOT NULL,
+            user_id      TEXT NOT NULL,
+            query_key    TEXT NOT NULL,
+            query        TEXT NOT NULL DEFAULT '',
+            mode         TEXT NOT NULL DEFAULT '',
+            steps        TEXT NOT NULL DEFAULT '[]',
+            created_at   TEXT NOT NULL,
+            expires_at   TEXT NOT NULL DEFAULT ''
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_chat_pending_plans_key
+            ON chat_pending_plans(session_id, user_id, query_key);
+
         CREATE TABLE IF NOT EXISTS tool_calls (
             id          TEXT PRIMARY KEY,
             session_id  TEXT NOT NULL,

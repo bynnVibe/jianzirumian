@@ -123,6 +123,7 @@ async def send_message(
             skip_search_prompt=body.skip_search_prompt, force_refresh=body.force_refresh,
             command=parsed_command.name,
             resume_checkpoint_id=body.resume_checkpoint_id or "",
+            reuse_retrieval=body.reuse_retrieval,
         )) as stream:
             async for event in stream:
                 yield f"{event}\n"
@@ -158,6 +159,7 @@ async def send_message_with_files(
     skip_search_prompt: bool = Form(False),
     force_refresh: bool = Form(False),
     command: str = Form(""),
+    reuse_retrieval: bool = Form(False),
     files: list[UploadFile] = File(default=[]),
     user: dict | None = Depends(get_optional_user),
 ):
@@ -209,7 +211,7 @@ async def send_message_with_files(
             use_search=use_search, llm_provider=llm_provider or None,
             user_id=user_id, attachments=attachments, kb_id=kb_id, rule_id=rule_id,
             model=model, skip_search_prompt=skip_search_prompt, force_refresh=force_refresh,
-            command=parsed_command.name,
+            command=parsed_command.name, reuse_retrieval=reuse_retrieval,
         )) as stream:
             async for event in stream:
                 yield f"{event}\n"

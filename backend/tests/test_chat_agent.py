@@ -212,14 +212,88 @@ def test_plan_execute_emits_plan_and_executes_tools(monkeypatch):
 
 
 def test_plan_execute_filters_disallowed_tools(monkeypatch):
+    # 用户已拒绝联网授权（skip_search_prompt）：web_search 完全下线，计划中被过滤
     _setup(monkeypatch,
            ['{"steps":[{"tool":"web_search","args":{"query":"x"},"purpose":"联网"}]}', "回答"],
            kb_results=[])
-    events, res = _run(**_base(mode="plan_execute", use_knowledge=True, use_search=False))
+    events, res = _run(**_base(mode="plan_execute", use_knowledge=True, use_search=False,
+                               skip_search_prompt=True))
     plan_ev = next(e for e in events if e["event"] == "plan")
     assert plan_ev["steps"] == []  # web_search 未启用被过滤
     assert "tool" not in _kinds(events)  # 无可执行步骤
+    assert "need_search" not in _kinds(events)  # 拒绝后不再询问
     assert res["status"] == "ok"
+
+
+# ============================================
+# 联网授权门：计划后、执行前 HITL（需求：不再等整轮答完才判断）
+# ============================================
+def test_plan_web_step_pauses_for_authorization_before_execution(monkeypatch):
+    plan = json.dumps({"steps": [
+        {"tool": "search_knowledge", "args": {"query": "失眠 调理"}, "purpose": "检索知识库调理资料"},
+        {"tool": "web_search", "args": {"query": "失眠 运动方案"}, "purpose": "补充运动方案"}]})
+    _setup(monkeypatch, [plan, "不应生成的回答"],
+           kb_results=[("失眠调理", {"wiki_title": "失眠"}, 0.8)])
+    saved = []
+    monkeypatch.setattr(chat_agent.retrieval_reuse, "save_pending_plan",
+                        lambda **kw: saved.append(kw) or True)
+    events, res = _run(**_base(mode="plan_execute", query="帮我规划3个月的调理方案", session_id="s1"))
+    kinds = _kinds(events)
+    assert "plan" in kinds and "need_search" in kinds
+    assert "tool" not in kinds  # 计划已呈现但步骤一个都未执行
+    assert "token" not in kinds  # 未生成回答（不白跑一轮）
+    plan_ev = next(e for e in events if e["event"] == "plan")
+    web_step = next(s for s in plan_ev["steps"] if s["tool"] == "web_search")
+    assert web_step["needs_auth"] is True
+    assert res["status"] == "hitl" and res["hitl"] == "need_search"
+    # 待授权计划已暂存，供授权后免重规划续跑
+    assert saved and [s["tool"] for s in saved[0]["steps"]] == ["search_knowledge", "web_search"]
+
+
+def test_plan_resume_authorized_skips_replanning(monkeypatch):
+    pending = [{"tool": "search_knowledge", "args": {"query": "失眠"}, "purpose": "检索知识库"},
+               {"tool": "web_search", "args": {"query": "失眠 运动"}, "purpose": "补充联网运动"}]
+    _setup(monkeypatch, ["结合知识库与联网资料的方案[来源 1]"],
+           kb_results=[("失眠调理", {"wiki_title": "失眠"}, 0.8)],
+           format_ret=("失眠调理[来源 1]", [{"index": 1, "wiki_title": "失眠"}]))
+    skips = []
+    monkeypatch.setattr(chat_agent.obs, "record_skip", lambda name, reason="": skips.append(name))
+    events, res = _run(**_base(mode="plan_execute", use_search=True, pending_plan_steps=pending))
+    assert "plan" in _kinds(events)
+    assert "沿用已确认的计划" in json.dumps(events, ensure_ascii=False)
+    assert "正在规划解题步骤" not in json.dumps(events, ensure_ascii=False)
+    assert "plan" in skips  # 免重规划
+    tools = [e for e in events if e["event"] == "tool"]
+    assert [(t["tool"], t["state"]) for t in tools] == [
+        ("search_knowledge", "start"), ("search_knowledge", "end"),
+        ("web_search", "start"), ("web_search", "end")]
+    assert res["status"] == "ok" and res["answer"]
+
+
+def test_plan_resume_denied_drops_web_steps(monkeypatch):
+    pending = [{"tool": "search_knowledge", "args": {"query": "失眠"}, "purpose": "检索知识库"},
+               {"tool": "web_search", "args": {"query": "失眠 运动"}, "purpose": "补充联网运动"}]
+    _setup(monkeypatch, ["仅基于知识库的回答[来源 1]"],
+           kb_results=[("失眠调理", {"wiki_title": "失眠"}, 0.8)],
+           format_ret=("失眠调理[来源 1]", [{"index": 1, "wiki_title": "失眠"}]))
+    events, res = _run(**_base(mode="plan_execute", skip_search_prompt=True, pending_plan_steps=pending))
+    plan_ev = next(e for e in events if e["event"] == "plan")
+    assert [s["tool"] for s in plan_ev["steps"]] == ["search_knowledge"]  # 拒绝后剔除联网步骤
+    tools = [e for e in events if e["event"] == "tool"]
+    assert {t["tool"] for t in tools} == {"search_knowledge"}
+    assert "need_search" not in _kinds(events)
+    assert res["status"] == "ok" and res["answer"]
+
+
+def test_react_web_proposal_pauses_for_authorization(monkeypatch):
+    _setup(monkeypatch,
+           ['{"action":"tool","tool":"web_search","args":{"query":"运动方案"}}', "不应生成"],
+           kb_results=[("失眠调理", {"wiki_title": "失眠"}, 0.8)])
+    events, res = _run(**_base(query="帮我规划运动方案"))
+    assert "need_search" in _kinds(events)
+    assert "tool" not in _kinds(events)  # 工具执行前拦截
+    assert "token" not in _kinds(events)
+    assert res["status"] == "hitl" and res["hitl"] == "need_search"
 
 
 # ============================================

@@ -43,6 +43,7 @@ from app.services import tool_orchestrator
 from app.services.tools import router as tool_router
 from app.services.web_search import web_search
 from app.services import chat_agent
+from app.services import retrieval_reuse
 from app.services import capability_gap
 from app.services.gateway.semantic_cache import resolve_scope
 from app.core.query_complexity import classify_complexity
@@ -362,6 +363,7 @@ class ChatService:
         force_refresh: bool = False,
         command: str = "",
         resume_checkpoint_id: str = "",
+        reuse_retrieval: bool = False,
     ) -> AsyncGenerator[str, None]:
         """流式聊天（外层负责可观测性追踪：一次提问 = 一条 trace）
 
@@ -394,6 +396,7 @@ class ChatService:
             session_id, query, use_knowledge, use_search,
             llm_provider, user_id, attachments, kb_id, tasks, rule_id,
             skip_search_prompt, model, force_refresh, command, resume_checkpoint_id,
+            reuse_retrieval,
         ), deadline)
         try:
             async for event in iterator:
@@ -503,6 +506,7 @@ class ChatService:
         force_refresh: bool = False,
         command: str = "",
         resume_checkpoint_id: str = "",
+        reuse_retrieval: bool = False,
     ) -> AsyncGenerator[str, None]:
         """流式聊天内层主流程（检索/搜索/工具/生成各环节记录 trace span）"""
         logger.info("开始处理聊天: session=%s, query=%.50s, knowledge=%s, search=%s",
@@ -638,8 +642,9 @@ class ChatService:
                 yield f"data: {self._json_event('status', {'phase': 'ocr_retrieval', 'message': f'已识别图片文字（{len(ocr_excerpt)} 字），将结合图中内容检索作答', 'ocr_chars': len(ocr_excerpt)})}\n\n"
 
         # 3. 构建 LLM 消息列表（前缀缓存分区装配）：
-        #    静态头 → U 区画像/Skill（半静态）→ C 区摘要+冻结历史 → D 区工具上下文/相关记忆 → 用户提问。
-        #    每轮变化的内容（相关记忆/OCR/知识上下文）一律置尾，避免污染头部前缀。
+        #    静态头 → Skill（半静态）→ C 区摘要+冻结历史（追加式·前缀主体）→ U 区画像
+        #    → D 区工具上下文/相关记忆 → 用户提问。
+        #    每轮变化的内容（画像/相关记忆/OCR/知识上下文）一律置尾，避免污染头部+历史前缀。
         # 统一走网关 chat_answer 业务路由（规则+模型由网关解析；llm_provider 参数已废弃）
         # model 为聊天页用户显式选择的模型（空=按业务路由/规则内均衡解析）
         # 聊天模型延迟创建：探针命中/Agent 分流/个人工具轮均不需要该客户端，
@@ -709,8 +714,8 @@ class ChatService:
             sections.append(f"相关记忆:\n{relevant_text}")
         if sections:
             memory_text = "\n".join(sections)
-        # U 区：画像卡紧跟静态头（同用户跨会话稳定）；相关记忆属 D 区，延后到历史之后注入
-        llm_messages.extend(chat_agent._profile_messages(profile_text))
+        # U 区画像卡延后到历史之后注入（见 C 区下方）：自动抽取每轮可能重写画像，
+        # 若置于历史之前会连带失效追加式历史的大前缀（前缀缓存整改 P0-2）
 
         # 已启用的用户 Skill（prompt 类）注入：用户可在侧边栏「Skill 配置」定制并开关
         skills_text = skill_service.build_prompt_text(user_id)
@@ -783,6 +788,8 @@ class ChatService:
         history_ctx = history_messages[:-1] if history_messages else []
         llm_messages.extend(history_ctx)
         obs.note_segment("history", "\n".join(m.get("content", "") for m in history_ctx))
+        # U 区：画像卡在追加式历史之后、工具/相关记忆之前——画像被重写只失效尾部小段
+        llm_messages.extend(chat_agent._profile_messages(profile_text))
 
         if runtime_skill["context"]:
             llm_messages.append({"role": "system", "content": runtime_skill["context"]})
@@ -832,6 +839,13 @@ class ChatService:
                     fail_trace=False,
                 )
             if mode in ("react", "plan_execute"):
+                # 检索快照复用（开启联网后重发同一问题）：沿用上一轮知识检索产物，不重复检索
+                agent_reuse = (retrieval_reuse.load(session.session_id, user_id, query)
+                               if (reuse_retrieval and use_knowledge) else None)
+                # 待授权计划续跑：上一轮在「计划后、执行前」暂停询问联网授权，
+                # 本轮用户授权（use_search）或拒绝（skip_search_prompt）→ 免重规划续跑
+                agent_pending = (retrieval_reuse.take_pending_plan(session.session_id, user_id, query)
+                                 if (use_search or skip_search_prompt) else None)
                 agent_result = {
                     "status": "ok", "answer": "", "sources": [],
                     "search_results": [], "hitl": None, "error": "",
@@ -849,6 +863,8 @@ class ChatService:
                         result=agent_result,
                         instruction_text=instruction_text,
                         skill_distill=skill_distill, request_id=user_msg.message_id, force_refresh=force_refresh,
+                        retrieval_reuse_snapshot=agent_reuse,
+                        pending_plan_steps=agent_pending,
                     ):
                         yield ev
                 except (asyncio.CancelledError, GeneratorExit):
@@ -908,6 +924,12 @@ class ChatService:
         kb_has_content = False
         search_context = ""
         search_failed = False
+        # 检索快照复用：同一会话同一问题上一轮已检索过知识（如能力受限卡「开启联网后重发」），
+        # 直接沿用上一轮上下文/来源，跳过检索、重排与证据校验；无快照/过期则回落正常检索。
+        reuse_snapshot = (retrieval_reuse.load(session.session_id, user_id, query)
+                          if (reuse_retrieval and use_knowledge and not force_refresh
+                              and not realtime_direct and not attachments)
+                          else None)
         # 意图识别产出的缓存域标签（公共/个人）；默认 personal（安全），
         # 启用知识库时由 analyze_intent 覆盖，作为网关语义缓存的键之一。
         # （探针 eligible 的轮次已在 2.7 提前完成改写，此处直接复用）
@@ -938,6 +960,24 @@ class ChatService:
                 obs.record_skip("rerank", "实时任务直调工具，跳过重排序")
                 obs.record_skip("evidence_check", "实时任务直调工具，跳过证据校验")
                 yield f"data: {self._json_event('status', {'phase': 'retrieval_skipped', 'message': '实时查询直接调用工具，已跳过知识检索/重排序/证据校验'})}\n\n"
+            elif reuse_snapshot:
+                # 复用上一轮检索产物：不重跑 embedding/rerank/证据校验，来源编号与上一轮一致
+                context_text = reuse_snapshot.get("context_text") or ""
+                sources = list(reuse_snapshot.get("sources") or [])
+                kb_has_content = bool(context_text.strip())
+                evidence_sufficient = kb_has_content
+                obs.record_skip("knowledge_retrieve", "复用上一轮检索快照，跳过重复知识检索")
+                obs.record_skip("rerank", "复用上一轮检索快照，跳过重排序")
+                obs.record_skip("evidence_check", "复用上一轮检索快照，跳过证据校验")
+                obs.record_tool_routing(
+                    tool_name="search_knowledge", namespace="retrieval", user_id=user_id,
+                    session_id=session.session_id, routed_by="retrieval_reuse",
+                    args={"query": (search_query or effective_query)[:200]}, risk_level="low",
+                    status="ok", success=kb_has_content,
+                )
+                yield f"data: {self._json_event('status', {'phase': 'retrieval_reused', 'reused': True, 'message': f'已复用上一轮知识检索结果（{len(sources)} 份来源），本轮不重复检索', 'sources': sources})}\n\n"
+                if kb_has_content:
+                    obs.note_segment("knowledge", context_text)
             else:
                 retrieve_task = asyncio.create_task(
                     asyncio.to_thread(knowledge_service.retrieve_for_user, search_query, user_id)
@@ -1016,6 +1056,14 @@ class ChatService:
                     obs.note_segment("knowledge", context_text)
                     # 发出检索完成信号
                     yield f"data: {self._json_event('status', {'phase': 'retrieved', 'message': f'检索到 {len(sources)} 份相关知识文档', 'sources': sources})}\n\n"
+                    # 检索快照写入：供下一轮（如开启联网后重发）直接复用，不重复检索
+                    retrieval_reuse.save(
+                        session_id=session.session_id, user_id=user_id, query=query, mode="fast",
+                        kb_results=results, sources=sources, context_text=context_text,
+                        steps=[{"purpose": "检索知识库相关资料",
+                                "query": (search_query or effective_query)[:120],
+                                "summary": f"检索到 {len(results)} 条相关片段"}],
+                    )
             # KB 无命中的提示词构造延后到搜索结果已知后统一决策（避免过早注入「知识库未收录」）
 
         # 等待联网搜索结果

@@ -50,6 +50,9 @@ class ChatRequest(BaseModel):
     command: str = Field(default="", max_length=16)
     # 整改4：继续中途停止的任务（checkpoint id，空=普通新提问）
     resume_checkpoint_id: Optional[str] = None
+    # 检索快照复用：能力受限卡「开启联网搜索并重新提问」等同一问题重发场景置真，
+    # 命中 TTL 内的上一轮知识检索快照时跳过重复检索/重排，只补联网缺口
+    reuse_retrieval: bool = False
 
 
 class ConfirmChatActionRequest(BaseModel):

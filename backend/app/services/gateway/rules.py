@@ -493,6 +493,48 @@ def primary_backup_fallback_model(rule_row: dict, model: str,
     return None
 
 
+def request_fallback_model(rule_row: dict, model: str, failed_ids,
+                           category: Optional[str] = None) -> Optional[str]:
+    """请求内主备兜底：本次请求已失败的上游视同失效（不等跨请求 fail_count 阈值）。
+
+    场景：备路由不支持请求模型 → 选路阶段候选被过滤剩主路由；主路由超时/失败后
+    若无此兜底，请求内切换永远没有第二候选。返回健康备上游支持的兜底模型；
+    健康备仍支持原模型 / 非 primary_backup / 无健康备时返回 None。
+    """
+    if (rule_row.get("lb_strategy") or "") != "primary_backup" or not model:
+        return None
+    failed_ids = {str(i) for i in (failed_ids or [])}
+    raw_ups = rule_row.get("upstreams")
+    up_ids = raw_ups if isinstance(raw_ups, list) else _parse_json(raw_ups, [])
+    by_id = {r["id"]: r for r in db.query("SELECT * FROM gateway_upstreams WHERE enabled=1")}
+    ups = [by_id[i] for i in up_ids if i in by_id]
+    if category:
+        ups = [u for u in ups if (u.get("category") or "llm") == category]
+    threshold = max(1, int(rule_row.get("failover_threshold") or 3))
+
+    def _failed(u: dict) -> bool:
+        return (u["id"] in failed_ids
+                or int(u.get("fail_count") or 0) >= threshold
+                or (u.get("health") or "healthy") in _OPEN_HEALTH_STATES)
+
+    failed = [u for u in ups if _failed(u)]
+    healthy = [u for u in ups if not _failed(u)]
+    if not failed or not healthy:
+        return None
+    if any(_upstream_supports(h, model) for h in healthy):
+        return None
+    if not any(_upstream_supports(f, model) for f in failed):
+        return None
+    from app.services.gateway import settings as settings_svc
+    candidates = [(settings_svc.get_settings().get("default_model") or "").strip()]
+    for h in healthy:
+        candidates += [str(m).strip() for m in _parse_json(h.get("models"), [])]
+    for m in candidates:
+        if m and m != model and any(_upstream_supports(h, m) for h in healthy):
+            return m
+    return None
+
+
 def promote_failed_primary(rule_row: dict) -> Optional[dict]:
     """整改3：主备规则的主路由失效且存在健康备时，把备升主并持久化到 gateway_rules。
 

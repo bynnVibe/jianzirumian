@@ -111,6 +111,7 @@ export function sendChatMessageWithFiles(params, files, signal) {
   form.append('skip_search_prompt', String(!!params.skip_search_prompt))
   form.append('force_refresh', String(!!params.force_refresh))
   form.append('command', params.command || '')
+  form.append('reuse_retrieval', String(!!params.reuse_retrieval))
   for (const file of files || []) {
     form.append('files', file)
   }

@@ -206,7 +206,8 @@ async def token_analysis(days: int = 7, range: str = "days",
                          _ops: dict = Depends(require_ops)):
     """Token 用量分析（两源合并，自可观测性迁移）：
 
-    - 网关侧：请求日志总览/每日趋势/按密钥（prompt/completion/总量/风险）/按模型/渠道；
+    - 网关侧：请求日志总览/每日趋势/按密钥（输入/输出/命中缓存/未命中缓存/总量/风险）
+      /按模型（四维度，厂商 usage 为准）/渠道/业务路由（role，含已归属用户数）；
     - 密钥配额：token_quota/token_used/remaining 水位；
     - Agent 侧：复用 obs.metrics() 的 token_comparison/segment_breakdown 段构成口径。
     """
@@ -231,7 +232,7 @@ async def token_analysis(days: int = 7, range: str = "days",
         "gateway": {
             "overview": gw["overview"], "daily": gw["daily"],
             "by_key": gw["by_key"], "by_model": gw["by_model"],
-            "by_channel": gw["by_channel"],
+            "by_channel": gw["by_channel"], "by_role": gw.get("by_role", []),
         },
         "keys_quota": quota,
         "agent": {
@@ -245,16 +246,16 @@ async def token_analysis(days: int = 7, range: str = "days",
 
 
 @router.get("/token-requests")
-async def token_requests(days: int = 7, model: str = "", channel: str = "",
+async def token_requests(days: int = 7, model: str = "", channel: str = "", role: str = "",
                          _ops: dict = Depends(require_ops)):
-    """Token 分析钻取：某模型 / 某渠道（路由规则）在时间窗内每次请求的 Token 明细。
+    """Token 分析钻取：某模型 / 某渠道（路由规则）/ 某业务角色在时间窗内每次请求的 Token 明细。
 
-    供 Token 分析面板「按模型 / 按渠道」表格行点击钻取；model 与 channel 二选一，
-    均按精确匹配（与 token-analysis 的 by_model/by_channel 聚合口径一致）。
+    供 Token 分析面板「按模型 / 按渠道 / 按业务路由」表格行点击钻取；model / channel / role
+    三选一，均按精确匹配（与 token-analysis 的 by_model/by_channel/by_role 聚合口径一致）。
     """
     import asyncio
     data = await asyncio.to_thread(
-        log_svc.token_requests, max(1, min(days, 90)), model, channel)
+        log_svc.token_requests, max(1, min(days, 90)), model, channel, 200, role)
     return {"success": True, **data}
 
 

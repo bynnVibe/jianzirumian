@@ -27,6 +27,7 @@ from datetime import datetime, timedelta
 from typing import List, Optional
 
 from app.config import settings
+from app.core import call_context
 from app.core import db
 from app.core.llm import LLMFactory
 
@@ -654,12 +655,20 @@ async def run_round() -> dict:
     sampled = [t for t in candidates if random.random() < rate][:cap]
     evaluated = 0
     for trace in sampled:
+        # 裁判 LLM 出网归属被评测 trace 的发起用户（周期任务无请求上下文）
+        uid = str(trace.get("user_id") or "")
+        ctx_token = call_context.activate(
+            actor_user_id=uid, origin="background",
+            job_id=str(trace.get("id") or "")) if uid else None
         try:
             row = await _eval_trace_row(trace)
             if row.get("status") == "ok":
                 evaluated += 1
         except Exception as e:
             logger.warning("[Agent在线] 单条评测异常（跳过）: %s", e)
+        finally:
+            if ctx_token is not None:
+                call_context.deactivate(ctx_token)
     new_cursor = max(t.get("started_at") or "" for t in candidates)
     if new_cursor > cursor:
         runtime_config.set(_CURSOR_KEY, new_cursor)

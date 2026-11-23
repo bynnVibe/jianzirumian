@@ -10,11 +10,12 @@
     <!-- DeepSeek 式降级：只给应用内动作建议，绝不要求用户执行命令 -->
     <div v-if="suggestions.length" class="gap-actions">
       <button v-for="s in suggestions" :key="s.id" class="gap-btn"
-              :class="{ primary: s.id === 'enable_search' }"
-              :disabled="store.isGenerating" @click="act(s)">
-        {{ s.label }}
+              :class="{ primary: s.id === 'enable_search' && !resolved, resolved }"
+              :disabled="store.isGenerating || resolved" @click="act(s)">
+        {{ buttonLabel(s) }}
       </button>
     </div>
+    <p v-if="resolved" class="gap-resolved-note">该动作已执行，本轮已结合联网搜索重新作答，无需重复点击。</p>
   </section>
 </template>
 
@@ -31,6 +32,8 @@ const store = useChatStore()
 const DEFAULT_MESSAGE = '抱歉，当前能力不足以直接回答这类实时问题。开启「联网搜索」后重新提问，我可以结合网络信息作答。'
 
 const message = computed(() => props.gap.message || DEFAULT_MESSAGE)
+// 动作已执行（开启联网并重新提问）：卡片按钮标灰不可点，避免重复重发与重复检索
+const resolved = computed(() => !!props.gap.resolved)
 const suggestions = computed(() => {
   const list = Array.isArray(props.gap.suggestions) ? props.gap.suggestions : []
   if (list.length) return list
@@ -38,7 +41,20 @@ const suggestions = computed(() => {
   return [{ id: 'enable_search', label: '开启联网搜索并重新提问' }]
 })
 
+const RESOLVED_LABELS = {
+  enable_search: '已开启联网搜索并重新提问',
+  retry: '已重新提问',
+}
+
+function buttonLabel(s) {
+  if (resolved.value && s.id === (props.gap.resolved_action || 'enable_search')) {
+    return RESOLVED_LABELS[s.id] || `已执行：${s.label}`
+  }
+  return s.label
+}
+
 function act(s) {
+  if (resolved.value || store.isGenerating) return
   if (s.id === 'enable_search') emit('enable-search', props.gap.query || '')
   else if (s.id === 'retry') emit('retry', props.gap.query || '')
 }
@@ -125,5 +141,19 @@ function act(s) {
 .gap-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/* 动作已执行：标灰不可点（与生成中的临时禁用区分） */
+.gap-btn.resolved {
+  color: #9a9186;
+  background: #f4f1ec;
+  border-color: #e2dcd2;
+  opacity: 1;
+}
+
+.gap-resolved-note {
+  font-size: 11.5px;
+  color: #9a8b78;
+  margin: 6px 0 0;
 }
 </style>

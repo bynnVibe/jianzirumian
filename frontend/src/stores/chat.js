@@ -210,6 +210,7 @@ export const useChatStore = defineStore('chat', () => {
               force_refresh: !!options.forceRefresh,
               command: options.command || '',
               resume_checkpoint_id: options.resumeCheckpointId || '',
+              reuse_retrieval: !!options.reuseRetrieval,
             },
             files,
             requestController.signal,
@@ -225,6 +226,7 @@ export const useChatStore = defineStore('chat', () => {
             force_refresh: !!options.forceRefresh,
             command: options.command || '',
             resume_checkpoint_id: options.resumeCheckpointId || '',
+            reuse_retrieval: !!options.reuseRetrieval,
           }, requestController.signal)
 
       await consumeChatStream(response, data => {
@@ -351,7 +353,7 @@ export const useChatStore = defineStore('chat', () => {
         break
 
       case 'need_search':
-        // HITL：知识库无结果、未开联网 → 弹卡询问是否联网搜索
+        // HITL：知识库无结果或计划含联网步骤（执行前授权）→ 弹卡询问是否联网搜索
         pushHitlMessage({
           type: 'need_search',
           query: data.query || '',
@@ -453,7 +455,12 @@ export const useChatStore = defineStore('chat', () => {
     } else {
       const last = [...agentTools.value].reverse().find((x) => (data.call_id ? x.call_id === data.call_id : x.tool === data.tool) && x.state === 'start')
       const terminal = { tool: data.tool, call_id: data.call_id || '', state: 'end', summary: data.summary || '', failed: !!data.failed,
+        reused: !!data.reused,
         elapsed_ms: data.elapsed_ms, execution_status: data.execution_status, validation_status: data.validation_status, requirement_status: data.requirement_status }
+      // 复用步骤只有 end 事件：序号/步骤说明随终态一并记录；普通步骤 end 不带说明时不覆盖 start 已记的值
+      if (data.index !== undefined && data.index !== null) terminal.index = data.index
+      if (data.total !== undefined && data.total !== null) terminal.total = data.total
+      if (data.purpose) terminal.purpose = data.purpose
       if (last) Object.assign(last, terminal)
       else agentTools.value.push(terminal)
     }
@@ -465,17 +472,24 @@ export const useChatStore = defineStore('chat', () => {
     const prev = useSearch.value
     useSearch.value = true
     try {
-      await sendMessage(query || '')
+      // 同一问题重发：命中上一轮检索快照时不重复知识检索，只补联网缺口
+      await sendMessage(query || '', [], { reuseRetrieval: true })
     } finally {
       useSearch.value = prev
     }
   }
 
-  /** 能力受限卡「开启联网搜索并重新提问」：持久开启联网开关后重发原问题 */
-  async function enableSearchAndResend(query) {
+  /** 能力受限卡「开启联网搜索并重新提问」：持久开启联网开关后重发原问题，
+   *  动作一旦发起即标记卡片已处理（按钮标灰不可点），并携带检索复用标记避免重复检索 */
+  async function enableSearchAndResend(query, gap = null) {
     if (isGenerating.value || !query) return
+    if (gap && gap.resolved) return
     useSearch.value = true
-    await sendMessage(query)
+    if (gap) {
+      gap.resolved = true
+      gap.resolved_action = 'enable_search'
+    }
+    await sendMessage(query, [], { reuseRetrieval: true })
   }
 
   /** HITL「直接回答」：带 skip_search_prompt 重发，不再询问、用模型自身知识作答 */

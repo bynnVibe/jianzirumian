@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>见字如面 · 简历项目介绍</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='10' fill='%23b3342e'/%3E%3Ctext x='32' y='44' font-size='34' text-anchor='middle' fill='%23f6efe3' font-family='serif'%3E印%3C/text%3E%3C/svg%3E">
+<style>
+:root{
+  --desk:#171310; --desk-2:#241d18; --desk-line:#3a2f26; --desk-ink:#ece4d6; --desk-mut:#a89a86;
+  --cinnabar:#b3342e; --cinnabar-l:#e0685f; --indigo:#2b4a8b; --indigo-l:#7fa0e0;
+  --pine:#2f6b4f; --pine-l:#79b899; --amber:#b07a1f; --amber-l:#e0b054;
+  --ok:#2f6b4f; --warn:#b07a1f; --danger:#b3342e; --info:#2b4a8b;
+  --accent:var(--cinnabar); --accent-l:var(--cinnabar-l);
+  --paper-bg:#f6efe3; --paper-ink:#211a13; --paper-mut:#6b5f4f; --paper-line:#d8cbb4;
+  --fs:14px; --lh:1.85; --pw:780px;
+  --nav-h:64px;
+  --ui:"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  --song:"Songti SC","STSong","SimSun","Noto Serif SC",serif;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  font-family:var(--ui); background:var(--desk); color:var(--desk-ink);
+  min-height:100vh; overflow-x:hidden; position:relative;
+}
+body::before{
+  content:""; position:fixed; inset:0; z-index:-2; pointer-events:none;
+  background:
+    radial-gradient(900px 520px at 12% -6%, rgba(179,52,46,.20), transparent 62%),
+    radial-gradient(820px 560px at 88% 12%, rgba(43,74,139,.18), transparent 60%),
+    radial-gradient(700px 700px at 55% 108%, rgba(176,122,31,.12), transparent 62%),
+    linear-gradient(180deg,#1a1512 0%, #171310 40%, #14100d 100%);
+}
+body::after{
+  content:""; position:fixed; inset:0; z-index:-1; pointer-events:none; opacity:.06;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+.mote{position:fixed;border-radius:50%;pointer-events:none;z-index:0;filter:blur(1px);opacity:.35;animation:drift linear infinite}
+@keyframes drift{0%{transform:translate3d(0,0,0)}25%{transform:translate3d(28px,-46px,0)}50%{transform:translate3d(-20px,-92px,0)}75%{transform:translate3d(16px,-140px,0)}100%{transform:translate3d(0,-190px,0);opacity:0}}
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-track{background:#14100d}
+::-webkit-scrollbar-thumb{background:#4a3b2d;border-radius:8px;border:2px solid #14100d}
+::-webkit-scrollbar-thumb:hover{background:var(--accent)}
+*{scrollbar-width:thin;scrollbar-color:#4a3b2d #14100d}
+
+/* ── 顶部导航 ─────────────────────────── */
+nav{
+  position:fixed;top:0;left:0;right:0;height:var(--nav-h);z-index:50;
+  display:flex;align-items:center;gap:20px;padding:0 24px;
+  background:rgba(23,19,16,.82);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);
+  border-bottom:1px solid var(--desk-line);
+}
+.brand{display:flex;align-items:center;gap:10px;font-weight:700;letter-spacing:.06em;white-space:nowrap}
+.brand .seal{width:30px;height:30px;border-radius:7px;background:var(--accent);color:#f6efe3;display:grid;place-items:center;font-family:var(--song);font-size:17px;box-shadow:0 2px 10px rgba(179,52,46,.4);transition:transform .3s}
+.brand:hover .seal{transform:rotate(-6deg)}
+.brand small{color:var(--desk-mut);font-weight:400;letter-spacing:.12em}
+.nav-links{display:flex;gap:4px;margin-left:auto}
+.nav-links a{
+  color:var(--desk-mut);text-decoration:none;font-size:13.5px;padding:7px 12px;border-radius:8px;
+  border:1px solid transparent;transition:.25s;white-space:nowrap;
+}
+.nav-links a:hover{color:var(--desk-ink);background:#2c241d}
+.nav-links a[aria-current="true"]{color:var(--accent-l);border-color:var(--desk-line);background:#2c241d}
+.btn{
+  cursor:pointer;border:1px solid var(--desk-line);background:#2c241d;color:var(--desk-ink);
+  font-family:var(--ui);font-size:13px;padding:8px 14px;border-radius:9px;transition:.22s;white-space:nowrap;
+}
+.btn:hover{border-color:var(--accent);color:var(--accent-l);transform:translateY(-1px)}
+.btn:active{transform:translateY(0) scale(.98)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff8ef;font-weight:600;box-shadow:0 3px 14px rgba(179,52,46,.35)}
+.btn.primary:hover{filter:brightness(1.12);color:#fff}
+
+/* ── 报头 ─────────────────────────── */
+header.mast{max-width:1280px;margin:0 auto;padding:calc(var(--nav-h) + 46px) 24px 30px;position:relative}
+.mast h1{font-family:var(--song);font-size:clamp(34px,5vw,54px);font-weight:900;letter-spacing:.08em;line-height:1.2}
+.mast h1 em{font-style:normal;color:var(--accent-l)}
+.mast .sub{margin-top:10px;color:var(--desk-mut);font-size:14.5px;letter-spacing:.14em}
+.mast .stamp{
+  position:absolute;right:26px;top:calc(var(--nav-h) + 40px);width:74px;height:74px;border-radius:12px;
+  background:var(--accent);color:#f8f1e4;font-family:var(--song);font-weight:700;font-size:24px;line-height:1.15;
+  display:grid;place-items:center;text-align:center;transform:rotate(6deg);
+  box-shadow:0 6px 24px rgba(0,0,0,.45), inset 0 0 0 3px rgba(248,241,228,.85), inset 0 0 0 5px var(--accent);
+  transition:transform .35s;user-select:none;
+}
+.mast .stamp:hover{transform:rotate(-3deg) scale(1.05)}
+.chips{display:flex;flex-wrap:wrap;gap:10px;margin-top:22px}
+.chip{font-size:12.5px;padding:6px 12px;border-radius:999px;border:1px solid var(--desk-line);background:#221b16;color:var(--desk-ink);letter-spacing:.04em}
+.chip b{color:var(--accent-l);font-weight:700;margin-right:4px}
+.chip.c-ok b{color:var(--pine-l)} .chip.c-info b{color:var(--indigo-l)} .chip.c-warn b{color:var(--amber-l)}
+
+/* ── 工作台 + 纸面 ─────────────────────────── */
+.lab{max-width:1280px;margin:0 auto;padding:6px 24px 40px;display:grid;grid-template-columns:316px minmax(0,1fr);gap:28px;align-items:start;position:relative;z-index:1}
+.bench{
+  position:sticky;top:calc(var(--nav-h) + 16px);max-height:calc(100vh - var(--nav-h) - 32px);overflow-y:auto;
+  background:var(--desk-2);border:1px solid var(--desk-line);border-radius:16px;padding:20px 18px;
+  box-shadow:0 12px 40px rgba(0,0,0,.4);
+}
+.bench h2{font-size:13px;letter-spacing:.22em;color:var(--desk-mut);font-weight:600;display:flex;align-items:center;gap:8px;margin-bottom:14px}
+.bench h2::after{content:"";flex:1;height:1px;background:var(--desk-line)}
+.ctl{margin-bottom:15px}
+.ctl label{display:flex;justify-content:space-between;align-items:baseline;font-size:12.5px;color:var(--desk-ink);margin-bottom:7px;letter-spacing:.05em}
+.ctl label output{color:var(--accent-l);font-variant-numeric:tabular-nums;font-size:12px}
+.ctl select{
+  width:100%;background:#1a1512;color:var(--desk-ink);border:1px solid var(--desk-line);border-radius:9px;
+  padding:8px 10px;font-family:var(--ui);font-size:13px;outline:none;cursor:pointer;
+}
+.ctl select:focus{border-color:var(--accent)}
+input[type=range]{width:100%;appearance:none;-webkit-appearance:none;height:4px;border-radius:4px;background:#4a3b2d;outline:none;cursor:pointer}
+input[type=range]::-webkit-slider-thumb{appearance:none;-webkit-appearance:none;width:16px;height:16px;border-radius:50%;background:var(--accent);border:2px solid #f6efe3;box-shadow:0 1px 6px rgba(0,0,0,.5);transition:transform .15s}
+input[type=range]::-webkit-slider-thumb:hover{transform:scale(1.2)}
+input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;background:var(--accent);border:2px solid #f6efe3;cursor:pointer}
+.swatches{display:flex;gap:9px}
+.swatch{width:30px;height:30px;border-radius:9px;cursor:pointer;border:2px solid transparent;transition:.2s;position:relative}
+.swatch:hover{transform:translateY(-2px)}
+.swatch[aria-pressed="true"]{border-color:#f6efe3;box-shadow:0 0 0 2px var(--accent)}
+.switchrow{display:flex;justify-content:space-between;align-items:center;font-size:12.5px;padding:7px 0;border-top:1px dashed var(--desk-line)}
+.switch{position:relative;width:38px;height:21px;flex:none;cursor:pointer}
+.switch input{opacity:0;width:0;height:0}
+.switch i{position:absolute;inset:0;border-radius:999px;background:#4a3b2d;transition:.25s}
+.switch i::before{content:"";position:absolute;width:15px;height:15px;border-radius:50%;left:3px;top:3px;background:#c9bda9;transition:.25s}
+.switch input:checked + i{background:var(--accent)}
+.switch input:checked + i::before{transform:translateX(17px);background:#fff8ef}
+.bench .row{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}
+.bench .row .btn{flex:1;text-align:center;padding:8px 6px;font-size:12.5px}
+.bench .hint{margin-top:12px;font-size:11.5px;color:var(--desk-mut);line-height:1.7}
+
+/* ── 简历纸面 ─────────────────────────── */
+.papers{display:flex;flex-direction:column;gap:30px;align-items:center;min-width:0}
+.paper-tag{align-self:flex-start;font-size:12px;letter-spacing:.18em;color:var(--desk-mut);display:flex;align-items:center;gap:8px}
+.paper-tag::before{content:"";width:8px;height:8px;border-radius:2px;background:var(--accent);transform:rotate(45deg)}
+.sheet{
+  width:min(var(--pw),100%);background:var(--paper-bg);color:var(--paper-ink);
+  font-family:var(--song);font-size:var(--fs);line-height:var(--lh);
+  padding:clamp(26px,4.5vw,52px) clamp(22px,4.5vw,56px);
+  border-radius:4px;position:relative;
+  box-shadow:0 1px 0 rgba(255,255,255,.08), 0 18px 50px rgba(0,0,0,.55), 0 4px 14px rgba(0,0,0,.4);
+  transition:background .35s,color .35s;
+}
+.sheet::before{content:"";position:absolute;inset:0;pointer-events:none;border-radius:4px;opacity:.5;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='p'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='2'/%3E%3CfeColorMatrix values='0 0 0 0 0.4 0 0 0 0 0.35 0 0 0 0 0.28 0 0 0 0.05 0'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23p)'/%3E%3C/svg%3E");}
+.sheet .head{display:flex;justify-content:space-between;align-items:baseline;gap:16px;flex-wrap:wrap;margin-bottom:.7em}
+.sheet .head .t{font-weight:900;font-size:1.14em;letter-spacing:.02em}
+.sheet .head .d{color:var(--paper-mut);font-weight:700;white-space:nowrap;font-size:.98em}
+.sheet .lead{font-weight:900}
+.sheet p{margin-bottom:.55em}
+.sheet ol{list-style:none}
+.sheet li{margin-bottom:.62em;padding-left:2.1em;position:relative}
+.sheet li .no{position:absolute;left:0;font-weight:700}
+.sheet strong{font-weight:900}
+.sheet u.key{text-decoration:none;border-bottom:1.5px solid var(--accent);padding-bottom:1px}
+body.no-ul .sheet u.key{border-bottom-color:transparent}
+body.no-b .sheet strong{font-weight:400}
+body.no-b .sheet .lead,body.no-b .sheet .head .t{font-weight:900}
+body.justify .sheet p,body.justify .sheet li{text-align:justify}
+.sheet .rule{height:1px;background:var(--paper-line);margin:.4em 0 .8em}
+
+/* ── 口径与追问 ─────────────────────────── */
+.notes{max-width:1280px;margin:0 auto;padding:10px 24px 70px;position:relative;z-index:1}
+.notes h2{font-family:var(--song);font-size:24px;letter-spacing:.1em;margin-bottom:6px}
+.notes .sub{color:var(--desk-mut);font-size:13px;margin-bottom:22px;letter-spacing:.06em}
+.note-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:16px}
+.note{
+  background:var(--desk-2);border:1px solid var(--desk-line);border-radius:14px;padding:18px;
+  transition:transform .25s,border-color .25s;position:relative;overflow:hidden;
+}
+.note:hover{transform:translateY(-3px);border-color:var(--accent)}
+.note::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--nc,var(--accent))}
+.note h3{font-size:14.5px;margin-bottom:8px;letter-spacing:.04em}
+.note h3 span{color:var(--nc,var(--accent-l));margin-right:6px}
+.note p{font-size:12.8px;color:var(--desk-mut);line-height:1.8}
+.note p b{color:var(--desk-ink)}
+.facts{display:flex;flex-wrap:wrap;gap:9px;margin-bottom:20px}
+.fact{font-size:12px;border:1px solid var(--desk-line);border-radius:9px;padding:7px 11px;background:#221b16;color:var(--desk-mut)}
+.fact b{color:var(--desk-ink);font-size:13px;margin-right:5px}
+.fact i{font-style:normal;color:var(--accent-l)}
+
+footer{border-top:1px solid var(--desk-line);padding:22px 24px 30px;text-align:center;color:var(--desk-mut);font-size:12px;letter-spacing:.14em}
+
+/* ── 入场 / 提示 ─────────────────────────── */
+.reveal{opacity:0;transform:translateY(22px);transition:opacity .7s ease,transform .7s ease}
+.reveal.on{opacity:1;transform:none}
+#toast{
+  position:fixed;left:50%;bottom:30px;transform:translate(-50%,20px);z-index:99;opacity:0;pointer-events:none;
+  background:var(--accent);color:#fff8ef;font-size:13px;padding:10px 20px;border-radius:999px;
+  box-shadow:0 8px 30px rgba(0,0,0,.5);transition:.35s;letter-spacing:.05em;
+}
+#toast.show{opacity:1;transform:translate(-50%,0)}
+#sheetTop,#notes{scroll-margin-top:calc(var(--nav-h) + 14px)}
+
+@media (max-width:980px){
+  .lab{grid-template-columns:1fr}
+  .bench{position:static;max-height:none;order:2}
+  .papers{order:1}
+  .nav-links{display:none}
+  .mast .stamp{width:58px;height:58px;font-size:18px;right:18px}
+  .mast h1{padding-right:76px}
+}
+@media print{
+  body{background:#fff}
+  body::before,body::after,.mote,nav,header.mast,.bench,.notes,footer,#toast,.paper-tag{display:none!important}
+  .lab{display:block;padding:0;max-width:none}
+  .papers{gap:18px}
+  .sheet{box-shadow:none;width:100%;background:#fff!important;color:#000!important;border-radius:0;padding:10mm 12mm}
+  .sheet u.key{border-bottom-color:#000}
+  .sheet::before{display:none}
+}
+</style>
+</head>
+<body class="justify">
+<span class="mote" style="left:8%;top:70%;width:5px;height:5px;background:var(--cinnabar-l);animation-duration:16s"></span>
+<span class="mote" style="left:26%;top:85%;width:3px;height:3px;background:var(--amber-l);animation-duration:21s;animation-delay:2s"></span>
+<span class="mote" style="left:55%;top:90%;width:4px;height:4px;background:var(--indigo-l);animation-duration:18s;animation-delay:5s"></span>
+<span class="mote" style="left:78%;top:80%;width:3px;height:3px;background:var(--cinnabar-l);animation-duration:23s;animation-delay:1s"></span>
+<span class="mote" style="left:91%;top:65%;width:5px;height:5px;background:var(--pine-l);animation-duration:19s;animation-delay:7s"></span>
+
+<nav>
+  <a class="brand" href="#top" style="color:inherit;text-decoration:none">
+    <span class="seal">印</span>见字如面 <small>· 简历项目介绍</small>
+  </a>
+  <div class="nav-links">
+    <a href="#sheetTop" data-ver="full" aria-current="true">完整版</a>
+    <a href="#sheetTop" data-ver="compact">精简版</a>
+    <a href="#sheetTop" data-ver="both">双版对照</a>
+    <a href="#notes">口径与追问</a>
+  </div>
+  <button class="btn primary" id="navCopy">复制当前版本</button>
+</nav>
+
+<header class="mast" id="top">
+  <h1 class="reveal">把项目经历，排成<em>评审想看</em>的样子</h1>
+  <div class="sub reveal">「见字如面」手写笔记知识库智能问答 Agent 系统 · 面试简历用例 · 完整 / 精简双版</div>
+  <div class="stamp reveal">见字<br>如面</div>
+  <div class="chips reveal">
+    <span class="chip"><b>1000+</b>回归用例</span>
+    <span class="chip c-info"><b>15</b>网关业务角色</span>
+    <span class="chip c-ok"><b>5</b>层跨会话记忆</span>
+    <span class="chip c-warn"><b>3</b>级上下文压缩</span>
+    <span class="chip"><b>4</b>Ragas 评测指标</span>
+    <span class="chip c-info"><b>6</b>段 Token 度量</span>
+  </div>
+</header>
+
+<main class="lab">
+  <aside class="bench reveal" aria-label="排版工作台">
+    <h2>排版工作台</h2>
+    <div class="ctl">
+      <label>版本</label>
+      <select id="cVer">
+        <option value="full">完整版 · 五条负责内容</option>
+        <option value="compact">精简版 · 三行内描述</option>
+        <option value="both">双版对照</option>
+      </select>
+    </div>
+    <div class="ctl"><label>字号 <output id="oFs">14px</output></label>
+      <input type="range" id="cFs" min="12" max="18" step="0.5" value="14"></div>
+    <div class="ctl"><label>行距 <output id="oLh">1.85</output></label>
+      <input type="range" id="cLh" min="1.5" max="2.2" step="0.05" value="1.85"></div>
+    <div class="ctl"><label>页宽 <output id="oPw">780px</output></label>
+      <input type="range" id="cPw" min="640" max="920" step="10" value="780"></div>
+    <div class="ctl">
+      <label>纸面</label>
+      <select id="cPaper">
+        <option value="warm">暖纸 · 手写笔记底色</option>
+        <option value="white">素白 · 标准简历纸</option>
+        <option value="dark">墨黑 · 夜间审阅</option>
+      </select>
+    </div>
+    <div class="ctl">
+      <label>印章色（关键词下划线）</label>
+      <div class="swatches">
+        <button class="swatch" data-accent="cinnabar" style="background:#b3342e" aria-pressed="true" title="朱砂"></button>
+        <button class="swatch" data-accent="indigo" style="background:#2b4a8b" aria-pressed="false" title="黛蓝"></button>
+        <button class="swatch" data-accent="pine" style="background:#2f6b4f" aria-pressed="false" title="松绿"></button>
+        <button class="swatch" data-accent="amber" style="background:#b07a1f" aria-pressed="false" title="琥珀"></button>
+      </div>
+    </div>
+    <div class="switchrow">关键词下划线
+      <label class="switch"><input type="checkbox" id="cUl" checked><i></i></label></div>
+    <div class="switchrow">重点加粗
+      <label class="switch"><input type="checkbox" id="cB" checked><i></i></label></div>
+    <div class="switchrow">两端对齐
+      <label class="switch"><input type="checkbox" id="cJ" checked><i></i></label></div>
+    <div class="row">
+      <button class="btn" id="bReset">重置</button>
+      <button class="btn" id="bRand">随机配色</button>
+    </div>
+    <div class="row">
+      <button class="btn primary" id="bCopy">复制文本</button>
+      <button class="btn" id="bDown">下载 .txt</button>
+      <button class="btn" id="bPrint">打印</button>
+    </div>
+    <p class="hint">所有调整实时作用于右侧纸面；复制 / 下载返回当前版本的纯文本，可直接粘贴进 Word 简历。打印时自动切换为标准黑白简历纸。</p>
+  </aside>
+
+  <section class="papers" id="sheetTop" aria-label="简历纸面预览">
+    <div id="sheets" style="display:contents"></div>
+  </section>
+</main>
+
+<section class="notes" id="notes">
+  <h2 class="reveal">数据口径与面试追问</h2>
+  <div class="sub reveal">简历上的每个数字都可在仓库验证；被追问时按「结论 → 取舍 → 被否替代方案」展开。</div>
+  <div class="facts reveal">
+    <span class="fact"><b>15</b>业务角色 <i>gateway/rules.py ROLES</i></span>
+    <span class="fact"><b>4</b>上游类别 <i>llm / embedding / rerank / ocr</i></span>
+    <span class="fact"><b>72</b>测试文件 <i>backend/tests</i></span>
+    <span class="fact"><b>1063</b>测试用例 <i>def test_ 实测</i></span>
+    <span class="fact"><b>20→8</b>历史窗口轮数 <i>SESSION_MAX_HISTORY</i></span>
+    <span class="fact"><b>6000</b>token/请求告警基线 <i>TOKEN_AVG_WARN_PER_REQUEST</i></span>
+  </div>
+  <div class="note-grid">
+    <div class="note reveal" style="--nc:var(--cinnabar-l)"><h3><span>壹</span>门禁分层防死锁</h3>
+      <p><b>结论：</b>"评测通过才可用"门禁只加目录层，执行层 resolve 保持开放。<b>取舍：</b>评测自调用需解析未过评工具，门禁下沉会形成死锁。<b>被否：</b>resolve 统一加门禁、三处各自实现判定（多写点漂移）。</p></div>
+    <div class="note reveal" style="--nc:var(--indigo-l)"><h3><span>贰</span>双通道记忆保显式指令</h3>
+      <p><b>结论：</b>确定性规则层旁路 + LLM 层并行，"记住/忘记"类指令不依赖模型必定落库。<b>取舍：</b>模型判空不得整轮静默 return；互斥窗口只拦 LLM 层。<b>被否：</b>单 LLM 通道（故障即丢指令）。</p></div>
+    <div class="note reveal" style="--nc:var(--pine-l)"><h3><span>叁</span>真实 usage 校准分摊</h3>
+      <p><b>结论：</b>6 段 Token 估算占比以 LLM 真实 prompt_tokens 校准落库，构成口径与成本口径同维可比。<b>取舍：</b>无真实 usage 时 scale=1 退化估算，保证降级一致。<b>被否：</b>纯估算入库（与账单口径漂移）。</p></div>
+    <div class="note reveal" style="--nc:var(--amber-l)"><h3><span>肆</span>SSRF 规范化层拦截</h3>
+      <p><b>结论：</b>URL 抓取在规范化层拦主机名，DNS 解析仅作第二道防线。<b>取舍：</b>先拦后解析，避免解析窗口被利用。<b>被否：</b>仅靠 DNS 解析后校验（存在盲区）。</p></div>
+  </div>
+  <p class="sub reveal" style="margin-top:20px">效果类数字（缓存命中率、首 token 延迟、单请求 token 环比）请从可观测性面板取真实测量值补入第 4、5 条，比虚构数字更扛追问。</p>
+</section>
+
+<footer>见字如面 · 简历项目介绍用例 · 纸面排版仅供预览，粘贴文本以复制内容为准</footer>
+<div id="toast" role="status"></div>
+
+<script>
+(function(){
+"use strict";
+var FULL = {
+  title:"「见字如面」手写笔记知识库智能问答 Agent 系统（独立全栈研发）",
+  date:"2025.xx – 2026.xx",
+  desc:"面向手写笔记/扫描文档的个人知识管理场景，独立设计并落地覆盖“多模态入库 → 意图识别 → 混合检索 → 工具编排 → 可信生成 → 记忆沉淀”的[[全链路 Agent 问答系统]]，实现从文档数字化到带引用可信问答的**端到端自动化**；系统已部署阿里云 ECS 持续迭代，沉淀 **1000+ 回归用例**保障全链路质量。",
+  items:[
+    ["整体方案与 Agent 架构","采用 FastAPI + Vue3 + Redis + FAISS 前后端分离架构，SSE 流式对话支持停止/检查点续传；设计[[意图改写 + 查询复杂度分级]]路由，简单问题直答、复杂问题进入工具编排；参考 Claude Code 构建[[五层 Markdown 跨会话记忆]]（平台/用户/项目/私有/AI 自学）与“确定性规则 + LLM”[[双通道自动抽取]]管线，模型故障时显式记忆指令仍必定落库；[[三级上下文压缩链]]（读时截断+空闲衰减 → 写时九节摘要自动压缩 → SESSION.md 持久恢复）配合分段 Token 预算，历史窗口由 20 轮收紧至 8 轮，建立 6000 token/请求的成本告警基线。"],
+    ["RAG 与知识工程","搭建多模态入库管线（PaddleOCR/阿里云 OCR 工厂、Word/PDF 解析、URL 抓取在规范化层拦截主机名 [[SSRF]]）；设计 [[BM25 稀疏 + FAISS 稠密双路召回 → RRF 融合 → 多提供商 Rerank]] 的混合检索链路，检索策略在线可配；[[llm-wiki 编译层]]将原始资料编译为结构化百科词条提升召回质量；[[Self-RAG 证据校验]]抑制幻觉，答案带可溯源引用；入库去重与检索复用降低重复计算。"],
+    ["工具 & Skill 治理体系","BaseTool 统一注册表 + 编排器按附件类型/关键词路由，调用全量落库审计；治理侧黑/白名单与审批工作流，设计[[“评测通过才可用”门禁]]并分层置于目录层，规避评测自调用死锁；Skill 市场支持 SKILL.md 本地导入、[[安全预审]]与沙箱隔离执行；[[能力缺口检测 → 技能自动蒸馏]]补全闭环，实现工具生态可治理、可评测、可演进。"],
+    ["模型网关搭建","收敛全部业务模块 LLM 出网为网关角色路由唯一入口，抽象 [[15 个业务角色]]、4 类上游能力（LLM/Embedding/Rerank/OCR），角色→规则→上游三级路由防跨类误选；[[主备密钥分层 + 超时故障切换]]（慢上游探测、预提交预算上限、切换保留预算）；[[语义缓存 v2]] 支持命中直返、故障晋升与严格观测模式，重复问题绕过推理、单次成本趋近于零；统一内部密钥鉴权、调用归因与日志 PII 脱敏。"],
+    ["回归评测 & 可观测性","离线回归 [[Ragas 四指标]]（忠实度/答案相关性/上下文精度/召回率）+ 测试集自动构建，线上采样 [[Faithfulness + G-Eval]] 双指标与 badcase 闭环；全链路 trace/span 埋点与 [[6 段 Token 度量]]（system/memory/history/knowledge/search/tool），以 LLM 真实 usage 校准估算分摊、对齐成本口径；管理员用量可视化、上下文/记忆钻取、告警分析与 Prometheus + Grafana 监控；沉淀 **70+ 回归测试文件、1000+ 用例**，配合 GitHub Actions CI/CD 与 Docker 双镜像云端离线部署流水线保障迭代质量。"]
+  ]
+};
+var COMPACT = {
+  title:FULL.title, date:FULL.date,
+  desc:"面向手写笔记知识管理场景，独立设计覆盖“意图分级路由 → [[BM25+FAISS+RRF+Rerank 混合检索]] → 工具编排 → [[Self-RAG 引用校验]]”的全链路 RAG Agent 架构；构建[[五层跨会话记忆]]与[[三级上下文压缩链]]、“评测通过才可用”的工具/Skill 治理体系，及 [[15 角色模型网关]]（主备故障切换 + 语义缓存）统一模型出网；以 [[Ragas 四指标]]回归评测、segment 级 Token 可观测性与 **1000+ 回归用例**保障迭代质量，系统已部署阿里云 ECS 持续运营。"
+};
+var PAPERS = {
+  warm:{bg:"#f6efe3",ink:"#211a13",mut:"#6b5f4f",line:"#d8cbb4"},
+  white:{bg:"#fbfaf7",ink:"#1c1b18",mut:"#6d6a63",line:"#ddd8ce"},
+  dark:{bg:"#201a16",ink:"#ece4d6",mut:"#a89a86",line:"#46392c"}
+};
+var ACCENTS = {
+  cinnabar:{base:"#b3342e",light:"#e0685f"},
+  indigo:{base:"#2b4a8b",light:"#7fa0e0"},
+  pine:{base:"#2f6b4f",light:"#79b899"},
+  amber:{base:"#b07a1f",light:"#e0b054"}
+};
+var DEF = {ver:"full",fs:14,lh:1.85,pw:780,paper:"warm",accent:"cinnabar",ul:true,b:true,j:true};
+var state = Object.assign({},DEF);
+var $ = function(id){return document.getElementById(id)};
+var sheetsEl=$("sheets"), toastEl=$("toast"), toastTimer=null;
+
+function esc(s){return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")}
+function rich(s){
+  return esc(s).replace(/\*\*(.+?)\*\*/g,"<strong>$1</strong>").replace(/\[\[(.+?)\]\]/g,'<u class="key">$1</u>');
+}
+function plain(s){return s.replace(/\*\*/g,"").replace(/\[\[|\]\]/g,"")}
+
+function sheetHTML(d,kind){
+  var h='<div class="paper-tag reveal on">'+(kind==="full"?"完整版 · 项目描述 + 五条负责内容":"精简版 · 三行内项目描述")+'</div>';
+  h+='<article class="sheet"><div class="head"><span class="t">'+esc(d.title)+'</span><span class="d">'+esc(d.date)+'</span></div>';
+  h+='<p><span class="lead">项目描述：</span>'+rich(d.desc)+'</p>';
+  if(kind==="full"){
+    h+='<div class="rule"></div><p><span class="lead">负责内容：</span></p><ol>';
+    d.items.forEach(function(it,i){
+      h+='<li><span class="no">'+(i+1)+')</span><strong>'+esc(it[0])+'：</strong>'+rich(it[1])+'</li>';
+    });
+    h+='</ol>';
+  }
+  return h+'</article>';
+}
+function render(){
+  var h="";
+  if(state.ver==="full"||state.ver==="both") h+=sheetHTML(FULL,"full");
+  if(state.ver==="compact"||state.ver==="both") h+=sheetHTML(COMPACT,"compact");
+  sheetsEl.innerHTML=h;
+}
+function plainText(){
+  function block(d,withItems){
+    var t=d.title+"　"+d.date+"\n项目描述："+plain(d.desc)+"\n";
+    if(withItems){
+      t+="负责内容：\n";
+      d.items.forEach(function(it,i){t+=(i+1)+") "+it[0]+"："+plain(it[1])+"\n"});
+    }
+    return t;
+  }
+  if(state.ver==="full") return block(FULL,true);
+  if(state.ver==="compact") return block(COMPACT,false);
+  return block(FULL,true)+"\n──────────\n\n"+block(COMPACT,false);
+}
+function apply(){
+  var r=document.documentElement.style, p=PAPERS[state.paper], a=ACCENTS[state.accent];
+  r.setProperty("--fs",state.fs+"px"); r.setProperty("--lh",state.lh); r.setProperty("--pw",state.pw+"px");
+  r.setProperty("--paper-bg",p.bg); r.setProperty("--paper-ink",p.ink);
+  r.setProperty("--paper-mut",p.mut); r.setProperty("--paper-line",p.line);
+  r.setProperty("--accent",a.base); r.setProperty("--accent-l",a.light);
+  document.body.classList.toggle("no-ul",!state.ul);
+  document.body.classList.toggle("no-b",!state.b);
+  document.body.classList.toggle("justify",state.j);
+  $("oFs").textContent=state.fs+"px"; $("oLh").textContent=state.lh.toFixed(2); $("oPw").textContent=state.pw+"px";
+  document.querySelectorAll(".nav-links a[data-ver]").forEach(function(el){
+    el.setAttribute("aria-current", el.dataset.ver===state.ver ? "true":"false");
+  });
+  document.querySelectorAll(".swatch").forEach(function(el){
+    el.setAttribute("aria-pressed", el.dataset.accent===state.accent ? "true":"false");
+  });
+  render();
+}
+function toast(msg){
+  toastEl.textContent=msg; toastEl.classList.add("show");
+  clearTimeout(toastTimer); toastTimer=setTimeout(function(){toastEl.classList.remove("show")},2200);
+}
+function doCopy(){
+  var txt=plainText();
+  function ok(){toast("已复制"+(state.ver==="full"?"完整版":state.ver==="compact"?"精简版":"双版")+"纯文本 ✓")}
+  if(navigator.clipboard&&navigator.clipboard.writeText){
+    navigator.clipboard.writeText(txt).then(ok,function(){fallback()});
+  }else fallback();
+  function fallback(){
+    var ta=document.createElement("textarea"); ta.value=txt; ta.style.position="fixed"; ta.style.opacity="0";
+    document.body.appendChild(ta); ta.select();
+    try{document.execCommand("copy");ok()}catch(e){toast("复制失败，请使用下载")}
+    document.body.removeChild(ta);
+  }
+}
+function doDown(){
+  var blob=new Blob([plainText()],{type:"text/plain;charset=utf-8"});
+  var url=URL.createObjectURL(blob), a=document.createElement("a");
+  a.href=url; a.download="见字如面-项目介绍-"+(state.ver==="full"?"完整版":state.ver==="compact"?"精简版":"双版")+".txt";
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(function(){URL.revokeObjectURL(url)},800);
+  toast("已下载当前版本 .txt ✓");
+}
+
+/* 控件接线 */
+$("cVer").addEventListener("change",function(){state.ver=this.value;apply()});
+$("cFs").addEventListener("input",function(){state.fs=+this.value;apply()});
+$("cLh").addEventListener("input",function(){state.lh=+this.value;apply()});
+$("cPw").addEventListener("input",function(){state.pw=+this.value;apply()});
+$("cPaper").addEventListener("change",function(){state.paper=this.value;apply()});
+$("cUl").addEventListener("change",function(){state.ul=this.checked;apply()});
+$("cB").addEventListener("change",function(){state.b=this.checked;apply()});
+$("cJ").addEventListener("change",function(){state.j=this.checked;apply()});
+document.querySelectorAll(".swatch").forEach(function(el){
+  el.addEventListener("click",function(){state.accent=this.dataset.accent;apply()});
+});
+document.querySelectorAll(".nav-links a[data-ver]").forEach(function(el){
+  el.addEventListener("click",function(){state.ver=this.dataset.ver;$("cVer").value=state.ver;apply()});
+});
+$("bReset").addEventListener("click",function(){
+  state=Object.assign({},DEF);
+  $("cVer").value=state.ver;$("cFs").value=state.fs;$("cLh").value=state.lh;$("cPw").value=state.pw;
+  $("cPaper").value=state.paper;$("cUl").checked=state.ul;$("cB").checked=state.b;$("cJ").checked=state.j;
+  apply(); toast("已重置为默认排版");
+});
+$("bRand").addEventListener("click",function(){
+  var ak=Object.keys(ACCENTS), pk=Object.keys(PAPERS);
+  state.accent=ak[Math.floor(Math.random()*ak.length)];
+  state.paper=pk[Math.floor(Math.random()*pk.length)];
+  $("cPaper").value=state.paper; apply(); toast("随机配色："+state.paper+" × "+state.accent);
+});
+$("bCopy").addEventListener("click",doCopy);
+$("navCopy").addEventListener("click",doCopy);
+$("bDown").addEventListener("click",doDown);
+$("bPrint").addEventListener("click",function(){window.print()});
+
+/* 入场动画 */
+var io=new IntersectionObserver(function(es){es.forEach(function(e){if(e.isIntersecting){e.target.classList.add("on");io.unobserve(e.target)}})},{threshold:.12});
+document.querySelectorAll(".reveal").forEach(function(el){io.observe(el)});
+
+apply();
+})();
+</script>
+</body>
+</html>
