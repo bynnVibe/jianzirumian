@@ -209,7 +209,7 @@ def test_build_context_continuation_wrapper(mem_db, monkeypatch):
 # ============================================
 
 def test_force_compact_returns_stats(mem_db, monkeypatch):
-    """force 强制触发无视阈值，返回 covered_messages/before_chars/after_chars。"""
+    """force 强制触发无视阈值，返回 covered_messages/before_chars/after_chars/compact_kind。"""
     reply = "1.意图：手动压缩结果"
     _patch_llm(monkeypatch, reply=reply)
     session = _make_session(10, content_len=40)
@@ -218,6 +218,7 @@ def test_force_compact_returns_stats(mem_db, monkeypatch):
         "covered_messages": 4,
         "before_chars": sum(len(m.content) for m in session.messages[:4]),
         "after_chars": len(reply),
+        "compact_kind": "manual",
     }
 
 

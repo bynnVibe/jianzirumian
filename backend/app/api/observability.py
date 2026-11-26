@@ -159,11 +159,12 @@ def get_my_memory_drill(
 # 压缩链事件中文展示名（与 session_summary 埋点 kind 同源）
 _COMPACT_KIND_LABELS = {
     "micro": "微压缩·空闲衰减", "auto": "自动压缩", "manual": "手动压缩",
+    "window80": "Compaction·80% 硬触发",
     "auto_fail": "自动压缩失败", "auto_blocked": "熔断拦截",
 }
 _MEMORY_ACTION_LABELS = {
     "add": "新增", "update": "更新", "delete": "删除", "merge": "簇合并", "forget": "超限遗忘",
-    "extract": "抽取运行",
+    "extract": "抽取运行", "dream": "AutoDream 整理",
 }
 
 
@@ -687,9 +688,9 @@ _DRILL_EXPLAIN = {
     "kbs": "知识库 = 区间内创建的知识库（knowledge_bases）个数。",
     "wiki": "百科页面 = 区间内创建的 llm-wiki 编译页面（wiki_pages）个数。",
     "memories": "记忆条数 = 区间内抽取的跨会话用户记忆（user_memories）条数。",
-    "memory_events": "记忆写路径事件 = 区间内五层 Markdown 双写埋点（memory_write_events，排除抽取运行），按动作（新增/更新/删除/合并/遗忘）与层（Managed/User/Project/Local/AutoMem/助手分域）聚合。",
-    "memory_extract": "记忆抽取运行 = 区间内 action='extract' 的运行事件（每轮对话后台抽取必落一条），明细含「显式N条/模型M条→新增a更新u删除d」与模型层无产出原因（empty 判空/llm_error 调用失败/llm_unavailable 角色未绑定/manual_mutex 主副互斥/parse_error 解析失败）；运行数 > 0 而写入数 = 0 即「跑了但零产出」。",
-    "compact_events": "上下文压缩链事件 = 区间内三级压缩链埋点（context_compact_events）：micro 空闲衰减/auto 自动压缩/manual 手动压缩/auto_fail 失败/auto_blocked 熔断拦截，含压缩前后 token。",
+    "memory_events": "记忆写路径事件 = 区间内静态/动态 Markdown 双写埋点（memory_write_events，排除抽取运行），按动作（新增/更新/删除/合并/遗忘/AutoDream 整理）与层（静态 User/Project/Local、个人叠加层、长期记忆、助手分域）聚合。",
+    "memory_extract": "记忆抽取运行 = 区间内 action='extract' 的 extractMemories 运行事件（每轮 query loop 结束后后台扫描整轮 transcript，必落一条），明细含「显式N条/模型M条→新增a更新u删除d」与模型层无产出原因（empty 判空/llm_error 调用失败/llm_unavailable 角色未绑定/manual_mutex 主副互斥/parse_error 解析失败）；运行数 > 0 而写入数 = 0 即「跑了但零产出」。",
+    "compact_events": "上下文压缩链事件 = 区间内 Compaction 链埋点（context_compact_events）：micro 空闲衰减/auto 自动压缩/manual 手动压缩/window80 上下文达 80% 硬触发（summary.md 替换历史）/auto_fail 失败/auto_blocked 熔断拦截，含压缩前后 token。",
     "feedbacks": "点赞/点踩 = 区间内用户反馈（message_feedbacks）记录，rating 区分赞/踩。",
     "eval_runs": "回归评测运行 = 区间内发起的评测运行（eval_runs）次数，摘要含成功率与相关度均值。",
     "skill_reviews": "Skill 预审 = 区间内添加/修改技能时的安全与能力可行性评审记录，verdict=reject 计为高危拒绝。",

@@ -239,7 +239,7 @@ export function compactSession(sessionId, focus = '') {
 }
 
 /**
- * 会话笔记（五层记忆 L3，Session Memory 显性化）：查看 / 编辑结构化摘要
+ * 会话笔记（短期记忆 Session Memory 显性化）：查看 / 编辑结构化摘要
  * 编辑后 edited_by_user=1，自动压缩不再覆盖（用户笔记优先）
  */
 export function getSessionNote(sessionId) {
@@ -270,7 +270,7 @@ export function deleteMyMemory(memoryId) {
 }
 
 /**
- * 我的指令（五层记忆 L1，类比 CLAUDE.md User 层）：读取 / 保存（每用户一条，敏感词拒绝）
+ * 我的指令（个人叠加层 User，类比 CLAUDE.md User 层）：读取 / 保存（每用户一条，敏感词拒绝）
  */
 export function getMyInstructions() {
   return api.get('/me/instructions')
@@ -281,7 +281,7 @@ export function saveMyInstructions(content) {
 }
 
 /**
- * 助手分域记忆（五层记忆 L4）：按 agent 域隔离的列表 / 写入 / 编辑 / 删除
+ * 助手分域记忆（助手域隔离）：按 agent 域隔离的列表 / 写入 / 编辑 / 删除
  */
 export function listMyAgentMemories(agent = 'wiki_assistant') {
   return api.get('/me/agent-memories', { params: { agent } })
@@ -1333,8 +1333,8 @@ export function getMyMemoryDrill(kind = 'all') {
 }
 
 /**
- * 五层记忆 Markdown 视图（对齐 Claude Code 存储分级，剔除 Team）：
- * 层概览 + 静态层正文 + AutoMem 文件视图；静态层按权限编辑（AutoMem 经记忆 CRUD 演进）
+ * 记忆 Markdown 文件视图（静态/动态双轨，对齐 Claude Code 设计）：
+ * 层概览 + 静态三层正文 + 个人叠加层 + 长期记忆文件视图；静态层仅管理员可编辑（长期记忆经记忆 CRUD 演进）
  */
 export function getMyMemoryLayers(kbId = '') {
   return api.get('/me/memory/layers', { params: { kb_id: kbId } })
@@ -1344,7 +1344,17 @@ export function updateMyMemoryLayer(layer, content, kbId = '') {
   return api.put(`/me/memory/layers/${layer}`, { content, kb_id: kbId })
 }
 
-/** 个人可观测性钻取：三级压缩链事件流 + 会话摘要边界标记 / 五层记忆写路径事件 */
+/** 编辑全局静态记忆层（user/project/local，仅管理员） */
+export function updateStaticMemoryLayer(layer, content) {
+  return api.put(`/me/memory/static/${layer}`, { content })
+}
+
+/** 短期记忆文件视图（本人会话限定）：transcript/summary/task_state 概览与正文 */
+export function getMySessionMemoryFiles(sessionId) {
+  return api.get('/me/memory/session-files', { params: { session_id: sessionId } })
+}
+
+/** 个人可观测性钻取：Compaction 压缩链事件流 + 会话摘要边界标记 / 记忆写路径事件 */
 export function getMyCompactDrill(limit = 30) {
   return api.get('/observability/my-context/compact-drill', { params: { limit } })
 }

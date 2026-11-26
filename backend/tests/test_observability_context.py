@@ -22,7 +22,7 @@ def _now():
     return datetime.now().isoformat()
 
 
-def _add_memory(user_id, content, mtype="fact", importance=0.5, last_used=False):
+def _add_memory(user_id, content, mtype="user", importance=0.5, last_used=False):
     mid = str(uuid.uuid4())
     now = _now()
     db.execute(
@@ -69,18 +69,18 @@ def _cleanup(user_id, trace_ids):
 def test_memory_usage_overview_aggregates():
     uid = _uid()
     try:
-        _add_memory(uid, "用户偏好清淡饮食", "preference", 0.9, last_used=True)
-        _add_memory(uid, "用户有高血压", "fact", 0.85)
-        _add_memory(uid, "计划三个月减重", "goal", 0.4)
+        _add_memory(uid, "用户偏好清淡饮食", "user", 0.9, last_used=True)
+        _add_memory(uid, "用户有高血压", "feedback", 0.85)
+        _add_memory(uid, "计划三个月减重", "project", 0.4)
         ov = MemoryService.usage_overview(uid)
         assert ov["total"] == 3
         assert ov["storage_limit"] == 200
-        # preference(0.9) 与 fact(0.85>=0.8) 均计入画像卡候选
+        # user 类与 feedback(0.85>=0.8) 均计入画像卡候选
         assert ov["profile_count"] == 2
-        assert ov["retrieved_count"] == 1        # 仅偏好条被检索命中
+        assert ov["retrieved_count"] == 1        # 仅用户信息条被检索命中
         assert ov["never_used_count"] == 2
         by = {t["type"]: t["count"] for t in ov["by_type"]}
-        assert by == {"preference": 1, "fact": 1, "goal": 1, "feedback": 0}
+        assert by == {"user": 1, "feedback": 1, "project": 1, "reference": 0}
         assert ov["total_chars"] == len("用户偏好清淡饮食") + len("用户有高血压") + len("计划三个月减重")
         assert 0 < ov["storage_usage"] < 1
         assert ov["avg_importance"] == round((0.9 + 0.85 + 0.4) / 3, 3)
@@ -101,14 +101,14 @@ def test_memory_usage_overview_empty_and_guest():
 def test_memory_drill_filters_and_explain():
     uid = _uid()
     try:
-        _add_memory(uid, "用户偏好清淡饮食", "preference", 0.9, last_used=True)
-        _add_memory(uid, "用户有高血压", "fact", 0.85, last_used=True)
-        _add_memory(uid, "计划三个月减重", "goal", 0.4)
+        _add_memory(uid, "用户偏好清淡饮食", "user", 0.9, last_used=True)
+        _add_memory(uid, "用户有高血压", "feedback", 0.85, last_used=True)
+        _add_memory(uid, "计划三个月减重", "project", 0.4)
         assert MemoryService.drill_memories(uid, "all")["total"] == 3
         assert MemoryService.drill_memories(uid, "profile")["total"] == 2
         assert MemoryService.drill_memories(uid, "retrieved")["total"] == 2
         assert MemoryService.drill_memories(uid, "never_used")["total"] == 1
-        assert MemoryService.drill_memories(uid, "type:fact")["total"] == 1
+        assert MemoryService.drill_memories(uid, "type:feedback")["total"] == 1
         imp = MemoryService.drill_memories(uid, "importance")
         assert imp["items"][0]["importance"] == 0.9  # 重要度降序
         assert "÷" in imp["explanation"]
@@ -129,7 +129,7 @@ def test_personal_context_overview_window_and_segments():
     _add_segment(t1, "system", 200, 400)
     _add_segment(t1, "history", 800, 1600)
     _add_segment(t2, "knowledge", 2000, 4000)
-    _add_memory(uid, "用户偏好清淡饮食", "preference", 0.9)
+    _add_memory(uid, "用户偏好清淡饮食", "user", 0.9)
     db.execute(
         "INSERT INTO chat_session_summaries (session_id, user_id, summary,"
         " covered_until_message_id, token_estimate, created_at, updated_at)"

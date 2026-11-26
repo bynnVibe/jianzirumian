@@ -143,6 +143,9 @@ class Settings:
     HISTORY_MSG_MAX_CHARS: int = int(os.getenv("HISTORY_MSG_MAX_CHARS", "800"))
     # 历史窗口内保留完整不截断的最近消息条数。
     KEEP_RECENT_FULL: int = int(os.getenv("KEEP_RECENT_FULL", "4"))
+    # 全文区助手长回答单条帽：最近 KEEP_RECENT_FULL 条内超过该字符数的助手回答
+    # 读时投影为头部摘录+原长尾注（用户消息不帽）；CJK≈1:1，1200 字≈1200 token。
+    FULL_ZONE_MAX_CHARS: int = int(os.getenv("FULL_ZONE_MAX_CHARS", "1200"))
     # 会话摘要压缩触发阈值：消息条数或历史总字符数任一超过即触发（下调以更早压缩历史）。
     SUMMARY_TRIGGER_MESSAGE_COUNT: int = int(os.getenv("SUMMARY_TRIGGER_MESSAGE_COUNT", "12"))
     SUMMARY_TRIGGER_CHAR_COUNT: int = int(os.getenv("SUMMARY_TRIGGER_CHAR_COUNT", "6000"))
@@ -151,10 +154,18 @@ class Settings:
     MEMORY_PROFILE_CHARS: int = int(os.getenv("MEMORY_PROFILE_CHARS", "300"))
     # 记忆两层加载（画像卡 + 相关检索）合计注入字符预算。
     MEMORY_CTX_CHARS: int = int(os.getenv("MEMORY_CTX_CHARS", "600"))
-    # 压缩触发：历史 token 估算超过该值即触发（优先于条数/字符阈值）。
-    CONTEXT_COMPACT_TRIGGER_TOKENS: int = int(os.getenv("CONTEXT_COMPACT_TRIGGER_TOKENS", "6000"))
+    # Session Memory 首次触发：上下文 token 估算达到该值立即创建 summary.md
+    # （对齐 Claude Code 10K 首次摘要口径；优先于条数/字符兜底阈值）。
+    CONTEXT_COMPACT_TRIGGER_TOKENS: int = int(os.getenv("CONTEXT_COMPACT_TRIGGER_TOKENS", "10000"))
+    # Session Memory 后续更新触发：距上次摘要时点的上下文增长达到该 token 数即更新。
+    SESSION_MEMORY_GROWTH_TOKENS: int = int(os.getenv("SESSION_MEMORY_GROWTH_TOKENS", "5000"))
+    # Session Memory 对话暂停触发：会话空闲超过该分钟数视为暂停，后台更新摘要笔记。
+    SESSION_MEMORY_PAUSE_MINUTES: float = float(os.getenv("SESSION_MEMORY_PAUSE_MINUTES", "10"))
+    # Compaction 硬触发：上下文占模型窗口比例达到该值（80%）时用 summary.md 替换历史。
+    COMPACT_WINDOW_RATIO: float = float(os.getenv("COMPACT_WINDOW_RATIO", "0.8"))
     # 微压缩冻结 clip：较早消息逐条字符上限（两档位置无关设计，历史前缀 append-only 稳定）。
-    CLIP_MID_CHARS: int = int(os.getenv("CLIP_MID_CHARS", "800"))
+    # 800→400 减半：CJK 1:1 口径下 800 字≈800 token/条，多轮累积截断区偏大。
+    CLIP_MID_CHARS: int = int(os.getenv("CLIP_MID_CHARS", "400"))
     # 已退役：原三档 clip 的更旧档深度压缩上限（保留配置项仅为兼容旧 .env，不再使用）。
     CLIP_OLD_CHARS: int = int(os.getenv("CLIP_OLD_CHARS", "200"))
     # 摘要批更新门控：距上次摘要覆盖点新增可摘要消息（不含最近保留区）≥ 该值才重算（前缀缓存友好）。

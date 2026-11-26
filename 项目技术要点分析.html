@@ -132,7 +132,11 @@ pre.code .s{color:#a8c686}
   <a class="lv2" href="#s5-2">5.2 评估与可观测性</a>
   <a class="lv2" href="#s5-3">5.3 安全防护</a>
   <a class="lv2" href="#s5-4">5.4 部署运维与 CI/CD</a>
-  <a class="lv1" href="#s6">6 · 总对比与总结</a>
+  <a class="lv1" href="#s6">6 · 总对比与下一步方向</a>
+  <a class="lv2" href="#s6-1">6.1 能力矩阵总览</a>
+  <a class="lv2" href="#s6-2">6.2 定位差异</a>
+  <a class="lv2" href="#s6-3">6.3 下一步方向</a>
+  <a class="lv2" href="#s6-4">6.4 一句话总结</a>
 </nav>
 
 <main>
@@ -144,7 +148,9 @@ pre.code .s{color:#a8c686}
     分析对象：<code>jianziruyang</code> 仓库（FastAPI 后端 + Vue3 前端 + 模型网关 + 沙箱 Worker + 监控栈）<br>
     分析口径：以源码为准（backend/app 三层架构、services/gateway、sandbox_worker、monitoring、.github/workflows），
     每个模块按「架构 → 设计原理 → 业务流 → 技术实现 → 缺失影响 → 横向对比」六段展开。<br>
-    对比对象：Claude Code（Anthropic 终端编码 Agent）、OpenClaw（开源个人 AI 助手）、Codex（OpenAI 编码 Agent）。
+    对比对象：Claude Code（Anthropic 终端编码 Agent）、OpenClaw（开源个人 AI 助手）、Codex（OpenAI 编码 Agent）。<br>
+    本版同步：计划后执行前授权 HITL 与待授权计划续跑、检索快照复用、后台任务发起人归属与业务路由统计、
+    厂商 usage 四维度用量分析、前缀缓存分区改序（S→C→U→D）。
   </div>
 </div>
 
@@ -159,11 +165,12 @@ pre.code .s{color:#a8c686}
 并针对「知识库问答」场景做了 RAG 混合检索与 LLM-Wiki 知识编译两项深度定制。</p>
 <div class="kpi">
   <div class="k"><b>3 层</b><span>API → Service → Core 后端架构</span></div>
-  <div class="k"><b>5 层</b><span>Markdown 分级记忆存储</span></div>
-  <div class="k"><b>3 级</b><span>上下文压缩链（对齐 Claude Code）</span></div>
+  <div class="k"><b>2 轨</b><span>静态/动态 Markdown 记忆（对齐 Claude Code）</span></div>
+  <div class="k"><b>80%</b><span>Compaction 硬触发水位 + 三级压缩链</span></div>
   <div class="k"><b>4 路</b><span>混合检索 FAISS+BM25+RRF+Rerank</span></div>
   <div class="k"><b>15 个</b><span>网关业务角色（出网统一收口）</span></div>
   <div class="k"><b>6 类</b><span>评估域（RAG/Agent/工具/Prompt/在线/BadCase）</span></div>
+  <div class="k"><b>4 维</b><span>用量分析 输入/输出/命中/未命中</span></div>
 </div>
 </div>
 
@@ -218,7 +225,7 @@ pre.code .s{color:#a8c686}
       <div class="abox"><b>SQLite app.db</b><small>WAL · 60+ 表 · schema_migrations 门控迁移</small></div>
       <div class="abox"><b>Redis</b><small>文件缓存 · 语义缓存副本 · checkpoint · 洞察缓存</small></div>
       <div class="abox"><b>FAISS + metadata.json</b><small>稠密向量索引 · 按可见性构建子库</small></div>
-      <div class="abox"><b>Markdown 文件树</b><small>memory/ 五层记忆 · wiki/ 知识站点 · SESSION.md</small></div>
+      <div class="abox"><b>Markdown 文件树</b><small>memory/ 静态三层 + 短期会话文件 + 长期 memories/ · wiki/ 知识站点</small></div>
       <div class="abox"><b>上游模型端点</b><small>ModelScope / OpenRouter / DashScope / Ollama …</small></div>
       <div class="abox"><b>Sandbox Worker</b><small>专用 Linux 主机 · rootless Podman 一次性容器</small></div>
     </div>
@@ -259,14 +266,14 @@ pre.code .s{color:#a8c686}
 
 <table class="tbl wrap">
 <tr><th>能力域</th><th>后端模块</th><th>前端入口</th><th>一句话职责</th></tr>
-<tr><td>对话主链路</td><td>chat.py / chat_agent.py / chat_commands.py / chat_checkpoint.py / chat_actions.py</td><td>ChatView</td><td>SSE 流式问答、复杂度分流、HITL 卡片、中断续跑</td></tr>
-<tr><td>记忆与上下文</td><td>memory.py / memory_store.py / agent_memory.py / session_summary.py / user_instructions.py / module_recall.py</td><td>记忆面板 / 会话笔记</td><td>五层 Markdown 记忆、三级压缩链、召回度量</td></tr>
+<tr><td>对话主链路</td><td>chat.py / chat_agent.py / chat_commands.py / chat_checkpoint.py / chat_actions.py / retrieval_reuse.py</td><td>ChatView</td><td>SSE 流式问答、复杂度分流、HITL 卡片（含执行前授权）、中断续跑、检索快照复用</td></tr>
+<tr><td>记忆与上下文</td><td>memory.py / memory_store.py / agent_memory.py / session_summary.py / user_instructions.py / module_recall.py</td><td>记忆面板 / 会话笔记</td><td>静态/动态 Markdown 记忆、Compaction 压缩链、召回度量</td></tr>
 <tr><td>知识库 RAG</td><td>knowledge.py / kb.py / upload_pipeline.py / ingest_dedup.py / vector_store / sparse_retriever / reranker / evidence_checker / intent_rewriter</td><td>KnowledgeUpload / KnowledgeDetailView / IngestDetailView</td><td>两段式入库、混合检索、Self-RAG 证据校验</td></tr>
 <tr><td>LLM-Wiki</td><td>wiki.py / wiki_store.py / wiki_assistant.py / wiki_conversation.py / knowledge_graph.py / kb_mindmap.py / kb_summary.py</td><td>WikiView / KnowledgeOverviewView</td><td>知识编译、百科浏览、图谱/导图、知识助手</td></tr>
 <tr><td>工具体系</td><td>tools/*（base/invoke/hooks/native/direct/router/cli_runner/cli_spec）/ personal_tools / tool_governance / tool_credentials / tool_http / tool_eval / capability_gap</td><td>ToolGovernanceView</td><td>FC 执行循环、五闸治理、个人工具生命周期、能力缺口闭环</td></tr>
 <tr><td>Skills</td><td>skill.py / skill_runtime.py / skill_packages.py / skill_review.py / skill_distill.py / skill_workflow.py / skill_market.py / skill_drafts.py</td><td>SkillsView</td><td>三类技能、安全预审、聊天框沉淀、市场聚合</td></tr>
 <tr><td>沙箱</td><td>sandbox/controller.py / worker_client.py + sandbox_worker/（worker/runner/seccomp）</td><td>—（治理页配置）</td><td>可信控制面 + 一次性 rootless 容器执行</td></tr>
-<tr><td>模型网关</td><td>gateway/*（proxy/rules/keys/upstreams/security/logs/semantic_cache/settings）</td><td>GatewayView</td><td>选路/负载均衡/熔断/限额/审计/语义缓存</td></tr>
+<tr><td>模型网关</td><td>gateway/*（proxy/rules/keys/upstreams/security/logs/semantic_cache/settings）</td><td>GatewayView</td><td>选路/负载均衡/熔断/限额/审计/语义缓存/四维度用量与业务路由统计</td></tr>
 <tr><td>评估</td><td>evaluation / kb_eval / agent_eval / online_eval / deepeval_metrics / tool_eval / prompt_skill_eval / testset_builder / badcase</td><td>EvalView / EvalOverviewView / PromptSkillEvalView</td><td>Ragas 四指标 + Agent 六指标 + 在线采样 + BadCase 闭环</td></tr>
 <tr><td>可观测性</td><td>core/observability.py / metrics_export.py / alert_analysis.py</td><td>ObservabilityView</td><td>trace/span/segment、Token 构成、告警归因</td></tr>
 <tr><td>链接导入</td><td>url_fetch / url_imports / url_analyst / url_renderer / article_clean + renderer 服务</td><td>知识上传（链接）</td><td>SSRF 防护抓取、JS 渲染、正文清洗入库</td></tr>
@@ -287,13 +294,13 @@ pre.code .s{color:#a8c686}
   <div class="farrow">↓</div>
   <div class="fstep"><span class="who">04</span><b>附件工具编排</b>（有附件时）：tool_orchestrator 按文本意图 + 附件类型路由到 OCR / 入库 / 总结工具，统一经 invoke_tool 治理；图片 OCR 文本并入检索查询（截图检索），纯贴图提问以识别内容为问题。</div>
   <div class="farrow">↓</div>
-  <div class="fstep"><span class="who">05</span><b>上下文分区装配</b>：静态系统提示（prompt_store 已发布版本 + FINAL_ANSWER_RULES 固定尾规）→ 五层记忆 Managed→User(L1 指令)→Project→Local 依次注入 → U 区常驻画像卡 → 启用 Skill 提示注入。每段 note_segment 记账。</div>
+  <div class="fstep"><span class="who">05</span><b>上下文分区装配</b>：静态系统提示（prompt_store 已发布版本 + FINAL_ANSWER_RULES 固定尾规）→ 静态记忆三层（User/Project/Local 全量）→ 个人指令 → KB/本人叠加层 → 启用 Skill（半静态层）→ <b>C 区追加式历史</b> → <b>U 区常驻画像卡</b>（后移至历史之后：画像每轮可能被自动抽取重写，置前会连带失效历史大前缀，前缀缓存整改 P0-2）→ D 区相关记忆/工具上下文。每段 note_segment 记账。</div>
   <div class="farrow">↓</div>
   <div class="fstep"><span class="who">06</span><b>语义缓存探针</b>（资格门控：无附件/联网/命令/强刷/续任务、无逐轮个性化上下文）：先做意图改写，再携 profile_hash / skills_hash 向网关 probe；命中 → 分块回放缓存答案 + 来源，跳过检索与生成，直接收尾。</div>
   <div class="farrow">↓</div>
   <div class="fstep"><span class="who">07</span><b>个人 Skill / 工具匹配</b>：skill_runtime.prepare_for_query 按目录匹配并核验依赖资源（read_agent_skill 受控读取）；personal_tools / tool_workflow.select_for_query 选出本轮已授权工具集；依赖身份变化即报错不执行。</div>
   <div class="farrow">↓</div>
-  <div class="fstep"><span class="who">08</span><b>历史窗口构建</b>：session_summary.build_context_messages —— 有摘要则「摘要 + continuation 指令 + 覆盖点之后 tail」，无摘要则冻结窗口；两档冻结 clip + 空闲衰减（三级压缩链的第一级在此生效）。</div>
+  <div class="fstep"><span class="who">08</span><b>历史窗口构建</b>：session_summary.build_context_messages —— 有摘要则「摘要 + continuation 指令 + 覆盖点之后 tail」，无摘要则冻结窗口；三档冻结 clip（实时衰减/全文区单条帽/400 字截断）+ 空闲衰减（Compaction 压缩链的第一级在此生效）。</div>
   <div class="farrow">↓</div>
   <div class="fstep"><span class="who">09</span><b>复杂度分流</b>：classify_complexity 启发式预筛（≤30 字且无多步连接词→fast）+ LLM 细判（8s 超时保底 fast）。simple→fast 固定流水线；moderate→ReAct；complex→Plan&amp;Execute。「沉淀 Skill」意图强制 ReAct。带附件/已选工具/续任务时跳过分流。</div>
   <div class="farrow">↓ <small>以下按模式分叉，见 1.4 场景图</small></div>
@@ -305,9 +312,9 @@ pre.code .s{color:#a8c686}
   <div class="farrow">↓</div>
   <div class="fstep"><span class="who">13</span><b>引用核对（Self-RAG 第二环）</b>：verify_citations 检查 [来源 X] 编号越界，越界追加甄别提醒。</div>
   <div class="farrow">↓</div>
-  <div class="fstep"><span class="who">14</span><b>能力缺口闭环</b>（回答生成之后）：answer_indicates_failure 启发式 + detect_scenario 判定「回答是否真正解决问题」；有低危工具配方 → auto_resolve 服务端自动执行并回喂；未解决 → capability_gap 卡片如实说明限制（DeepSeek 式降级）；同场景累计 ≥3 次提示沉淀为 Skill/工具。</div>
+  <div class="fstep"><span class="who">14</span><b>能力缺口闭环</b>（回答生成之后）：answer_indicates_failure 启发式 + detect_scenario 判定「回答是否真正解决问题」；有低危工具配方 → auto_resolve 服务端自动执行并回喂；未解决 → capability_gap 卡片如实说明限制；动作已执行（授权联网/auto_resolve）后卡片标 <b>resolved 标灰禁用</b>防重复点击；同场景累计 ≥3 次提示沉淀为 Skill/工具。</div>
   <div class="farrow">↓</div>
-  <div class="fstep green"><span class="who">15</span><b>收尾与后台巩固</b>：助手消息 + 过程快照 v2（steps/intent/trace_id）落库 → 同一请求预算内依次执行：模块召回度量 flush、会话摘要 maybe_summarize（第二级压缩）、记忆抽取 extract_from_turn、记忆巩固 consolidate_if_due → 用量统计 → done 事件（单一 done 所有者 = chat.py）。</div>
+  <div class="fstep green"><span class="who">15</span><b>收尾与后台巩固</b>：助手消息 + 过程快照 v2（steps/intent/trace_id）落库 + 短期记忆 transcript/task_state 镜像 → 同一请求预算内依次执行：模块召回度量 flush、Session Memory 摘要 maybe_summarize、extractMemories 整轮抽取 extract_from_turn、AutoDream 三重门控 consolidate_if_due → 用量统计 → done 事件（单一 done 所有者 = chat.py）。</div>
   <div class="farrow">↓</div>
   <div class="fstep gold"><span class="who">16</span><b>异常终态兜底</b>：超时/取消时持久化「[生成已中断]」助手消息（刷新不丢上下文）、打包 checkpoint（继续/放弃）、写超时告警；obs.end_trace 记录 ok/error/timeout/cancelled 终态。</div>
 </div>
@@ -345,16 +352,16 @@ pre.code .s{color:#a8c686}
   </div>
   <div class="flow">
     <div class="branch-title">Plan&amp;Execute（≤5 步）</div>
-    <div class="fstep">planner 产出 steps 清单<br><small>{tool, args, purpose} JSON</small></div>
-    <div class="farrow">↓ <small>发 plan SSE 事件（前端过程区）</small></div>
-    <div class="fstep">顺序执行各步<br><small>失败标记后继续，v1 不动态重规划</small></div>
+    <div class="fstep">planner 产出 steps 清单<br><small>{tool, args, purpose} JSON；KB 可能缺失的内容必须规划 web_search（标 needs_auth）</small></div>
+    <div class="farrow">↓ <small>发 plan SSE 事件（前端过程区，待授权步骤明示文案）</small></div>
+    <div class="fstep gold"><b>执行前授权门</b>：计划含 web_search 且未开联网 → save_pending_plan + need_search 卡<br><small>一个步骤都不执行、不生成回答，等用户授权</small></div>
+    <div class="farrow">↓ <small>授权：take_pending_plan 免重规划续跑；拒绝：剔除 web 步骤</small></div>
+    <div class="fstep">顺序执行各步<br><small>失败标记后继续，v1 不动态重规划；检索快照可复用</small></div>
     <div class="farrow">↓</div>
-    <div class="fstep">汇总观测 → 回答阶段<br><small>与 ReAct 共用 _answer_phase</small></div>
+    <div class="fstep">汇总观测 → 回答阶段<br><small>与 ReAct 共用 _answer_phase，结合知识库+联网双来源</small></div>
   </div>
 </div>
-<p>两条路径的 HITL 出口一致：知识库空结果且未开联网 → <code>need_search</code> 卡片暂停本轮；
-意图模糊 → <code>clarify</code> 卡片（2~4 个可点选方向）。用户响应触发<strong>新的 /chat/send</strong>，
-服务端不挂起状态（无状态 HITL，天然适配多实例与刷新）。Agent 早期失败（无正文无卡片）自动回退 fast 流水线——最坏情况等于改造前现状。</p>
+<p>两条路径的 HITL 出口一致，<code>need_search</code> 有两个触发点：① 知识库空结果且未开联网（回答后）；② <strong>计划已生成、步骤执行前</strong>的授权门（计划含联网步骤即零执行暂停，见场景 H）。意图模糊 → <code>clarify</code> 卡片（2~4 个可点选方向）。用户响应触发<strong>新的 /chat/send</strong>，服务端不挂起状态（无状态 HITL，天然适配多实例与刷新）：授权携 use_search=True 加载待授权计划免重规划续跑，拒绝携 skip_search_prompt=True 剔除联网步骤；同会话同问题的<strong>检索快照</strong>（TTL 15min）让续跑复用上一轮知识检索、不重复检索。Agent 早期失败（无正文无卡片）自动回退 fast 流水线——最坏情况等于改造前现状。</p>
 
 <h4>场景 C · 附件任务（截图提问 / 图片入库 / 文档总结）</h4>
 <div class="flow">
@@ -413,6 +420,20 @@ pre.code .s{color:#a8c686}
   <div class="fstep green">继续：claim + 注入前序上下文补全<br><small>放弃：软删除，Redis 副本 48h</small></div>
 </div>
 
+<h4>场景 H · 知识不足的计划授权与续跑（执行前 HITL + 快照复用）</h4>
+<div class="flow">
+  <div class="fstep">用户问「规划 3 个月调理方案 + 运动辅助方案」<br><small>KB 有饮食调理但缺运动/分阶段疗程 → complex → Plan&amp;Execute</small></div>
+  <div class="farrow">↓</div>
+  <div class="fstep">planner 产出含 web_search 步骤的计划（needs_auth=True）<br><small>规划准则：KB 覆盖面有限，运动/疗程/公开指南必须规划联网补充</small></div>
+  <div class="farrow">↓ <small>plan 事件先下发，执行在后</small></div>
+  <div class="fstep gold">授权门：save_pending_plan（chat_pending_plans 表，TTL 15min）+ need_search 卡<br><small>「计划已生成…是否授权执行联网搜索后继续？」此刻零步骤执行</small></div>
+  <div class="farrow">↓ <small>用户点「联网搜索」→ 新 /chat/send（use_search=True）</small></div>
+  <div class="fstep green">take_pending_plan 读后即删 → 跳过重新规划（record_skip("plan")）→ 按已确认计划执行知识/联网步骤<br><small>若存在同问题检索快照则复用上一轮结果（待办明示「复用上一轮结果」）</small></div>
+  <div class="farrow">↓</div>
+  <div class="fstep">回答阶段结合 KB [来源 X] + 网络 [网络来源 X] → done<br><small>拒绝分支：skip_search_prompt → 剔除 web 步骤，仅知识库作答并如实说明局限</small></div>
+</div>
+<p>对照旧逻辑：以往等<em>全部步骤执行完、答案生成后</em>才由 capability_gap 事后判定知识缺口——白跑一轮且答案没有结合联网内容。现在授权门前移到<strong>计划后、执行前</strong>，授权成本仅一次卡片交互；ReAct 路径同样在 web_search 工具执行前拦截。待授权计划与检索快照均按 (session_id, user_id, query_key) 三元组隔离，读后即删 + TTL 双保险防旧计划误续跑。</p>
+
 <h3 id="s1-5">1.5 横向对比与影响分析（架构层）</h3>
 
 <div class="cmp">
@@ -470,7 +491,7 @@ Claude Code/Codex 的「无状态 CLI + 云端沙箱」天然更易并行；本�
     <div class="abox"><b>agent 决策</b><small>ReAct/Plan 的 JSON 决策协议</small></div>
     <div class="abox"><b>memory 抽取</b><small>What-NOT-to-save 负清单</small></div>
     <div class="abox"><b>wiki 编译</b><small>两步 CoT：分析 JSON → 卡片 Markdown</small></div>
-    <div class="abox"><b>summary 压缩</b><small>九节结构化摘要模板</small></div>
+    <div class="abox"><b>summary 压缩</b><small>结构化摘要模板（Session Memory）</small></div>
   </div></div>
 </div>
 
@@ -479,14 +500,14 @@ Claude Code/Codex 的「无状态 CLI + 云端沙箱」天然更易并行；本�
 <pre class="code"><span class="c"># backend/app/services/chat.py + prompt_store.py + core/llm.py</span>
 system_prompt = prompt_store.get_active_body()   <span class="c"># ① 可治理正文（published 版本，无则回退 DEFAULT_BODY）</span>
               + FINAL_ANSWER_RULES               <span class="c"># ② 固定尾规：只输出最终回答、Markdown 表格偏好等</span>
-<span class="c"># ③ 运行时注入（在 messages 层而非 system 层）：</span>
-<span class="c">#    U 区：用户画像卡（≤6 条 / 300 字）  D 区：相关记忆（评分 Top-K）</span>
-<span class="c">#    L1 指令：知识引用契约（[n] 编号、不得编造来源）  C 区：压缩后的会话历史</span></pre>
+<span class="c"># ③ 运行时注入（在 messages 层而非 system 层，分区顺序见 2.3）：</span>
+<span class="c">#    L1 指令：知识引用契约（[n] 编号、不得编造来源）→ C 区：追加式历史（前缀主体）</span>
+<span class="c">#    → U 区：用户画像卡（≤6 条 / 300 字，历史之后）→ D 区：相关记忆（评分 Top-K）</span></pre>
 <ul>
 <li><strong>正文与尾规分离</strong>：可优化的是「人设与领域约束」，不可动的是「输出协议」（FINAL_ANSWER_RULES），保证评测优化不会破坏下游解析。</li>
 <li><strong>角色化拆分</strong>：意图/复杂度/澄清/记忆抽取各用独立短提示词 + <code>/no_think</code> 关闭思考链，单次调用只做一个决策，降低相互污染。</li>
 <li><strong>结构化输出协议</strong>：Agent 决策强制 JSON <code>{thought, action: tool|final|clarify, args/question/options}</code>；wiki 分析强制 entities/claims/relations JSON schema；解析失败一律走保底分支而非重试死磕。</li>
-<li><strong>前缀缓存友好分区</strong>：静态头 → U 区画像 → L1 指令 → C 区历史 → D 区动态证据，把「每轮都变」的内容压到尾部，最大化上游 prefix cache 命中（详见 2.3）。</li>
+<li><strong>前缀缓存友好分区</strong>：静态头 → L1 指令/半静态层 → <em>C 区追加式历史</em> → U 区画像 → D 区动态证据。关键整改：画像卡每轮可能被自动抽取重写（半动态），旧版置于历史之前导致 ~6k 历史前缀每轮整体失效（仅 ~640 静态头可命中）；现后移至历史之后，画像重写只失效尾部小段（详见 2.3 P0-2）。</li>
 </ul>
 
 <h4>提示词评估：三层门禁</h4>
@@ -525,58 +546,68 @@ system_prompt = prompt_store.get_active_body()   <span class="c"># ① 可治理
 </div>
 <h3 id="s2-2">2.2 记忆模块设计</h3>
 
-<h4>架构：五层 Markdown 存储 + SQLite 镜像 + 双注入层</h4>
+<h4>架构：静态/动态双轨 Markdown 存储 + SQLite 镜像（对齐 Claude Code 记忆设计，用户维度隔离）</h4>
 <div class="arch">
-  <div class="arch-layer"><div class="layer-name">存储层（memory_store.py · 五层 Markdown，对齐 Claude Code 记忆层级）</div><div class="arch-boxes">
-    <div class="abox"><b>L1 Managed</b><small>系统托管层（只读策略）</small></div>
-    <div class="abox"><b>L2 User</b><small>用户级 ~/.jianziruyang/CLAUDE.md 式全局记忆</small></div>
-    <div class="abox"><b>L3 Project</b><small>项目级共享记忆</small></div>
-    <div class="abox"><b>L4 Local</b><small>agent_memory 按 (user, agent_key) 隔离，上限 50 条</small></div>
-    <div class="abox hl"><b>L5 AutoMem</b><small>自动抽取记忆（user_memories SQLite 镜像 + Markdown 落盘）</small></div>
+  <div class="arch-layer"><div class="layer-name">静态记忆（memory_store.py · static/ 全局三层，每轮全量加载，仅管理员可演进）</div><div class="arch-boxes">
+    <div class="abox"><b>静态·User</b><small>输出友好度约定：中文回答、对比优先表格、长文本先摘要再由用户决定细问</small></div>
+    <div class="abox"><b>静态·Project</b><small>知识库系统规则与结果格式：先结论后引用，引用带页码/章节定位</small></div>
+    <div class="abox"><b>静态·Local</b><small>知识检索约束：只限本人权限内知识、系统能力边界、证据不足如实说明</small></div>
+    <div class="abox"><b>个人叠加层</b><small>我的指令 USER.md（≤500 字）/ KB 共享 PROJECT.md / 本人私有 local/&lt;kb&gt;.md</small></div>
   </div></div>
-  <div class="arch-layer"><div class="layer-name">治理层（memory.py）</div><div class="arch-boxes">
-    <div class="abox"><b>抽取器</b><small>每轮后台 extract_from_turn，≤3 条 add/update/delete</small></div>
-    <div class="abox"><b>查重/合并</b><small>overlap≥5 且相似度&gt;0.7 去重；簇合并</small></div>
-    <div class="abox"><b>遗忘/巩固</b><small>200 条容量淘汰；24h+5 会话巩固门控</small></div>
-    <div class="abox"><b>污染防护</b><small>敏感词拦截 / 手动自动互斥 / 用户编辑优先</small></div>
+  <div class="arch-layer"><div class="layer-name">动态记忆·短期（users/&lt;uid&gt;/sessions/&lt;sid&gt;/ · 一个完整 Session）</div><div class="arch-boxes">
+    <div class="abox"><b>transcript.md</b><small>完整对话流水账：只读原始记录，不丢任何细节（与 chat_messages 融合镜像）</small></div>
+    <div class="abox"><b>summary.md</b><small>Session Memory：10K Token 首次创建；+5K/工具调用/对话暂停触发后台 forked agent 更新</small></div>
+    <div class="abox"><b>task_state.md</b><small>Task State：从 transcript 追踪任务进度（plan/steps/status 投影）</small></div>
+    <div class="abox hl"><b>Compaction</b><small>上下文 ≥ 窗口 80% 硬触发，用 summary.md 替换历史、保留最近消息（kind=window80）</small></div>
+  </div></div>
+  <div class="arch-layer"><div class="layer-name">动态记忆·长期（users/&lt;uid&gt;/memories/ + MEMORY.md 索引 · 跨会话沉淀）</div><div class="arch-boxes">
+    <div class="abox hl"><b>四类型记忆</b><small>user/feedback/project/reference，每条独立 .md + 索引（- [memories/文件](memories/文件) — 描述）</small></div>
+    <div class="abox"><b>extractMemories</b><small>每轮 query loop 结束后台扫描整轮 transcript；hasMemoryWritesSince 过滤刚写过的内容</small></div>
+    <div class="abox"><b>AutoDream</b><small>固定 Prompt 整理代理；三重门控：≥24h + ≥5 个新会话（有转录）+ .consolidate-lock PID 锁</small></div>
+    <div class="abox"><b>污染防护</b><small>敏感词拦截 / 手动自动互斥 / 用户编辑优先 / 仅用户陈述可入库</small></div>
   </div></div>
   <div class="arch-layer"><div class="layer-name">注入层（每轮上下文装配）</div><div class="arch-boxes">
-    <div class="abox hl"><b>画像卡（U 区）</b><small>importance≥0.8 或 preference 类，≤6 条 / 300 字预算，稳定前缀</small></div>
+    <div class="abox"><b>静态三层 + 叠加层</b><small>静态全局规矩先注入，个人指令与 KB/本人叠加层随后</small></div>
+    <div class="abox hl"><b>画像卡（U 区）</b><small>importance≥0.8 或 user 类，≤6 条 / 300 字预算，稳定前缀</small></div>
     <div class="abox hl"><b>相关记忆（D 区）</b><small>按当前问题评分 Top-K 动态注入</small></div>
   </div></div>
 </div>
 
-<h4>记忆结构：四类记忆 + 加权评分</h4>
+<h4>长期记忆结构：四类型 + 加权评分</h4>
 <table class="tbl">
 <tr><th>类型</th><th>权重</th><th>示例</th><th>用途</th></tr>
-<tr><td>preference 偏好</td><td>1.2</td><td>「回答请简洁」「我关注睡眠养生」</td><td>优先进画像卡，长期塑造回答风格</td></tr>
-<tr><td>fact 事实</td><td>1.2</td><td>「用户对花生过敏」「笔记主题是太极拳」</td><td>高权重事实，影响检索与回答约束</td></tr>
-<tr><td>goal 目标</td><td>1.0</td><td>「正在整理失眠调理方案」</td><td>跨会话任务连续性</td></tr>
-<tr><td>feedback 反馈</td><td>1.0</td><td>「上次回答太啰嗦」</td><td>行为纠偏信号</td></tr>
+<tr><td>user 用户信息</td><td>1.2</td><td>「用户对花生过敏」「我关注睡眠养生」</td><td>优先进画像卡，长期塑造回答风格与约束</td></tr>
+<tr><td>feedback 反馈纠正</td><td>1.2</td><td>「上次回答太啰嗦」「回答先给结论」</td><td>行为纠偏信号，纠正覆盖旧记忆</td></tr>
+<tr><td>project 项目目标</td><td>1.0</td><td>「正在整理失眠调理方案」</td><td>跨会话任务连续性</td></tr>
+<tr><td>reference 参考索引</td><td>0.9</td><td>「方案文档在笔记库『调理』目录」</td><td>外部资源指针，按需查详</td></tr>
 </table>
-<p>相关层召回评分公式（决定 D 区注入哪些记忆）：</p>
+<p>旧类型 preference/fact 归一为 user、goal 归一为 project（写入口统一 _normalize_type，存量迁移）。相关层召回评分公式（决定 D 区注入哪些记忆）：</p>
 <div class="formula">score = overlap × 2 + (importance + decay) × weight + 0.1 × confidence<br>
 decay = exp(−days_since_last_use / 30)　<span style="color:#6b6156"># 指数时间衰减，30 天半衰尺度</span><br>
 <span style="color:#6b6156"># 门禁：关键词 overlap 仅统计 ≥2 字的词，杜绝单字误命中；超 30 天未更新附新鲜度警告</span></div>
 
 <h4>记忆生命周期：写入 → 治理 → 注入 → 遗忘</h4>
 <div class="flow">
-  <div class="fstep"><span class="who">写入触发</span><b>长期记忆写入触发</b>：每轮回答完成后 _post_turn_background 依序执行 module_recall.flush → maybe_summarize → <b>extract_from_turn</b>（LLM 按 What-NOT-to-save 负清单抽取，每轮 ≤3 条 add/update/delete 操作，附 target_hint 指向被更新条目）→ consolidate_if_due（巩固门控：距上次 ≥24h 且累计 ≥5 会话才触发，避免高频抖动）</div>
+  <div class="fstep"><span class="who">写入触发</span><b>extractMemories</b>：每轮 query loop 完整结束后 _post_turn_background 依序执行 module_recall.flush → maybe_summarize（Session Memory 摘要）→ <b>extract_from_turn</b>（后台 forked agent 扫描整轮 transcript：用户反馈/纠正/信息，与现有记忆比对，LLM 按 What-NOT-to-save 负清单抽取，每轮 ≤3 条 add/update/delete，附 target_hint）→ consolidate_if_due（AutoDream 三重门控）</div>
   <div class="farrow">↓</div>
-  <div class="fstep"><span class="who">写入门禁</span>敏感词检测不落库 → 查重（关键词 overlap≥5 且 SequenceMatcher 相似度&gt;0.7 判重，改 update 而非 add）→ 手动写入与自动抽取互斥窗口 120s（用户刚手动改过的记忆不被自动覆盖）</div>
+  <div class="fstep"><span class="who">写入门禁</span>敏感词检测不落库 → 查重（关键词 overlap≥5 且 SequenceMatcher 相似度&gt;0.7 判重，改 update 而非 add）→ <b>hasMemoryWritesSince</b> 过滤本轮刚写过的内容（sim&gt;0.9 的 add 丢弃，防同一件事反复写）→ 手动写入与自动抽取互斥窗口 120s</div>
   <div class="farrow">↓</div>
-  <div class="fstep"><span class="who">治理</span>簇合并：同主题 ≥3 条且 overlap≥6 → LLM 合并为一条；容量上限 200 条，超限按 importance 升序 + last_used 最旧优先遗忘；edited_by_user 标记的记忆在压缩/合并中优先保留</div>
+  <div class="fstep"><span class="who">AutoDream 整理</span>三重门控任一不满足立即退出：① 时间门距上次整合 ≥24h；② 会话门期间 ≥5 个产生新转录的会话；③ 并发锁 .consolidate-lock（PID 文件锁，防多进程重复整合）。通过后启动固定 Prompt 整理代理：合并重复 / 更新过时 / 删除失效 / 沉淀新记忆（JSON 动作数组，≤10 个，合法 id 校验）；LLM 失败回退逐类型簇合并；落 action=dream 事件</div>
   <div class="farrow">↓</div>
-  <div class="fstep"><span class="who">注入</span>画像卡（稳定 U 区）+ 相关层（动态 D 区）；L5 surfaced 去重——同一会话已注入过的记忆不重复出现；compact 后重置 surfaced 状态</div>
+  <div class="fstep"><span class="who">治理兜底</span>簇合并：同主题 ≥3 条且 overlap≥6 → LLM 合并为一条；容量上限 200 条，超限按 importance 升序 + last_used 最旧优先遗忘；edited_by_user 标记的记忆在压缩/合并中优先保留</div>
   <div class="farrow">↓</div>
-  <div class="fstep green"><span class="who">观测</span>每次写入/更新/遗忘落 memory_write_events 表，可观测性页可审计「Agent 为什么记住了这句话」</div>
+  <div class="fstep"><span class="who">注入</span>静态三层全量 + 个人叠加层 + 画像卡（稳定 U 区）+ 相关层（动态 D 区）；surfaced 去重——同一会话已注入过的记忆不重复出现；compact 后重置 surfaced 状态</div>
+  <div class="farrow">↓</div>
+  <div class="fstep green"><span class="who">观测</span>每次写入/更新/遗忘/整理落 memory_write_events 表（含 dream 动作），可观测性页可审计「Agent 为什么记住了这句话」</div>
 </div>
 
-<h4>记忆压缩与污染防护</h4>
+<h4>短期记忆与 Compaction 压缩链</h4>
 <ul>
-<li><strong>记忆压缩</strong>：簇合并（语义去冗）+ 容量淘汰（重要性遗忘）+ 会话级压缩联动（autoCompact 时把历史中的关键事实沉淀进摘要九节，记忆库不重复存会话细节）。</li>
-<li><strong>污染防护四道闸</strong>：① 抽取提示词内置 What-NOT-to-save 负清单（一次性闲聊、临时数值、他人信息、指令式内容不入库）；② 敏感词/凭据模式拦截；③ 查重防「同一事实反复写入放大权重」；④ 工具结果与外部抓取内容<em>不作为记忆抽取来源</em>——只有用户亲口陈述才可沉淀，防提示注入借记忆持久化。</li>
-<li><strong>用户主权</strong>：记忆管理页可查看/编辑/删除全部记忆；edited_by_user 优先级最高，自动治理不得覆盖。</li>
+<li><strong>transcript 只读流水账</strong>：每次会话持久化时全量重生成 users/&lt;uid&gt;/sessions/&lt;sid&gt;/transcript.md，压缩只改读时投影不改原始记录，从头到尾不丢细节。</li>
+<li><strong>Session Memory 触发口径</strong>：首次上下文达 10K Token 立即创建 summary.md；此后增长 ≥5K Token / 本轮有工具调用 / 对话暂停 ≥10 分钟触发后台代理更新（事件触发绕过批门控）；ctx_tokens_at_update 水位防抖。</li>
+<li><strong>Compaction 三级</strong>：micro 空闲衰减（读时投影不落库）→ auto 摘要压缩（阈值触发，连败 3 次熔断）→ <strong>window80 硬触发</strong>（上下文 ≥ 总窗口 80% 立即用 summary.md 替换历史，绕过批门控与熔断但尊重 edited_by_user，tail 保留最近 6 条）。</li>
+<li><strong>污染防护四道闸</strong>：① 抽取提示词内置 What-NOT-to-save 负清单（一次性闲聊、临时数值、他人信息、指令式内容不入库）；② 敏感词/凭据模式拦截；③ 查重 + hasMemoryWritesSince 防「同一事实反复写入放大权重」；④ 工具结果与外部抓取内容<em>不作为记忆抽取来源</em>——只有用户亲口陈述才可沉淀，防提示注入借记忆持久化。</li>
+<li><strong>用户主权</strong>：记忆管理页可查看/编辑/删除全部记忆；静态层仅管理员可演进；edited_by_user 优先级最高，自动治理不得覆盖。</li>
 </ul>
 
 <div class="impact">没有记忆层：每轮对话都是「初次见面」，偏好/事实/目标全部丢失，画像卡与个性化检索无从谈起；没有治理层：记忆库会在数百轮后被闲聊噪声淹没，错误记忆（污染）比没有记忆更危险——它会持续误导后续所有回答。</div>
@@ -584,15 +615,15 @@ decay = exp(−days_since_last_use / 30)　<span style="color:#6b6156"># 指数�
 <div class="cmp"><div class="cmp-head">横向对比 · 记忆系统</div>
 <table class="tbl wrap">
 <tr><th>维度</th><th>见字如面</th><th>Claude Code</th><th>OpenClaw</th><th>Codex</th></tr>
-<tr><td>存储形态</td><td>五层 Markdown + SQLite 镜像双轨（可浏览可审计）</td><td>CLAUDE.md 层级（Managed/User/Project）+ auto memory 目录</td><td>Markdown 记忆文件（MEMORY.md + 每日日志）</td><td>AGENTS.md 静态指令，无自动长期记忆</td></tr>
-<tr><td>自动写入</td><td>每轮后台抽取，≤3 条操作 + 负清单 + 查重 + 互斥窗口</td><td>auto memory 自动沉淀（# 快捷记忆 + 自动学习）</td><td>Agent 自主写记忆文件，约束靠提示词</td><td>无</td></tr>
-<tr><td>遗忘/衰减</td><td>指数衰减评分 + 200 条容量淘汰 + 簇合并</td><td>无显式衰减（文件手动维护）</td><td>无显式衰减</td><td>—</td></tr>
+<tr><td>存储形态</td><td>静态/动态双轨 Markdown + SQLite 镜像（静态三层 + 短期四模块 + 长期四类型，可浏览可审计）</td><td>CLAUDE.md 层级（Managed/User/Project/Local）+ auto memory 目录 + transcript/summary</td><td>Markdown 记忆文件（MEMORY.md + 每日日志）</td><td>AGENTS.md 静态指令，无自动长期记忆</td></tr>
+<tr><td>自动写入</td><td>extractMemories 每轮扫描整轮 transcript + hasMemoryWritesSince 去重；AutoDream 三重门控固定 Prompt 整理</td><td>auto memory 自动沉淀 + AutoDream 三重门控（24h/5 会话/并发锁）</td><td>Agent 自主写记忆文件，约束靠提示词</td><td>无</td></tr>
+<tr><td>遗忘/衰减</td><td>指数衰减评分 + 200 条容量淘汰 + 簇合并 + AutoDream 删除动作</td><td>AutoDream 整理合并，无显式衰减</td><td>无显式衰减</td><td>—</td></tr>
 <tr><td>污染防护</td><td>敏感词闸 + 查重 + 来源限定（仅用户陈述）+ 用户编辑优先</td><td>权限确认 + 用户可审文件</td><td>弱（提示词约束为主）</td><td>—</td></tr>
-<tr><td>多用户隔离</td><td>按 user_id 硬隔离 + L4 按 (user, agent_key) 二级隔离</td><td>单用户，无需隔离</td><td>单用户</td><td>任务级隔离</td></tr>
+<tr><td>多用户隔离</td><td>按 user_id 硬隔离（静态全局共享 + 动态 users/&lt;uid&gt;/ 全隔离）+ 助手按 (user, agent_key) 二级隔离</td><td>单用户，无需隔离</td><td>单用户</td><td>任务级隔离</td></tr>
 </table></div>
 <div class="grid2">
-<div class="good"><b>优势</b>：记忆治理完整度对标 Claude Code 并超出——衰减评分、容量遗忘、簇合并、写入事件审计、多租户隔离都是编码 Agent 不需要的能力；「仅用户陈述可入库」是比文件式记忆更强的污染防线。</div>
-<div class="impact" style="margin:0">短板：LLM 抽取每轮都有成本与延迟（放在后台缓解）；相比 OpenClaw「Agent 自由写文件」的灵活性，本系统记忆 schema 固定（四类），开放域助理式的自由笔记能力较弱——这是垂直域取舍。</div>
+<div class="good"><b>优势</b>：记忆治理完整度对标 Claude Code 并超出——衰减评分、容量遗忘、簇合并、写入事件审计、多租户隔离都是编码 Agent 不需要的能力；「仅用户陈述可入库」是比文件式记忆更强的污染防线；短期 transcript 只读流水账保证压缩不丢原始细节。</div>
+<div class="impact" style="margin:0">短板：LLM 抽取每轮都有成本与延迟（放在后台 forked agent 缓解）；相比 OpenClaw「Agent 自由写文件」的灵活性，本系统记忆 schema 固定（四类型），开放域助理式的自由笔记能力较弱——这是垂直域取舍。</div>
 </div>
 
 <h3 id="s2-3">2.3 上下文工程</h3>
@@ -601,28 +632,50 @@ decay = exp(−days_since_last_use / 30)　<span style="color:#6b6156"># 指数�
 <table class="tbl">
 <tr><th>分区</th><th>内容</th><th>变化频率</th><th>设计意图</th></tr>
 <tr><td>静态头</td><td>系统提示词正文 + FINAL_ANSWER_RULES</td><td>仅发布时变</td><td>prefix cache 锚点</td></tr>
-<tr><td>U 区</td><td>用户画像卡（≤6 条 / MEMORY_PROFILE_CHARS=300）</td><td>低频</td><td>稳定个性化前缀</td></tr>
-<tr><td>L1 指令</td><td>知识引用契约 / 工具使用说明</td><td>场景级</td><td>行为约束</td></tr>
-<tr><td>C 区</td><td>会话历史（经三级压缩链处理）</td><td>每轮增长</td><td>对话连续性</td></tr>
+<tr><td>L1 指令/半静态层</td><td>知识引用契约 / 静态记忆三层 + 个人叠加层 / Skill 提示</td><td>场景级 / 用户编辑级</td><td>行为约束，跨轮稳定</td></tr>
+<tr><td>C 区</td><td>会话历史（Compaction 压缩链·追加式冻结 clip）</td><td>每轮追加</td><td><b>前缀主体</b>：位置无关渲染，单条只依赖自身内容/写时标签</td></tr>
+<tr><td>U 区</td><td>用户画像卡（≤6 条 / MEMORY_PROFILE_CHARS=300）</td><td>半动态（每轮可能被自动抽取重写）</td><td><b>历史之后</b>：重写只失效尾部小段（P0-2）</td></tr>
 <tr><td>D 区</td><td>相关记忆 Top-K + 检索证据 + 工具观测</td><td>每轮全变</td><td>动态信息压尾部，保前缀缓存</td></tr>
 <tr><td>附件/实时</td><td>附件解析文本、web_search 结果</td><td>按需</td><td>多模态与时效补充</td></tr>
 </table>
 <div class="note"><b>可观测的上下文</b>：observability 按 <code>agent_token_segments</code> 六段记录每轮 token 构成，并用上游真实 prompt_tokens 按比例分摊校准（flush_segments），本周期对半拆分基线——上下文不是黑盒，每一段花了多少 token 在监控页可见。这是「上下文爆炸」能被提前发现的前提。</div>
 
-<h4>三级压缩链（对齐 Claude Code 的 microCompact / autoCompact / SessionMemoryCompact）</h4>
+<h4>前缀缓存整改（P0-1/P0-2）：动态源全部移出前缀头部</h4>
+<ul>
+<li><strong>问题取证</strong>：网关钻取明细曾显示 chat_answer 单次输入 5,622 / 命中缓存仅 640——段度量显示历史段 5.6k~6.9k token 才是前缀主体，而画像卡仅 ~162 token 却每轮被自动抽取重写且置于历史之前，画像一变其后历史前缀全部 miss。</li>
+<li><strong>P0-1</strong>：D 区相关记忆（每轮随 query 变化）一律置于历史/工具上下文之后、提问之前。</li>
+<li><strong>P0-2</strong>：U 区画像后移至 C 区历史之后，新顺序 <code>S → 半静态层 → C → U → D → 提问</code>；chat.py 快路径与 chat_agent 决策/规划/回答三装配器统一改序，画像被重写只失效尾部小段。</li>
+<li><strong>C 区自身前缀友好</strong>：摘要批更新门控（新增不足 6 条不重算）、位置无关冻结 clip（单条渲染只依赖自身内容/写时标签与是否位于全文区，不随窗口滑动重排）、未达 FREEZE_MAX_MESSAGES 上限前完全 append-only。</li>
+<li><strong>契约回归</strong>：test_prompt_prefix_stability 断言分区顺序与「画像重写后 S+C 前缀逐字节不变」；后台角色（intent_rewrite/wiki_compile/记忆抽取等）均为「静态 system + 动态 user」，天然最优。</li>
+<li><strong>效果可验证</strong>：网关四维度用量（输入/输出/命中缓存/未命中缓存，厂商 usage 为准）直接观察命中率变化，见 5.1/5.2。</li>
+</ul>
+
+<h4>历史窗口预算整改（多轮会话历史 Token 膨胀）</h4>
+<ul>
+<li><strong>问题取证</strong>：多轮会话钻取显示历史对话段 8,332 token、占比 87.4%——摘要只压「旧消息」，而「最近几条全文 + 其余每条 800 字」是压缩链刻意保留的残留区：全文区无单条上限（长回答原样进历史）、800 字在 CJK 1:1 口径≈800 token/条、批门控让 tail 在 6~12 条间累积。</li>
+<li><strong>全文区单条帽</strong>：最近 KEEP_RECENT_FULL=4 条内超 FULL_ZONE_MAX_CHARS=1200 的助手长回答读时投影为头部摘录+原长尾注（用户消息不帽，保留完整意图）。</li>
+<li><strong>截断档减半</strong>：CLIP_MID_CHARS 800→400，截断区直接砍半。</li>
+<li><strong>实时类答案衰减</strong>：route.is_realtime 写时打标落 chat_messages.is_realtime（history_budget_v1 迁移，存量默认 0 优雅降级），实时答案入历史即衰减到 200 字，不等 60 分钟空闲衰减——天气/新闻类回答下一轮即过期，全文保留零价值。</li>
+<li><strong>计量去重</strong>：history_segment_text 剔除再水化摘要 system 消息（summary 段已单独计量），钻取占比不再虚高。</li>
+<li><strong>契约回归</strong>：test_history_window_budget 断言三档投影位置无关、追加新轮前缀冻结（仅退出全文区一次性截断迁移）、标签持久化往返与计量去重。</li>
+</ul>
+
+<h4>Compaction 压缩链（对齐 Claude Code：micro 衰减 / auto 摘要 / window80 硬触发 + Session Memory 持久）</h4>
 <div class="flow">
-  <div class="fstep blue"><span class="who">L1 microClip</span><b>轻量裁剪（无 LLM，每轮廉价执行）</b>：最近 KEEP_RECENT_FULL=4 条保留全文；中段消息截断到 CLIP_MID_CHARS=800 字；会话空闲 ≥60min 时仅保留最近 5 条全文、其余压到 200 字——「离开越久，细节越不值得留」</div>
-  <div class="farrow">↓ 当 token headroom &lt; 6000（优先按 token 预算触发）</div>
-  <div class="fstep gold"><span class="who">L2 autoCompact</span><b>LLM 结构化摘要</b>：最少 8 条才压缩、保留最近 6 条全文、批更新门控 6 条（防抖）；transcript 上限 20000 字 / 单条 2000 字；产出 <b>九节摘要</b>（1-5 节为不可变文案骨架：任务目标/关键事实/已完成/待办/约束…），SUMMARY_MAX_CHARS=400；递归守卫（摘要不再被二次压缩）；<b>连续失败 3 次熔断</b>停止压缩尝试；记录 compact_kind / before_tokens 供观测；edited_by_user 消息优先保留</div>
+  <div class="fstep blue"><span class="who">L1 microClip</span><b>轻量裁剪（无 LLM，每轮廉价执行）</b>：三档位置无关投影——is_realtime 打标的实时答案入历史即衰减到 200 字；最近 KEEP_RECENT_FULL=4 条内助手长回答超 FULL_ZONE_MAX_CHARS=1200 投影为头部摘录；其余较早消息截断到 CLIP_MID_CHARS=400 字（800 减半）；会话空闲 ≥60min 时仅保留最近 5 条全文、其余压到 200 字——「离开越久，细节越不值得留」</div>
+  <div class="farrow">↓ 上下文达 10K Token 首次 / 增长 5K / 工具调用 / 暂停（Session Memory 后台摘要）</div>
+  <div class="fstep gold"><span class="who">L2 autoCompact</span><b>LLM 结构化摘要</b>：最少 8 条才压缩、保留最近 6 条全文、批更新门控 6 条（防抖）；transcript 上限 20000 字 / 单条 2000 字；产出结构化摘要（任务目标/关键事实/已完成/待办/约束…），SUMMARY_MAX_CHARS=400；递归守卫（摘要不再被二次压缩）；<b>连续失败 3 次熔断</b>停止压缩尝试；记录 compact_kind / before_tokens 供观测；edited_by_user 消息优先保留</div>
+  <div class="farrow">↓ 上下文 ≥ 总窗口 80%（131072×0.8≈104858 Token）</div>
+  <div class="fstep gold"><span class="who">L2.5 window80</span><b>Compaction 硬触发</b>：绕过批门控与熔断立即压缩，用 summary.md 摘要替换对应历史、读时投影 tail 仅留最近 KEEP_RECENT_MESSAGES=6 条（kind=window80）；尊重用户编辑过的摘要（edited_by_user 不覆盖）</div>
   <div class="farrow">↓ 会话恢复 / 跨设备续聊</div>
-  <div class="fstep green"><span class="who">L3 SessionMemoryCompact</span><b>文件级会话记忆</b>：SESSION.md 落盘，恢复时文件优先于数据库历史；再水化（rehydration）注入 continuation 上下文并自动抑制追问——用户回来时 Agent「接着上次干」，而不是重新问一遍</div>
+  <div class="fstep green"><span class="who">L3 Session Memory 持久</span><b>文件级会话记忆</b>：短期记忆 users/&lt;uid&gt;/sessions/&lt;sid&gt;/summary.md 落盘（另有 transcript.md 只读流水账与 task_state.md 进度投影），恢复时文件优先于数据库历史；再水化（rehydration）注入 continuation 上下文并自动抑制追问——用户回来时 Agent「接着上次干」，而不是重新问一遍</div>
 </div>
 <p>另有 <strong>FREEZE_MAX_MESSAGES=24</strong> 的 append-only 冻结窗口：压缩只作用于旧消息，最近消息序列冻结不可变，保证压缩与流式写入不打架。</p>
 
 <h4>上下文爆炸应对（组合拳）</h4>
 <ul>
 <li><strong>事前</strong>：分区装配 + 画像卡 300 字硬预算 + 相关记忆 Top-K 限量 + 检索证据条数/字数上限（预览 3 条 ×300 字）。</li>
-<li><strong>事中</strong>：token headroom 6000 预警线触发 autoCompact；工具观测单次截断 4000 字；FC 最终回答 100k 字符上限。</li>
+<li><strong>事中</strong>：上下文达 10K Token 触发 Session Memory 摘要、达窗口 80% 硬触发 Compaction；工具观测单次截断 4000 字；FC 最终回答 100k 字符上限。</li>
 <li><strong>事后</strong>：segment 度量发现某段异常膨胀 → 告警分析引擎归因（见 5.2）；压缩失败熔断后降级为截断而非无限重试。</li>
 <li><strong>兜底</strong>：请求总预算 300s + Agent 200s，上下文装配再慢也不会拖垮连接。</li>
 </ul>
@@ -630,7 +683,7 @@ decay = exp(−days_since_last_use / 30)　<span style="color:#6b6156"># 指数�
 <h4>不同用户的上下文隔离</h4>
 <ul>
 <li><strong>会话归属校验</strong>：chat_stream 入口即校验 session 属主，跨用户 session_id 直接拒绝。</li>
-<li><strong>记忆隔离</strong>：user_memories / agent_memory 全部按 user_id（L4 再按 agent_key）查询，画像卡只装本用户记忆。</li>
+<li><strong>记忆隔离</strong>：user_memories / agent_memory 全部按 user_id（助手再按 agent_key）查询，短期记忆按 users/&lt;uid&gt;/sessions/ 目录隔离，画像卡只装本用户记忆。</li>
 <li><strong>检索隔离</strong>：RAG 权限前置——只在本用户可见知识库的子索引内检索（见 3.1）。</li>
 <li><strong>缓存隔离</strong>：语义缓存 v2 只读写<em>个人域</em>，A 用户的答案绝不可能命中给 B 用户。</li>
 <li><strong>工具凭据隔离</strong>：个人工具凭据按属主 AESGCM 加密，执行身份二次校验。</li>
@@ -641,15 +694,15 @@ decay = exp(−days_since_last_use / 30)　<span style="color:#6b6156"># 指数�
 <div class="cmp"><div class="cmp-head">横向对比 · 上下文工程</div>
 <table class="tbl wrap">
 <tr><th>维度</th><th>见字如面</th><th>Claude Code</th><th>OpenClaw</th><th>Codex</th></tr>
-<tr><td>压缩链</td><td>microClip → autoCompact（九节摘要）→ SESSION.md 三级，参数化阈值 + 熔断</td><td>microCompact → autoCompact → SessionMemoryCompact 三级（本系统直接对齐其口径）</td><td>会话重置 + 记忆文件兜底，无精细压缩链</td><td>云端 compaction（摘要式），细节不可配</td></tr>
-<tr><td>触发策略</td><td>token headroom 6000 优先 + 消息数门控 + 空闲时间衰减</td><td>上下文占用百分比阈值触发</td><td>按渠道会话长度粗粒度</td><td>平台自动</td></tr>
+<tr><td>压缩链</td><td>microClip → autoCompact（结构化摘要）→ window80 硬触发 + summary.md 持久，参数化阈值 + 熔断</td><td>microCompact → autoCompact → SessionMemoryCompact（本系统对齐其口径并增 80% 硬触发）</td><td>会话重置 + 记忆文件兜底，无精细压缩链</td><td>云端 compaction（摘要式），细节不可配</td></tr>
+<tr><td>触发策略</td><td>10K 首次 / +5K / 工具 / 暂停事件触发 + 窗口 80% 硬触发 + 空闲时间衰减</td><td>上下文占用百分比阈值触发</td><td>按渠道会话长度粗粒度</td><td>平台自动</td></tr>
 <tr><td>Token 可观测</td><td>六段 segment 度量 + 真实 prompt_tokens 分摊落库</td><td>/context 命令查看占用</td><td>无分段度量</td><td>任务级用量</td></tr>
 <tr><td>多用户隔离</td><td>会话/记忆/检索/缓存/凭据五重硬隔离</td><td>单用户</td><td>单用户</td><td>任务沙箱隔离</td></tr>
-<tr><td>恢复语义</td><td>SESSION.md 文件优先 + continuation 再水化 + 抑制追问</td><td>--resume 恢复会话 JSONL</td><td>会话文件续接</td><td>云端任务持久化</td></tr>
+<tr><td>恢复语义</td><td>summary.md 文件优先 + continuation 再水化 + 抑制追问（transcript 只读流水账不丢细节）</td><td>--resume 恢复会话 JSONL</td><td>会话文件续接</td><td>云端任务持久化</td></tr>
 </table></div>
 <div class="grid2">
 <div class="good"><b>优势</b>：压缩链与 Claude Code 同构但多了「熔断 + 分段度量 + 多租户隔离」；token 分摊校准让上下文成本可审计，这是 CLI 工具普遍缺失的工程能力。</div>
-<div class="impact" style="margin:0">短板：九节摘要 400 字上限对超长复杂任务偏紧（编码 Agent 的 compaction 通常保留更多细节）；SQLite 单写者使压缩与聊天写入串行化，高并发下压缩延迟会传导到响应。</div>
+<div class="impact" style="margin:0">短板：摘要 400 字上限对超长复杂任务偏紧（编码 Agent 的 compaction 通常保留更多细节，本系统以 transcript 只读流水账兜底原始细节）；SQLite 单写者使压缩与聊天写入串行化，高并发下压缩延迟会传导到响应。</div>
 </div><h3 id="s2-4">2.4 意图识别与澄清</h3>
 
 <h4>设计原理：一次调用三要素 + 两级分流 + 证据驱动澄清</h4>
@@ -670,6 +723,7 @@ decay = exp(−days_since_last_use / 30)　<span style="color:#6b6156"># 指数�
 <h4>任务规划与分解（Plan&amp;Execute）</h4>
 <ul>
 <li>complex 任务先由 LLM 产出计划（≤MAX_PLAN_STEPS=5 步），前端以 <code>plan</code> SSE 事件渲染步骤清单，逐步执行并回报进度。</li>
+<li><strong>执行前授权</strong>：KB 覆盖面有限的内容（运动/疗程/公开指南等）必须规划 web_search；未开联网时规划仍可见联网工具（标「需授权」），plan 事件后、<strong>任何步骤执行前</strong>授权门拦截（need_search 卡 + chat_pending_plans 持久化）；授权后按已确认计划<em>免重规划</em>续跑，拒绝则剔除 web 步骤。前端待办对 needs_auth 步骤明示「待授权联网搜索」，避免误以为已检索。</li>
 <li>v1 采用<strong>静态计划</strong>（不动态重规划）：每步内部仍是 ReAct 小循环，步间失败走降级回答而非推倒重来——用「计划稳定性」换「可预测的成本与时长」。</li>
 <li>规划提示词约束每步必须可由现有工具（search_knowledge / web_search / find_skill_material / save_personal_skill）完成，杜绝「画饼式计划」。</li>
 </ul>
@@ -745,11 +799,13 @@ decay = exp(−days_since_last_use / 30)　<span style="color:#6b6156"># 指数�
 
 <h4>与 Web Search 协同</h4>
 <div class="flow">
-  <div class="fstep"><span class="who">触发</span>意图 freshness=dynamic，或 ReAct 中模型主动选择 web_search 工具，或证据校验发现知识库缺口（need_search 卡片征得用户同意）</div>
+  <div class="fstep"><span class="who">触发</span>意图 freshness=dynamic，或 ReAct 中模型主动选择 web_search，或证据校验发现知识库缺口；<b>未开联网时一律先过授权门</b>：计划含 web 步骤 → 执行前 need_search 卡（零执行），ReAct 提议 web_search → 工具执行前拦截</div>
   <div class="farrow">↓</div>
   <div class="fstep"><span class="who">并行</span>fast 路径下 RAG 检索与 web_search <b>并行发起</b>（asyncio.gather），互不等待；结果分别标注来源域（知识库 [n] / 网络 [w]）</div>
   <div class="farrow">↓</div>
   <div class="fstep"><span class="who">融合</span>统一进入 rerank/过滤与证据装配；网络结果同样受引用契约约束，verify_citations 核对编号越界</div>
+  <div class="farrow">↓</div>
+  <div class="fstep"><span class="who">续跑</span>授权后新 /chat/send：take_pending_plan 免重规划续跑；同会话同问题检索快照（TTL 15min）复用上一轮 KB 结果，待办明示「复用上一轮结果」；capability_gap 动作已执行标 resolved 标灰</div>
   <div class="farrow">↓</div>
   <div class="fstep green"><span class="who">边界</span>联网/工具/动态回答<b>不进入语义缓存</b>（时效性不可复用）；web_search 出网经网关审计与 SSRF 防护</div>
 </div>
@@ -843,6 +899,7 @@ decay = exp(−days_since_last_use / 30)　<span style="color:#6b6156"># 指数�
 <h4>RAG 更新、可观测性与评估</h4>
 <ul>
 <li><strong>更新机制</strong>：两段式上传（先传文件入库登记，再异步解析索引）；sha256 指纹去重防重复入库；素材更新触发增量重索引；Wiki 侧 source_hash 增量编译（见 3.2）；删除素材同步清理向量/倒排条目。</li>
+<li><strong>跨轮检索复用</strong>：retrieval_reuse 在检索成功后按 (session, user, query) 写入快照（TTL 15min，upsert 顺延）；用户授权联网重发或待授权计划续跑时直接复用快照，知识步骤零重复检索（待办明示「复用上一轮结果」）；过期/无快照一律回落正常检索，不改变既有行为。</li>
 <li><strong>可观测性</strong>：每次检索落 trace span（检索耗时/候选数/过滤数/最终证据数）；<code>module_recall</code> 统计各知识模块召回后的用户点赞率差——用真实反馈回答「哪个库的召回在帮忙、哪个在帮倒忙」；context_compact_events / 检索失败均入告警分析引擎。</li>
 <li><strong>RAG 评估</strong>：Ragas 四指标（Faithfulness 原子陈述核验 / Answer Relevance 反推问题余弦 / Context Precision 加权排序质量 / Context Recall 参考陈述覆盖）+ 命中率/judge/延迟；testset_builder 双源造题（KB 生成 + 真实日志挖掘）→ 人工审核 → eval_cases；kb_eval 按库出体检报告；发布前评估回归阈值 0.85（EDD 流水线，见 5.4）。</li>
 <li><strong>与 LLM-Wiki 协同</strong>：Wiki 卡片作为 is_wiki_page 特殊 chunk 回写向量库，检索时稳定前置——「先给体系化结论，再给原始碎片佐证」；Wiki 知识助手反过来用 RAG 检索作为 read 工具的证据源。</li>
@@ -893,7 +950,7 @@ LLM-Wiki 的思路是<strong>离线知识编译</strong>——用 LLM 把散落�
 
 <h4>完整编译流程</h4>
 <div class="flow">
-  <div class="fstep"><span class="who">1</span>素材入库/更新 → 计算 source_hash → 与已编译版本比对，变更才入 wiki_compile_queue（持久队列，进程重启不丢任务，串行执行防 LLM 并发风暴，失败自动重试）</div>
+  <div class="fstep"><span class="who">1</span>素材入库/更新 → 计算 source_hash → 与已编译版本比对，变更才入 wiki_compile_queue（持久队列，进程重启不丢任务，串行执行防 LLM 并发风暴，失败自动重试）；队列 payload 持久化发起人 <code>actor_user_id</code>，worker 逐任务恢复 call_context → 编译出网计入发起人绑定密钥（如 admin），不静默计入系统内部密钥（归属整改，见 5.1）</div>
   <div class="farrow">↓</div>
   <div class="fstep"><span class="who">2</span><b>第一步 CoT · 分析</b>（_ANALYSIS_PROMPT）：LLM 输出结构化 JSON——entities（实体）、entity_relations（实体关系）、claims（论断）、wiki_relations（词条关联）、contradictions（素材间矛盾）、structure（建议结构）。<em>先分析后写作</em>，把「理解」与「表达」分离，显著降低卡片幻觉</div>
   <div class="farrow">↓</div>
@@ -1112,7 +1169,7 @@ proc = <span class="k">await</span> asyncio.create_subprocess_exec(*argv,   <spa
 
 <h4>运转流程（proxy.py · OpenAI 兼容 /v1/chat/completions）</h4>
 <div class="flow">
-  <div class="fstep"><span class="who">1</span><b>密钥鉴权</b>：sha256 比对 → 解析 key_type 与绑定用户；internal 无限配额（后台模块兜底），public 按每用户限额，user 强制绑定不降级公共密钥</div>
+  <div class="fstep"><span class="who">1</span><b>密钥鉴权与归属</b>：sha256 比对 → 解析 key_type 与绑定用户；出网密钥解析优先级 <b>绑定用户密钥 &gt; 公共密钥 &gt; 内部密钥</b>，绑定即强制不降级；业务侧 create_for_role 归属显式 user_id &gt; 请求级 call_context，后台任务（wiki 编译/在线评测/链接导入/确认入库等）逐任务恢复发起人上下文 → admin 内部调用全部计入 admin 绑定密钥；internal 无限配额（无归属兜底），public 按每用户限额</div>
   <div class="farrow">↓</div>
   <div class="fstep"><span class="who">2</span><b>模型授权 + 安全审计</b>：校验密钥可用模型 → security 引擎扫描（凭证/敏感路径/工具命令/Unicode 隐写/追踪像素/公网 IP），按模式脱敏或阻断</div>
   <div class="farrow">↓</div>
@@ -1128,6 +1185,14 @@ proc = <span class="k">await</span> asyncio.create_subprocess_exec(*argv,   <spa
 <li><strong>限额</strong>：public/user 密钥可设 daily_token_limit / daily_request_limit / rate_per_minute；每用户额度用尽明确拒绝并提示联系管理员；/api/gateway/my-quota 提供友好余量查询。</li>
 <li><strong>审计</strong>：每次调用的状态码/Token/路由/工具调用/风险明细/可视化链路全量入库，支持按密钥/模型/渠道/状态/风险等级/时间/关键词筛选分页；日志只追加不可篡改，异常静默降级绝不影响代理主流程。</li>
 <li><strong>语义缓存合同制</strong>：业务层签发「时效 + 上下文 + 证据」合同，网关验证并绑定实际模型与上游；只读写个人域 v2 表；联网/工具/动态回答不参与复用；<em>有效期从生成时计算，命中只加热度不延长新鲜度</em>——杜绝「缓存越用越新」的过期答案永生问题。</li>
+</ul>
+
+<h4>用量分析：厂商 usage 四维度 + 业务路由口径</h4>
+<ul>
+<li><strong>四维度统计</strong>：按模型/按密钥/按业务路由聚合与每次请求钻取明细均呈现 <em>输入 / 输出 / 命中缓存 / 未命中缓存</em>，全部以模型厂商反馈的 usage 为准：OpenAI 形态 <code>prompt_tokens_details.cached_tokens</code>，DeepSeek 形态 <code>prompt_cache_hit_tokens</code> 兜底；未命中 = 输入 − 命中（SQL 条件求和防负值）。</li>
+<li><strong>业务路由（by_role）</strong>：按业务角色（chat_answer/intent_rewrite/wiki_compile…）聚合请求数/Token/四维度，并附 <em>已归属用户</em> 计数（user_id 非空请求数）——直接回答「哪个业务场景在烧 token、还有多少走系统内部密钥」。</li>
+<li><strong>归属整改闭环</strong>：旧版后台常驻任务（wiki 编译队列 worker 启动恢复无上下文）全走内部密钥；现发起人随队列/周期采样对象持久化、逐任务恢复 call_context，归属率经 by_role「已归属用户」列可观测。</li>
+<li><strong>前缀缓存命中率</strong>成为一等指标：分区改序（2.3）后同会话下一轮命中缓存应从静态头量级升至「静态头 + 冻结历史」数千量级，钻取明细逐请求验证。</li>
 </ul>
 
 <div class="impact">没有网关：每个模块各自持 Key 出网——成本不可归因、限额不可执行、上游故障全站雪崩、敏感内容直发第三方；没有业务角色绑定，意图改写这种小决策也会打到最贵的旗舰模型。</div>
@@ -1174,7 +1239,7 @@ proc = <span class="k">await</span> asyncio.create_subprocess_exec(*argv,   <spa
   </div></div>
 </div>
 <ul>
-<li><strong>监控指标</strong>：请求量/延迟分位/错误率、Token 用量与分段构成、工具成功率与路由分布、压缩触发次数与熔断状态、记忆写入事件、检索召回点赞率差、网关上游健康与熔断、配额余量。</li>
+<li><strong>监控指标</strong>：请求量/延迟分位/错误率、Token 用量与分段构成、网关四维度用量（厂商 usage 为准）与业务路由归属率、前缀缓存命中率、工具成功率与路由分布、压缩触发次数与熔断状态、记忆写入事件、检索召回点赞率差、网关上游健康与熔断、配额余量。</li>
 <li><strong>Agent 进化闭环</strong>：在线采样发现质量下滑 → 告警归因 → BadCase 转用例 → 评测复现 → Prompt optimizer / 工具修复 / 知识库补素材 → 评估回归达标（0.85）→ EDD 流水线灰度发布 → 在线采样验证。<em>进化不是玄学，是一条有门禁的流水线</em>。</li>
 </ul>
 
@@ -1199,7 +1264,7 @@ proc = <span class="k">await</span> asyncio.create_subprocess_exec(*argv,   <spa
 <tr><td>身份与数据安全</td><td>登录 token 滑动 24h 过期；游客默认 3 次限额；会话/记忆/知识库/缓存/工具五重属主隔离</td><td>中间件统一鉴权；个人工具凭据 <b>AESGCM</b> 加密，主密钥独立于登录与缓存密钥（部署 secret 注入，不进运行时配置导出）；网关密钥仅存 sha256</td></tr>
 <tr><td>日志防护</td><td>所有日志经 <b>redact_log_text 单一脱敏出口</b>；个人工具 args 只记 input_hash；网关 body/preview 截断入库</td><td>凭据/密钥模式统一替换，杜绝「调试日志泄露 API Key」这一最常见事故</td></tr>
 <tr><td>出网与注入防护</td><td>网关安全审计四模式（凭证/敏感路径/危险命令/Unicode 隐写/追踪像素/公网 IP）；<b>SafeFetcher SSRF 防护</b>：DNS 固定防 rebinding、逐跳校验重定向、限额解压、不带凭据</td><td>工具结果标记不可信；Skill 双预审拦截注入；抓取内容只作素材不作指令</td></tr>
-<tr><td>Human in the Loop</td><td>六类确认卡片：<b>need_search</b>（联网同意）/ <b>clarify</b>（意图澄清）/ <b>tool_confirmation</b>（高危工具）/ <b>skill_draft</b>（技能导入）/ <b>tool_draft</b>（工具注册）/ <b>capability_gap</b>（能力缺口处置）</td><td>凡「花钱、出网、写入资产、执行风险动作」都先出卡片，用户确认才执行；停止按钮 + checkpoint 保证随时可中断</td></tr>
+<tr><td>Human in the Loop</td><td>六类确认卡片：<b>need_search</b>（联网授权：KB 空结果 / 计划执行前授权门两触发点，授权后免重规划续跑）/ <b>clarify</b>（意图澄清）/ <b>tool_confirmation</b>（高危工具）/ <b>skill_draft</b>（技能导入）/ <b>tool_draft</b>（工具注册）/ <b>capability_gap</b>（能力缺口处置，resolved 标灰）</td><td>凡「花钱、出网、写入资产、执行风险动作」都先出卡片，用户确认才执行；停止按钮 + checkpoint 保证随时可中断</td></tr>
 <tr><td>执行与系统防护</td><td>沙箱失败关闭 + 一次性容器 + seccomp + HMAC + 64KB/256KB 限额；CLI 无 shell + env 白名单 + killpg；单写者锁 + recover()；请求预算 300s</td><td>控制面不接受模型提供的镜像/挂载/路径；取消语义严格（CancellationUnconfirmed）</td></tr>
 </table>
 <div class="note"><b>设计哲学</b>：安全机制全部「失败关闭或安全降级」——审计引擎异常降级为无风险但<em>不阻断主流程</em>（可用性优先的例外被明确限定在纯扫描层），而执行类风险一律拒绝优先。每个防护点都有明确的「异常时怎么办」，而不是只写正常路径。</div>
@@ -1255,9 +1320,9 @@ proc = <span class="k">await</span> asyncio.create_subprocess_exec(*argv,   <spa
 </div>
 
 <!-- ============================================================ -->
-<h2 class="sec" id="s6">6 · 总对比与总结</h2>
+<h2 class="sec" id="s6">6 · 总对比与下一步方向</h2>
 
-<h3>6.1 能力矩阵总览</h3>
+<h3 id="s6-1">6.1 能力矩阵总览</h3>
 <table class="tbl wrap">
 <tr><th>能力域</th><th>见字如面</th><th>Claude Code</th><th>OpenClaw</th><th>Codex</th></tr>
 <tr><td>提示词治理</td><td>★★★★★ 版本库+评测+发布</td><td>★★★ CLAUDE.md 用户自治</td><td>★★ persona 文件</td><td>★★ AGENTS.md</td></tr>
@@ -1274,15 +1339,46 @@ proc = <span class="k">await</span> asyncio.create_subprocess_exec(*argv,   <spa
 </table>
 <div class="note">★ 为相对成熟度定性评估（基于公开资料与源码取证），非精确打分；编码 Agent 在其本域（代码理解/修改/测试）的能力不在本表比较范围——那是它们的主场。</div>
 
-<h3>6.2 定位差异：不是谁更强，而是解不同的题</h3>
+<h3 id="s6-2">6.2 定位差异：不是谁更强，而是解不同的题</h3>
 <div class="grid2">
 <div class="card"><p><strong>Claude Code / Codex</strong>：单用户编码 Agent。信任模型是「用户坐在终端前/PR 审查兜底」，所以敢给模型极大执行自由；质量裁判是「测试跑通」这一确定性信号。上下文压缩与记忆层级是它们的原创范式，本系统直接对齐。</p></div>
 <div class="card"><p><strong>OpenClaw</strong>：单用户开放域个人助理。强在多渠道接入与 Skills 生态活力；弱在治理（配额/审计/评估缺失），单用户形态使其可以接受这些缺失。</p></div>
 <div class="card"><p><strong>见字如面</strong>：多用户垂直域知识 SaaS。没有「用户按 Esc」与「测试跑通」两大兜底，因此把安全、配额、评估、可观测全部制度化——<em>用工程确定性替代人在环的即时判断</em>。RAG + LLM-Wiki 是其相对所有对比对象的独有能力层。</p></div>
-<div class="card"><p><strong>可借鉴方向</strong>：① 引入 MCP 兼容层补齐工具生态广度；② subagent 并行委托提升复杂任务上限；③ 动态重规划替代静态计划；④ 沙箱镜像分层扩展（数据分析/绘图依赖包）；⑤ 存储层向 Postgres + 托管向量演进以突破单机上限。</p></div>
+<div class="card"><p><strong>可借鉴方向</strong>：已展开为 6.3 下一步方向四条线（架构演进 / 功能点加强 / 安全加固 / 特性优化），均源自各节「缺失影响 / 短板」取证。</p></div>
 </div>
 
-<h3>6.3 一句话总结</h3>
+<h3 id="s6-3">6.3 下一步方向</h3>
+
+<h4>架构演进</h4>
+<ul>
+<li><strong>存储层横向扩展</strong>：SQLite + FAISS 单机 → Postgres + 托管向量服务（pgvector/Milvus），突破单写者锁的水平扩展上限；会话状态外置 Redis，Agent 多实例部署（无状态 HITL 已天然兼容）。</li>
+<li><strong>网关高可用</strong>：llm-proxy 多副本 + 共享限流状态（Redis 原子配额）消除单点；日志层迁时序/OLAP 存储应对高 QPS，保留天数策略升级为分区滚动。</li>
+<li><strong>subagent 并行委托</strong>：引入 Claude Code 式子代理，跨库研究任务并行探索再汇总，突破 5 步串行上限；委托链同样受步数/时间预算与单写者约束。</li>
+</ul>
+
+<h4>功能点加强</h4>
+<ul>
+<li><strong>动态重规划</strong>：Plan&amp;Execute v2 允许依据观测中途修订计划（保留步数/时长门禁与执行前授权门），补静态计划灵活性短板。</li>
+<li><strong>MCP 兼容层</strong>：接入 MCP 服务器生态补齐工具广度；个人工具声明式 spec 与 MCP tool schema 互转，评测门禁统一适用。</li>
+<li><strong>沙箱镜像分层</strong>：Python stdlib 基础镜像之上分层数据分析/绘图依赖包（digest 固定 + 预审），保持失败关闭不变量同时抬高 CLI 能力天花板。</li>
+<li><strong>RAG 深化</strong>：表格/跨页长论述语义切片、查询扩展多路召回；检索快照复用在权限门禁下探索跨会话相似问题复用。</li>
+</ul>
+
+<h4>安全加固</h4>
+<ul>
+<li><strong>语义级注入检测</strong>：现有正则/启发式审计对新型隐写有绕过空间，引入 LLM 分类器 + 规则库双引擎；工具结果/Skill 素材进模型前语义预审。</li>
+<li><strong>HITL 风险分级收敛</strong>：六类卡片按风险收敛（低危静默 + 审计、中危事后通知、高危事前确认），减少体验打断但保持失败关闭。</li>
+<li><strong>记忆污染红队</strong>：定期注入攻击演练（工具结果/抓取内容间接注入），验证「仅用户陈述可入库」防线与敏感词闸有效性。</li>
+</ul>
+
+<h4>特性优化</h4>
+<ul>
+<li><strong>前缀缓存持续优化</strong>：历史窗口锚点稳定化（降低全文区退出的一次性 clip 迁移频率）；四维度命中率纳入告警规则（命中率突降自动归因到分区变更）。</li>
+<li><strong>成本治理细化</strong>：业务路由小模型覆盖扩大（意图/复杂度/证据等小决策全走轻量模型），按角色预算与超用警示；by_role 归属率纳入运营周报。</li>
+<li><strong>体验细节</strong>：待授权计划 TTL 过期友好提示、capability_gap resolved 状态跨设备同步、语义缓存命中来源面板时效标签、钻取明细四维度默认展示。</li>
+</ul>
+
+<h3 id="s6-4">6.4 一句话总结</h3>
 <div class="cover" style="margin-top:18px">
 <p style="font-size:16px">「见字如面」证明了一件事：<strong>生产级 Agent 的竞争力不在模型，而在模型周围的制度</strong>——
 提示词有版本与评测、记忆有门禁与遗忘、上下文有预算与压缩、循环有步数与熔断、工具有闸门与门禁、

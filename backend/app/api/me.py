@@ -18,8 +18,6 @@ router = APIRouter(prefix="/api/me", tags=["me"])
 
 # 手动写入的重要度：用户主动要求记住的内容视为高价值（进入常驻画像卡候选）
 _MANUAL_IMPORTANCE = 0.85
-# 手动写入类型推断：偏好/禁忌类措辞归 preference，其余按 fact
-_PREFERENCE_RE = re.compile(r"喜欢|偏好|爱吃|不吃|忌口|过敏|讨厌|不要|习惯")
 
 
 class MemoryCreateRequest(BaseModel):
@@ -35,9 +33,10 @@ class MemoryUpdateRequest(BaseModel):
 
 
 def _infer_type(content: str, explicit: str = "") -> str:
+    """长期记忆四类型（user/feedback/project/reference）：显式指定优先，默认 user。"""
     if explicit in MEMORY_TYPES:
         return explicit
-    return "preference" if _PREFERENCE_RE.search(content) else "fact"
+    return "user"
 
 
 @router.get("/memories")
@@ -171,8 +170,9 @@ async def delete_my_agent_memory(memory_id: str, agent: str = "wiki_assistant", 
 
 
 # ---------------------------------------------------------------------------
-# 五层记忆 Markdown 视图（/api/me/memory）：Claude Code 存储分级（剔除 Team 层）
-# Managed 仅管理员可写；Project 限 KB 属主/管理员；User/Local 限本人。
+# 记忆 Markdown 视图（/api/me/memory）：静态记忆（全局 User/Project/Local，全量加载）
+# + 个人定制叠加层（个人指令/KB 共享规则/本人私人笔记）+ 长期记忆文件视图。
+# 静态层仅管理员可写；KB Project 限属主/管理员；个人指令/Local 限本人。
 # ---------------------------------------------------------------------------
 
 class LayerUpdateRequest(BaseModel):
@@ -181,13 +181,11 @@ class LayerUpdateRequest(BaseModel):
 
 
 def _layer_writable(layer: str, user: dict, kb_id: str) -> bool:
-    """按层写权限：managed=admin；project=KB 属主/admin；user/local=本人（local 需 kb_id）。"""
+    """按层写权限：project=KB 属主/admin；user/local=本人（local 需 kb_id）。"""
     from app.services import kb as kb_service
 
     uid = user["id"]
     is_admin = user.get("role") == "admin"
-    if layer == "managed":
-        return is_admin
     if layer == "user":
         return True
     if layer == "project":
@@ -202,34 +200,60 @@ def _layer_writable(layer: str, user: dict, kb_id: str) -> bool:
 
 @router.get("/memory/layers")
 async def my_memory_layers(kb_id: str = "", user: dict = Depends(get_current_user)):
-    """五层存储概览 + 各层 markdown 正文 + AutoMem 文件视图（只读）。"""
+    """记忆存储概览：静态三层正文 + 个人叠加层正文 + 长期记忆文件视图（只读）。"""
     from app.services import memory_store
 
     uid = user["id"]
     contents = {layer: memory_store.read_layer(layer, user_id=uid, kb_id=kb_id)
-                for layer in ("managed", "user", "project", "local")}
+                for layer in ("user", "project", "local")}
+    static_contents = {layer: memory_store.read_static(layer)
+                       for layer in memory_store.STATIC_LAYERS}
     return {
         "layers": memory_store.layers_overview(uid, kb_id),
         "contents": contents,
+        "static": static_contents,
+        "static_writable": user.get("role") == "admin",
         "auto": memory_store.auto_files(uid),
         "writable": {layer: _layer_writable(layer, user, kb_id)
-                     for layer in ("managed", "user", "project", "local")},
+                     for layer in ("user", "project", "local")},
         "max_write_chars": memory_store.MAX_LAYER_WRITE_CHARS,
     }
 
 
+@router.put("/memory/static/{layer}")
+async def update_static_layer(layer: str, body: LayerUpdateRequest, user: dict = Depends(get_current_user)):
+    """编辑全局静态记忆（User/Project/Local，全量加载的规矩层）；仅管理员，敏感内容拒绝。"""
+    from app.services import memory_store
+    from app.services.memory import _is_sensitive
+
+    if layer not in memory_store.STATIC_LAYERS:
+        raise HTTPException(status_code=400, detail="静态层仅支持 user/project/local")
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="静态记忆为全局规矩，仅管理员可编辑")
+    content = (body.content or "").strip()
+    if content and _is_sensitive(content):
+        raise HTTPException(status_code=400, detail="内容包含敏感信息（密码/证件号等），不予记录")
+    if len(content) > memory_store.MAX_LAYER_WRITE_CHARS:
+        raise HTTPException(status_code=400,
+                            detail=f"内容过长（上限 {memory_store.MAX_LAYER_WRITE_CHARS} 字符）")
+    if not memory_store.write_static(layer, content):
+        raise HTTPException(status_code=500, detail="静态记忆文件写入失败")
+    memory_store.log_memory_event(user["id"], "update", f"static_{layer}", detail="静态层编辑")
+    return {"success": True, "layer": layer, "content": content}
+
+
 @router.put("/memory/layers/{layer}")
 async def update_memory_layer(layer: str, body: LayerUpdateRequest, user: dict = Depends(get_current_user)):
-    """编辑静态层 markdown（Managed/User/Project/Local）；敏感内容拒绝。
+    """编辑个人定制叠加层 markdown（个人指令/KB Project/本人 Local）；敏感内容拒绝。
 
     User 层委托 user_instructions（DB 镜像同源，500 字预算）；其余层文件即持久记录。
-    AutoMem 层不开放直编：经 /memories CRUD 演进（每记忆独立 topic 文件 + 索引重建）。
+    长期记忆不开放直编：经 /memories CRUD 演进（每记忆独立文件 + MEMORY.md 索引重建）。
     """
     from app.services import memory_store
     from app.services.memory import _is_sensitive
 
-    if layer not in ("managed", "user", "project", "local"):
-        raise HTTPException(status_code=400, detail="该层不支持直接编辑（AutoMem 请经记忆 CRUD 演进）")
+    if layer not in ("user", "project", "local"):
+        raise HTTPException(status_code=400, detail="该层不支持直接编辑（长期记忆请经记忆 CRUD 演进）")
     if not _layer_writable(layer, user, body.kb_id):
         raise HTTPException(status_code=403, detail="无权编辑该记忆层")
     content = (body.content or "").strip()
@@ -253,10 +277,26 @@ async def update_memory_layer(layer: str, body: LayerUpdateRequest, user: dict =
 
 @router.get("/memory/auto-files")
 async def my_memory_auto_files(user: dict = Depends(get_current_user)):
-    """AutoMem 文件视图：MEMORY.md 索引正文 + 每记忆独立 topic 文件（含元数据）。"""
+    """长期记忆文件视图：MEMORY.md 索引正文 + 每记忆独立文件（含元数据）。"""
     from app.services import memory_store
 
     return memory_store.auto_files(user["id"])
+
+
+@router.get("/memory/session-files")
+async def my_memory_session_files(session_id: str, user: dict = Depends(get_current_user)):
+    """短期记忆文件视图（本人会话限定）：transcript/summary/task_state 概览与正文。"""
+    from app.core import db
+    from app.services import memory_store
+
+    uid = user["id"]
+    row = db.query_one("SELECT user_id FROM chat_sessions WHERE session_id = ?", (session_id,))
+    if not row or row.get("user_id") != uid:
+        raise HTTPException(status_code=404, detail="会话不存在或无权查看")
+    return {
+        "overview": memory_store.session_files_overview(session_id, uid),
+        "contents": memory_store.read_session_files(session_id, uid),
+    }
 
 
 def _extract_run_reason(detail: str) -> str:

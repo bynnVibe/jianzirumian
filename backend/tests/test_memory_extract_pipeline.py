@@ -135,7 +135,7 @@ def test_self_disclosure_saved_but_question_guarded(mem_db, monkeypatch):
     _patch_llm(monkeypatch, "[]")
     asyncio.run(MemoryService.extract_from_turn("u1", "s1", "我今年38岁，住在杭州。", "了解"))
     rows = MemoryService.list_memories("u1")
-    assert len(rows) == 1 and rows[0]["memory_type"] == "fact"
+    assert len(rows) == 1 and rows[0]["memory_type"] == "user"
     assert "38岁" in rows[0]["content"] and "杭州" in rows[0]["content"]
 
     asyncio.run(MemoryService.extract_from_turn("u1", "s2", "我有高血压吗？", "需要测量"))
@@ -148,10 +148,10 @@ def test_self_disclosure_saved_but_question_guarded(mem_db, monkeypatch):
 
 
 def test_signal_types_preference_feedback_goal(mem_db):
-    """偏好/纠正/目标按措辞分类，重要度进入画像卡候选区间。"""
+    """偏好/纠正/目标按措辞分类（新四类型：偏好→user、目标→project），重要度进入画像卡候选区间。"""
     items = extract_explicit_signals("我喜欢吃清淡的。以后请先给结论再给依据。我打算三个月减重五公斤。")
     types = {i["type"] for i in items}
-    assert {"preference", "feedback", "goal"} <= types
+    assert {"user", "feedback", "project"} <= types
     assert all(i["action"] == "add" for i in items)
     assert len(items) <= memory_module._EXPLICIT_MAX_ITEMS
 
@@ -322,7 +322,7 @@ def test_backfill_file_paths_migration(file_db, tmp_path):
     n = memory_store.backfill_file_paths(file_db)
     assert n == 1
     row = db.query_one("SELECT file_path FROM user_memories WHERE id = 'mid-0001'")
-    assert row["file_path"] == "users/u1/auto/fact_mid-0001.md"
+    assert row["file_path"] == "users/u1/memories/fact_mid-0001.md"
     assert (tmp_path / "memory" / row["file_path"]).is_file()
     # 幂等：已回填后不再重复处理
     assert memory_store.backfill_file_paths(file_db) == 0

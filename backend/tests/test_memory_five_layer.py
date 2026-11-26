@@ -263,8 +263,8 @@ def test_consolidate_runs_when_both_gates_pass(mem_db, monkeypatch):
     last = time.time() - 25 * 3600
     cfg.set("memory_consolidation_state", {"u1": {"last_at": last, "sessions_at": 0}})
     monkeypatch.setattr("app.services.config_manager.runtime_config", cfg)
-    _patch_llm(monkeypatch, "[]")  # 无记忆簇时 _merge_cluster 早退，不调用 LLM
-    # 新增 5 个会话（created_at 晚于上次巩固）
+    _patch_llm(monkeypatch, "[]")  # 无记忆时 AutoDream 早退，不调用 LLM
+    # 新增 5 个会话（created_at 晚于上次巩固），且各产生转录（有对话消息）
     after = datetime.fromtimestamp(last + 3600).isoformat()
     for i in range(5):
         mem_db.execute(
@@ -272,11 +272,61 @@ def test_consolidate_runs_when_both_gates_pass(mem_db, monkeypatch):
             " VALUES (?,?,?,?,?)",
             (f"sn{i}", "u1", "新会话", after, after),
         )
+        mem_db.execute(
+            "INSERT INTO chat_messages (message_id, session_id, seq, role, content, created_at)"
+            " VALUES (?,?,?,?,?,?)",
+            (f"mn{i}", f"sn{i}", 0, "user", "你好", after),
+        )
     mem_db.commit()
     res = asyncio.run(MemoryService.consolidate_if_due("u1"))
     assert res["ran"] is True and res["reason"] == "ok" and res["new_sessions"] == 5
     # 状态推进：last_at 更新
     assert cfg.store["memory_consolidation_state"]["u1"]["last_at"] > last
+
+
+def test_consolidate_session_gate_requires_transcript(mem_db, monkeypatch):
+    """会话门控口径：只算产生了转录（有对话消息）的新会话，空会话不计数。"""
+    cfg = FakeRuntimeConfig()
+    last = time.time() - 25 * 3600
+    cfg.set("memory_consolidation_state", {"u1": {"last_at": last, "sessions_at": 0}})
+    monkeypatch.setattr("app.services.config_manager.runtime_config", cfg)
+    after = datetime.fromtimestamp(last + 3600).isoformat()
+    for i in range(5):
+        mem_db.execute(
+            "INSERT INTO chat_sessions (session_id, user_id, title, created_at, updated_at)"
+            " VALUES (?,?,?,?,?)",
+            (f"se{i}", "u1", "空会话", after, after),
+        )
+    mem_db.commit()
+    res = asyncio.run(MemoryService.consolidate_if_due("u1"))
+    assert res["ran"] is False and res["reason"] == "session_gate"
+
+
+def test_consolidate_lock_gate(mem_db, monkeypatch):
+    """并发锁门控：.consolidate-lock 被存活进程持有 → 立即退出（lock_gate）。"""
+    from app.services import memory_store
+
+    cfg = FakeRuntimeConfig()
+    last = time.time() - 25 * 3600
+    cfg.set("memory_consolidation_state", {"u1": {"last_at": last, "sessions_at": 0}})
+    monkeypatch.setattr("app.services.config_manager.runtime_config", cfg)
+    after = datetime.fromtimestamp(last + 3600).isoformat()
+    for i in range(5):
+        mem_db.execute(
+            "INSERT INTO chat_sessions (session_id, user_id, title, created_at, updated_at)"
+            " VALUES (?,?,?,?,?)",
+            (f"sl{i}", "u1", "新会话", after, after),
+        )
+        mem_db.execute(
+            "INSERT INTO chat_messages (message_id, session_id, seq, role, content, created_at)"
+            " VALUES (?,?,?,?,?,?)",
+            (f"ml{i}", f"sl{i}", 0, "user", "你好", after),
+        )
+    mem_db.commit()
+    # 内存库无文件锁路径：以桩模拟「他进程持锁」
+    monkeypatch.setattr(memory_store, "acquire_consolidate_lock", lambda uid: False)
+    res = asyncio.run(MemoryService.consolidate_if_due("u1"))
+    assert res["ran"] is False and res["reason"] == "lock_gate"
 
 
 def test_consolidate_guest_noop(mem_db):

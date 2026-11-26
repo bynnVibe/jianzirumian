@@ -54,10 +54,10 @@ def get_conn() -> sqlite3.Connection:
             first_init = True
         conn = _conn
     if first_init:
-        # Managed 层种子化（锁外执行：seed 经 base_dir→get_conn 会重入 _lock）
+        # 静态记忆三层种子化（锁外执行：seed 经 base_dir→get_conn 会重入 _lock）
         try:
             from app.services import memory_store
-            memory_store.seed_managed()
+            memory_store.seed_static()
         except Exception:
             pass
     return conn
@@ -143,6 +143,7 @@ def init_db(conn: sqlite3.Connection):
             search_results TEXT NOT NULL DEFAULT '[]',
             use_knowledge  INTEGER NOT NULL DEFAULT 0,
             use_search     INTEGER NOT NULL DEFAULT 0,
+            is_realtime    INTEGER NOT NULL DEFAULT 0,
             attachments    TEXT NOT NULL DEFAULT '[]',
             created_at     TEXT NOT NULL
         );
@@ -324,7 +325,8 @@ def init_db(conn: sqlite3.Connection):
             updated_at               TEXT NOT NULL,
             compact_kind             TEXT NOT NULL DEFAULT 'auto',
             before_tokens            INTEGER NOT NULL DEFAULT 0,
-            fail_streak              INTEGER NOT NULL DEFAULT 0
+            fail_streak              INTEGER NOT NULL DEFAULT 0,
+            ctx_tokens_at_update     INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS memory_write_events (
@@ -1491,6 +1493,15 @@ def init_db(conn: sqlite3.Connection):
                 logger.info("%s 补加列: cached_tokens", table)
         conn.execute("INSERT INTO schema_migrations VALUES ('prefix_cache_v1',?)",
                      (datetime.now().isoformat(),))
+    if not conn.execute("SELECT 1 FROM schema_migrations WHERE version='history_budget_v1'").fetchone():
+        # 历史窗口预算整改：chat_messages 补 is_realtime（写时打标，读时投影对实时类
+        # 答案下一轮即衰减，不等空闲衰减）；存量行默认 0（不衰减，优雅降级）。
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(chat_messages)")}
+        if "is_realtime" not in cols:
+            conn.execute("ALTER TABLE chat_messages ADD COLUMN is_realtime INTEGER NOT NULL DEFAULT 0")
+            logger.info("chat_messages 补加列: is_realtime")
+        conn.execute("INSERT INTO schema_migrations VALUES ('history_budget_v1',?)",
+                     (datetime.now().isoformat(),))
     if not conn.execute("SELECT 1 FROM schema_migrations WHERE version='pending_ingest_v1'").fetchone():
         # 后台入库：phase 区分解析/入库两阶段错误；ingest_kb_id/ingest_title 落库
         # 入库参数，重启后 recover 可按行恢复后台入库，不丢任务。
@@ -1917,6 +1928,16 @@ def init_db(conn: sqlite3.Connection):
         memory_store.backfill_file_paths(conn)
         conn.execute("INSERT INTO schema_migrations VALUES ('memory_markdown_v2',?)",
                      (datetime.now().isoformat(),))
+    if not conn.execute("SELECT 1 FROM schema_migrations WHERE version='memory_taxonomy_v3'").fetchone():
+        # 记忆静态/动态双轨改造（参考 Claude Code，去掉 Managed/Team）：
+        # - 静态三层 static/USER|PROJECT|LOCAL.md 全量加载（Managed 并入 Project）；
+        # - 长期记忆四类型 user/feedback/project/reference，auto/ → memories/，
+        #   MEMORY.md 索引上移 users/<uid>/；短期会话记忆 users/<uid>/sessions/<sid>/
+        #   （transcript.md/summary.md/task_state.md）；摘要水位列 ctx_tokens_at_update。
+        from app.services import memory_store
+        memory_store.migrate_taxonomy_v3(conn)
+        conn.execute("INSERT INTO schema_migrations VALUES ('memory_taxonomy_v3',?)",
+                     (datetime.now().isoformat(),))
     from app.core.cache_schema import migrate as migrate_cache
     migrate_cache(conn)
     from app.core.cache_schema import migrate_profile as migrate_cache_profile
@@ -1956,6 +1977,11 @@ def _migrate(conn: sqlite3.Connection):
             "ALTER TABLE chat_messages ADD COLUMN agent_process TEXT NOT NULL DEFAULT ''"
         )
         logger.info("chat_messages 补加列: agent_process")
+    if "is_realtime" not in msg_cols:
+        conn.execute(
+            "ALTER TABLE chat_messages ADD COLUMN is_realtime INTEGER NOT NULL DEFAULT 0"
+        )
+        logger.info("chat_messages 补加列: is_realtime")
 
     # 上传记录自定义标题（用于知识库管理搜索与展示）
     upload_cols = {r[1] for r in conn.execute("PRAGMA table_info(upload_records)")}

@@ -35,6 +35,7 @@ from app.services.memory import (
     _tokenize_keywords,
     _content_similarity,
     _is_sensitive,
+    _normalize_type,
     _clamp_importance,
     _clamp_confidence,
     _days_since,
@@ -114,7 +115,7 @@ class AgentMemoryService:
         content = (content or "").strip()
         if content and _is_sensitive(content):
             return None
-        mtype = memory_type if memory_type in MEMORY_TYPES else None
+        mtype = _normalize_type(memory_type) if memory_type else None
         now = datetime.now().isoformat()
         db.execute(
             "UPDATE agent_memories SET content = ?, keywords = ?, memory_type = ?,"
@@ -138,7 +139,7 @@ class AgentMemoryService:
         keywords = set(_tokenize_keywords(content))
         best, best_key = None, (0, 0.0)
         for m in AgentMemoryService.list_memories(user_id, agent_key):
-            if memory_type and (m.get("memory_type") or "fact") != memory_type:
+            if memory_type and (m.get("memory_type") or "user") != memory_type:
                 continue
             overlap = len(keywords & set(m.get("keywords") or []))
             sim = _content_similarity(content, m.get("content") or "")
@@ -161,7 +162,7 @@ class AgentMemoryService:
         keywords = set(_tokenize_keywords(hint))
         best, best_key = None, (0, 0.0)
         for m in AgentMemoryService.list_memories(user_id, agent_key):
-            if memory_type and (m.get("memory_type") or "fact") != memory_type:
+            if memory_type and (m.get("memory_type") or "user") != memory_type:
                 continue
             overlap = len(keywords & set(m.get("keywords") or []))
             sim = _content_similarity(hint, m.get("content") or "")
@@ -180,7 +181,7 @@ class AgentMemoryService:
         user_id: str,
         agent_key: str,
         content: str,
-        memory_type: str = "fact",
+        memory_type: str = "user",
         importance: float = 0.5,
         source_session_id: str = "",
         dedup: bool = True,
@@ -191,8 +192,7 @@ class AgentMemoryService:
         content = (content or "").strip()
         if not content or _is_sensitive(content):
             return None
-        if memory_type not in MEMORY_TYPES:
-            memory_type = "fact"
+        memory_type = _normalize_type(memory_type)
         if dedup:
             hit = AgentMemoryService.find_similar(user_id, agent_key, content)
             if hit:
@@ -257,7 +257,7 @@ class AgentMemoryService:
         def score(m: dict) -> float:
             overlap = len(query_tokens & set(m.get("keywords") or []))
             decay = math.exp(-_days_since(m.get("last_used_at") or m.get("updated_at")) / _DECAY_DAYS)
-            weight = _TYPE_WEIGHT.get(m.get("memory_type") or "fact", 1.0)
+            weight = _TYPE_WEIGHT.get(m.get("memory_type") or "user", 1.0)
             conf = 0.1 * _clamp_confidence(m.get("confidence"))
             return overlap * 2 + (float(m.get("importance", 0.5)) + decay) * weight + conf
 
@@ -297,9 +297,7 @@ class AgentMemoryService:
                 continue
             content = (item.get("content") or "").strip()
             action = (item.get("action") or "add").strip().lower()
-            mtype = item.get("type") or "fact"
-            if mtype not in MEMORY_TYPES:
-                mtype = "fact"
+            mtype = _normalize_type(item.get("type") or "user")
             importance = _clamp_importance(item.get("importance", 0.5))
             hint = (item.get("target_hint") or content).strip()
             if action == "delete":
@@ -344,7 +342,7 @@ class AgentMemoryService:
             "明确不记：用户个人健康/身份/疾病等事实（那归用户记忆层，不归助手域）、"
             "一次性提问、可从文档或上下文直接推导的内容、密码/密钥/证件等敏感信息。"
             "若用户纠正了此前的分析偏好，输出 action=update 并用 target_hint 描述原记忆；"
-            "若要求遗忘，输出 action=delete。type 取值：preference/fact/goal/feedback。"
+            "若要求遗忘，输出 action=delete。type 取值：user/feedback/project/reference。"
             "content 用第三人称（「用户…」）陈述，不要写成问句。"
             "仅输出 JSON 数组，每项 {\"content\": str, \"importance\": 0~1, \"type\": str, "
             "\"action\": \"add|update|delete\", \"target_hint\": str}；确实无可保存内容才输出 []。\n\n"

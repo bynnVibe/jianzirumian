@@ -909,6 +909,8 @@ async def _answer_phase(agent_llm, state, query, user_id, history_ctx, memory_pr
     # 场景感知路由（req5）：实时查询（天气/新闻/股价等）或知识库无命中时，
     # 联网搜索结果作为主依据，避免「知识库未收录、请勿编造」指令淹没真实搜索结果（答非所问根因）
     route = tool_router.route_tools(query, use_knowledge=use_knowledge, use_search=use_search)
+    # 实时类答案写时打标：随 result 回填给 chat.py 落库，读时投影下一轮即衰减
+    result["is_realtime"] = bool(route.is_realtime)
     kb_has_content = bool(context_text.strip())
     search_primary = bool(search_context) and (
         route.search_primary or route.is_realtime or not kb_has_content

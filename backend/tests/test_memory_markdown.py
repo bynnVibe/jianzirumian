@@ -1,12 +1,13 @@
-"""五层记忆 Markdown 持久层测试（memory_markdown_v1，Claude Code 存储分级剔除 Team）。
+"""记忆 Markdown 持久层测试（静态/动态双轨改造，Claude Code 设计融合）。
 
 覆盖：
   存储根目录定位（文件 DB 同址 / 内存 DB 不落盘）；
-  AutoMem 写路径双写（topic 文件 + MEMORY.md 索引 + file_path 回填）与编辑/删除演进；
+  静态记忆三层种子（static/USER|PROJECT|LOCAL.md，全局规矩全量加载）；
+  长期记忆写路径双写（memories/ 每记忆文件 + MEMORY.md 索引 + file_path 回填）与编辑/删除演进；
   User 层 USER.md 镜像、助手分域 agents/<agent>.md 镜像；
-  存量迁移 migrate_from_conn（DB → markdown，文件已存在不覆盖）；
-  静态层读取路径组装（Managed→Project→Local 顺序与字符预算）；
-  五层 API 权限（managed=admin / project=KB 属主 / 敏感拦截）与观测事件落库。
+  存量迁移 migrate_from_conn + memory_taxonomy_v3（DB → markdown，类型归一）；
+  静态层读取路径组装（User→Project→Local 全量 + KB/本人叠加层顺序与字符预算）；
+  记忆 API 权限（静态层=admin / KB project=属主 / 敏感拦截）与观测事件落库。
 """
 import sqlite3
 from pathlib import Path
@@ -31,8 +32,12 @@ def file_db(tmp_path, monkeypatch):
     conn.close()
 
 
-def _auto_dir(uid="u1"):
-    return memory_store.base_dir() / "users" / uid / "auto"
+def _memories_dir(uid="u1"):
+    return memory_store.memories_dir(uid)
+
+
+def _index_path(uid="u1"):
+    return memory_store.base_dir() / "users" / uid / "MEMORY.md"
 
 
 # ============================================
@@ -54,39 +59,44 @@ def test_memory_db_no_disk(monkeypatch):
     conn.close()
 
 
-def test_managed_seed_on_migration(file_db):
-    p = memory_store.layer_path("managed")
-    assert p.is_file() and "平台记忆策略" in p.read_text(encoding="utf-8")
+def test_static_seed_on_init(file_db):
+    """静态记忆三层种子化：全局规矩文件存在且含融合后的核心约定。"""
+    user_p = memory_store.static_path("user")
+    proj_p = memory_store.static_path("project")
+    local_p = memory_store.static_path("local")
+    assert user_p.is_file() and "中文" in user_p.read_text(encoding="utf-8")
+    assert proj_p.is_file() and "结论" in proj_p.read_text(encoding="utf-8")
+    assert local_p.is_file() and "权限" in local_p.read_text(encoding="utf-8")
 
 
 # ============================================
-# AutoMem 写路径双写与持续演进
+# 长期记忆写路径双写与持续演进
 # ============================================
 
 def test_add_memory_writes_topic_and_index(file_db):
     res = MemoryService.add_memory("u1", "用户对花生过敏，饮食需避免花生", memory_type="preference")
-    files = list(_auto_dir().glob("preference_*.md"))
+    files = list(_memories_dir().glob("user_*.md"))
     assert len(files) == 1
     text = files[0].read_text(encoding="utf-8")
     meta = memory_store.parse_frontmatter(text)
-    assert meta["id"] == res["id"] and meta["memory_type"] == "preference"
+    assert meta["id"] == res["id"] and meta["memory_type"] == "user"
     assert "花生过敏" in text
-    # 索引行格式：- [file](file) — 描述
-    index = (_auto_dir() / "MEMORY.md").read_text(encoding="utf-8")
-    assert f"- [{files[0].name}]({files[0].name}) — " in index
+    # 索引行格式：- [memories/file](memories/file) — 描述
+    index = _index_path().read_text(encoding="utf-8")
+    assert f"- [memories/{files[0].name}](memories/{files[0].name}) — " in index
     # file_path 镜像列回填
     row = db.query_one("SELECT file_path FROM user_memories WHERE id=?", (res["id"],))
-    assert row["file_path"] == f"users/u1/auto/{files[0].name}"
+    assert row["file_path"] == f"users/u1/memories/{files[0].name}"
 
 
 def test_update_and_delete_evolve_files(file_db):
     res = MemoryService.add_memory("u1", "用户偏好清淡饮食")
     MemoryService.update_memory("u1", res["id"], content="用户偏好清淡饮食，少油少盐")
-    f = _auto_dir() / memory_store.memory_file_name(res)
+    f = _memories_dir() / memory_store.memory_file_name(res)
     assert "少油少盐" in f.read_text(encoding="utf-8")
     assert MemoryService.delete_memory("u1", res["id"])
     assert not f.exists()
-    index = (_auto_dir() / "MEMORY.md").read_text(encoding="utf-8")
+    index = _index_path().read_text(encoding="utf-8")
     assert f.name not in index
 
 
@@ -141,17 +151,18 @@ def test_migrate_exports_existing_rows(tmp_path):
     conn.execute("INSERT INTO agent_memories (id, user_id, agent_key, memory_type, content, created_at, updated_at)"
                  " VALUES ('a1','u9','wiki_assistant','fact','常分析心血管文档',?,?)", (now, now))
     conn.commit()
-    # 模拟存量库：清除迁移标记后重跑 init_db
-    conn.execute("DELETE FROM schema_migrations WHERE version='memory_markdown_v1'")
+    # 模拟存量库：清除迁移标记后重跑 init_db（v1 导出 + v3 类型归一）
+    conn.execute("DELETE FROM schema_migrations WHERE version IN ('memory_markdown_v1','memory_taxonomy_v3')")
     conn.commit()
     db.init_db(conn)
     base = path.parent / "memory"
-    assert (base / "users" / "u9" / "auto" / "fact_m-legacy.md").is_file()
-    assert "血压管理" in (base / "users" / "u9" / "auto" / "fact_m-legacy.md").read_text(encoding="utf-8")
+    # v3 迁移：旧类型 fact 归一为 user，文件落 memories/，索引上移 users/<uid>/MEMORY.md
+    assert (base / "users" / "u9" / "memories" / "user_m-legacy.md").is_file()
+    assert "血压管理" in (base / "users" / "u9" / "memories" / "user_m-legacy.md").read_text(encoding="utf-8")
     assert "剂量" in (base / "users" / "u9" / "USER.md").read_text(encoding="utf-8")
     assert "心血管" in (base / "users" / "u9" / "agents" / "wiki_assistant.md").read_text(encoding="utf-8")
-    index = (base / "users" / "u9" / "auto" / "MEMORY.md").read_text(encoding="utf-8")
-    assert "fact_m-legacy.md" in index
+    index = (base / "users" / "u9" / "MEMORY.md").read_text(encoding="utf-8")
+    assert "user_m-legacy.md" in index
     conn.close()
 
 
@@ -160,38 +171,51 @@ def test_migrate_exports_existing_rows(tmp_path):
 # ============================================
 
 def test_static_layer_messages_order_and_budget(file_db):
-    memory_store.write_layer("managed", "平台策略甲")
+    memory_store.write_static("user", "输出约定甲")
     memory_store.write_layer("project", "项目规则乙", kb_id="kb1")
     memory_store.write_layer("local", "私人笔记丙", user_id="u1", kb_id="kb1")
     msgs = memory_store.static_layer_messages("u1", "kb1")
-    assert [m["segment"] for m in msgs] == ["memory_managed", "memory_project", "memory_local"]
-    # 游客不注入 Project/Local；无 kb_id 同理
-    assert [m["segment"] for m in memory_store.static_layer_messages("guest", "kb1")] == ["memory_managed"]
-    assert [m["segment"] for m in memory_store.static_layer_messages("u1", "")] == ["memory_managed"]
-    # 单层注入预算截断
+    assert [m["segment"] for m in msgs] == [
+        "memory_static_user", "memory_static_project", "memory_static_local",
+        "memory_project", "memory_local"]
+    # 游客不注入 KB/本人叠加层；无 kb_id 同理（静态三层仍全量加载）
+    assert [m["segment"] for m in memory_store.static_layer_messages("guest", "kb1")] == [
+        "memory_static_user", "memory_static_project", "memory_static_local"]
+    assert [m["segment"] for m in memory_store.static_layer_messages("u1", "")] == [
+        "memory_static_user", "memory_static_project", "memory_static_local"]
+    # 单层注入预算截断（静态层与叠加层各自受限）
+    memory_store.write_static("project", "长" * 9000)
     memory_store.write_layer("project", "长" * 9000, kb_id="kb1")
     msgs = memory_store.static_layer_messages("u1", "kb1")
-    proj = next(m for m in msgs if m["segment"] == "memory_project")
+    proj = next(m for m in msgs if m["segment"] == "memory_static_project")
     assert len(proj["content"]) <= memory_store.MAX_LAYER_INJECT_CHARS + 40
+    overlay = next(m for m in msgs if m["segment"] == "memory_project")
+    assert len(overlay["content"]) <= memory_store.MAX_LAYER_INJECT_CHARS + 40
 
 
 # ============================================
-# 五层 API 权限与敏感拦截
+# 记忆 API 权限与敏感拦截
 # ============================================
 
 def test_layer_api_permissions(file_db):
     import asyncio
 
-    from app.api.me import LayerUpdateRequest, my_memory_layers, update_memory_layer
+    from app.api.me import (
+        LayerUpdateRequest, my_memory_layers, update_memory_layer, update_static_layer,
+    )
 
     admin = {"id": "u1", "role": "admin"}
     member = {"id": "u2", "role": "user"}
-    # managed：仅管理员可写
-    res = asyncio.run(update_memory_layer("managed", LayerUpdateRequest(content="平台策略更新"), admin))
+    # 静态层：仅管理员可写
+    res = asyncio.run(update_static_layer("user", LayerUpdateRequest(content="输出约定更新"), admin))
     assert res["success"]
     with pytest.raises(HTTPException) as ei:
-        asyncio.run(update_memory_layer("managed", LayerUpdateRequest(content="越权"), member))
+        asyncio.run(update_static_layer("user", LayerUpdateRequest(content="越权"), member))
     assert ei.value.status_code == 403
+    # 旧 managed 层不再开放直编
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(update_memory_layer("managed", LayerUpdateRequest(content="x"), admin))
+    assert ei.value.status_code == 400
     # project：无 kb_id 拒绝；敏感内容拒绝
     with pytest.raises(HTTPException) as ei:
         asyncio.run(update_memory_layer("project", LayerUpdateRequest(content="规则"), admin))
@@ -206,11 +230,11 @@ def test_layer_api_permissions(file_db):
     with pytest.raises(HTTPException) as ei:
         asyncio.run(update_memory_layer("auto", LayerUpdateRequest(content="x"), admin))
     assert ei.value.status_code == 400
-    # 概览接口：writable 按角色区分
+    # 概览接口：静态层写权限按角色区分
     got = asyncio.run(my_memory_layers("", admin))
-    assert got["writable"]["managed"] is True
+    assert got["static_writable"] is True and "user" in got["static"]
     got = asyncio.run(my_memory_layers("", member))
-    assert got["writable"]["managed"] is False
+    assert got["static_writable"] is False
 
 
 # ============================================
@@ -218,6 +242,12 @@ def test_layer_api_permissions(file_db):
 # ============================================
 
 def test_session_memory_roundtrip(file_db):
+    # 会话属主行：read_session_memory 按属主解析 users/<uid>/sessions/<sid>/ 路径
+    file_db.execute(
+        "INSERT INTO chat_sessions (session_id, user_id, title, created_at, updated_at)"
+        " VALUES ('s1','u1','测试',?,?)",
+        ("2026-01-01T00:00:00", "2026-01-01T00:00:00"))
+    file_db.commit()
     meta = {"covered_until_message_id": "m3", "compact_kind": "auto",
             "edited_by_user": 0, "updated_at": "2026-01-01T00:00:00", "before_tokens": 1200}
     memory_store.write_session_memory("s1", "u1", "1.意图：测试摘要", meta)

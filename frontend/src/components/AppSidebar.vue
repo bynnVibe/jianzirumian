@@ -274,7 +274,7 @@
         <div class="memory-tabs">
           <button class="memory-tab" :class="{ active: memoryTab === 'user' }" @click="switchMemoryTab('user')">用户记忆</button>
           <button class="memory-tab" :class="{ active: memoryTab === 'agent' }" @click="switchMemoryTab('agent')">助手记忆</button>
-          <button class="memory-tab" :class="{ active: memoryTab === 'layers' }" @click="switchMemoryTab('layers')">五层文件</button>
+          <button class="memory-tab" :class="{ active: memoryTab === 'layers' }" @click="switchMemoryTab('layers')">记忆文件</button>
         </div>
         <template v-if="memoryTab === 'user'">
           <p class="memory-desc">
@@ -320,7 +320,7 @@
         </template>
         <template v-else>
           <p class="memory-desc">
-            记忆以 Markdown 文件持久记录并持续演进（参考 Claude Code 存储分级，剔除团队层）：平台强制 Managed → 个人全局 User → 项目共享 Project → 本地私有 Local → AI 自学 AutoMem，对话时按序叠加注入；数据库仅作查询镜像。
+            记忆以 Markdown 文件持久记录（参考 Claude Code 设计）：静态记忆为全局规矩（User 输出约定 / Project 系统规则 / Local 检索约束），每轮全量加载；动态记忆分会话短期（transcript 流水账 / summary 摘要 / task_state 进度）与跨会话长期（user/feedback/project/reference 四类型 + MEMORY.md 索引）。个人指令与 KB 叠加层按权限编辑；数据库仅作查询镜像。
           </p>
           <div class="memory-agent-select">
             <label class="form-label">项目（知识库）</label>
@@ -343,36 +343,61 @@
                 <select class="form-input memory-type-select" v-model="layerEditKey" @change="onLayerEditKeyChange">
                   <option v-for="k in layerEditOptions" :key="k.value" :value="k.value">{{ k.label }}</option>
                 </select>
-                <span class="memory-meta">{{ layersData.writable[layerEditKey] ? '可编辑' : '只读（无该层编辑权限）' }}</span>
+                <span class="memory-meta">{{ layerWritable(layerEditKey) ? '可编辑' : '只读（无该层编辑权限）' }}</span>
               </div>
               <textarea
                 class="form-input instruction-input"
                 v-model="layerEditContent"
                 rows="6"
-                :disabled="!layersData.writable[layerEditKey]"
-                :maxlength="layerEditKey === 'user' ? 500 : layersData.max_write_chars"
-                placeholder="该层暂无内容。静态层按权限直接编辑 Markdown 正文；AutoMem 层请在「用户记忆」页签经记忆增删改演进。"
+                :disabled="!layerWritable(layerEditKey)"
+                :maxlength="layerMaxChars(layerEditKey)"
+                placeholder="该层暂无内容。静态层仅管理员可编辑；个人叠加层按权限直接编辑 Markdown 正文；长期记忆请在「用户记忆」页签经记忆增删改演进。"
               ></textarea>
-              <div class="instruction-count">{{ layerEditContent.length }} / {{ layerEditKey === 'user' ? 500 : layersData.max_write_chars }}</div>
+              <div class="instruction-count">{{ layerEditContent.length }} / {{ layerMaxChars(layerEditKey) }}</div>
               <p v-if="layerSaveError" class="modal-error">{{ layerSaveError }}</p>
               <p v-if="layerSaved" class="modal-success">已保存，Markdown 文件与查询镜像同步更新。</p>
-              <div v-if="layersData.writable[layerEditKey]" class="memory-edit-actions">
+              <div v-if="layerWritable(layerEditKey)" class="memory-edit-actions">
                 <button class="modal-btn modal-btn-confirm" :disabled="layerSaving" @click="saveMemoryLayer">
                   {{ layerSaving ? '保存中...' : '保存该层' }}
                 </button>
               </div>
             </div>
             <div class="layer-auto">
-              <p class="memory-desc">AutoMem 文件视图：每条记忆一个独立 topic .md + MEMORY.md 索引（格式 `- [文件](文件) — 描述`），随记忆增删改自动重建。</p>
+              <p class="memory-desc">长期记忆文件视图：每条记忆一个独立 .md（memories/）+ MEMORY.md 索引（格式 `- [memories/文件](memories/文件) — 描述`），随记忆增删改自动重建；AutoDream 定期整理。</p>
               <pre v-if="layersData.auto.index" class="layer-md">{{ layersData.auto.index }}</pre>
               <ul v-if="layersData.auto.files.length" class="memory-list">
                 <li v-for="f in layersData.auto.files" :key="f.name" class="memory-item">
-                  <span class="memory-type" :class="'mt-' + (f.meta.memory_type || 'fact')">{{ memoryTypeLabel(f.meta.memory_type) }}</span>
+                  <span class="memory-type" :class="'mt-' + (f.meta.memory_type || 'user')">{{ memoryTypeLabel(f.meta.memory_type) }}</span>
                   <span class="memory-content" :title="f.content">{{ f.name }} — {{ f.content }}</span>
                   <span class="memory-meta">{{ f.chars }} 字</span>
                 </li>
               </ul>
-              <p v-else class="memory-empty">暂无 AutoMem 文件。对话中出现的偏好与事实会自动抽取落盘。</p>
+              <p v-else class="memory-empty">暂无长期记忆文件。对话中出现的偏好与事实会自动抽取落盘。</p>
+            </div>
+            <div class="layer-auto">
+              <p class="memory-desc">短期记忆文件视图（按会话隔离）：transcript.md 只读完整流水账 / summary.md Session Memory 摘要 / task_state.md 任务进度投影。选择本人会话查看落盘文件。</p>
+              <div class="memory-agent-select">
+                <label class="form-label">会话</label>
+                <select class="form-input" v-model="sessionFilesId" @change="loadSessionFiles">
+                  <option value="">未选择</option>
+                  <option v-for="s in sessions" :key="s.session_id" :value="s.session_id">{{ s.title || s.session_id }}</option>
+                </select>
+              </div>
+              <div v-if="sessionFilesLoading" class="usage-loading">加载中...</div>
+              <p v-else-if="sessionFilesError" class="modal-error">{{ sessionFilesError }}</p>
+              <template v-else-if="sessionFilesData && sessionFilesId">
+                <div class="layer-chips">
+                  <span v-for="m in sessionFilesData.overview?.modules || []" :key="m.file" class="layer-chip" :class="{ on: m.exists }"
+                        :title="sessionFilesData.overview?.dir ? '目录：memory/' + sessionFilesData.overview.dir : ''">
+                    {{ m.label }} · {{ m.chars }} 字
+                  </span>
+                </div>
+                <div v-for="m in sessionFilesData.overview?.modules || []" :key="'sf-' + m.file" class="session-file-block">
+                  <p class="memory-meta">{{ m.file }}</p>
+                  <pre v-if="sessionFilesData.contents?.[m.file]" class="layer-md">{{ sessionFilesData.contents[m.file] }}</pre>
+                  <p v-else class="memory-empty">尚未落盘（对话持久化或触发摘要/进度更新后生成）。</p>
+                </div>
+              </template>
             </div>
           </template>
         </template>
@@ -402,7 +427,7 @@
               </div>
             </template>
             <template v-else>
-              <span class="memory-type" :class="'mt-' + (m.memory_type || 'fact')">{{ memoryTypeLabel(m.memory_type) }}</span>
+              <span class="memory-type" :class="'mt-' + (m.memory_type || 'user')">{{ memoryTypeLabel(m.memory_type) }}</span>
               <span class="memory-content" :title="m.content">{{ m.content }}</span>
               <span class="memory-meta">{{ Math.round((m.importance ?? 0.5) * 100) }}%</span>
               <span class="memory-meta" title="置信度（反复确认递增，上限 5）">置信 {{ Math.round(m.confidence ?? 1) }}</span>
@@ -421,7 +446,7 @@
       </div>
     </div>
 
-    <!-- 我的指令弹窗（五层记忆 L1，类比 CLAUDE.md User 层） -->
+    <!-- 我的指令弹窗（个人叠加层 User，类比 CLAUDE.md User 层） -->
     <div v-if="showInstructionModal" class="modal-overlay" @click.self="showInstructionModal = false">
       <div class="modal-box">
         <h3 class="modal-title">我的指令</h3>
@@ -449,12 +474,12 @@
       </div>
     </div>
 
-    <!-- 会话笔记弹窗（五层记忆 L3，Session Memory 显性化：查看/编辑结构化摘要） -->
+    <!-- 会话笔记弹窗（短期记忆 Session Memory 显性化：查看/编辑结构化摘要） -->
     <div v-if="showNoteModal" class="modal-overlay" @click.self="showNoteModal = false">
       <div class="modal-box">
         <h3 class="modal-title">会话笔记</h3>
         <p class="memory-desc">
-          系统把较早对话压缩为九节结构化摘要（意图/结论/约束/未决/下一步 + 用户消息枚举/知识来源/当前工作/错误与纠正），持久于 SESSION.md，重新打开会话时据此续接上下文。你可编辑保存；编辑后自动压缩不再覆盖你的笔记。
+          系统把较早对话压缩为结构化摘要（意图/结论/约束/未决/下一步 + 用户消息枚举/知识来源/当前工作/错误与纠正），持久于短期记忆 summary.md，重新打开会话时据此续接上下文。你可编辑保存；编辑后自动压缩不再覆盖你的笔记。
         </p>
         <p v-if="noteEditedByUser" class="modal-success">用户已编辑，自动压缩不再覆盖。</p>
         <div class="form-field">
@@ -670,7 +695,7 @@ import { useRouter, useRoute } from 'vue-router'
 import { useChatStore } from '@/stores/chat'
 import { useAuthStore } from '@/stores/auth'
 import { preloadPath } from '@/utils/routePreload'
-import { healthCheck, updateProfile, getMyUsageStats, compactSession, listMyMemories, createMyMemory, updateMyMemory, deleteMyMemory, getModuleRecall, getMemoryExtractStatus, getSemanticCache, clearSemanticCache, deleteSemanticCacheEntry, getMyInstructions, saveMyInstructions, listMyAgentMemories, createMyAgentMemory, updateMyAgentMemory, deleteMyAgentMemory, getSessionNote, updateSessionNote, getMyMemoryLayers, updateMyMemoryLayer, listKnowledgeBases } from '@/api'
+import { healthCheck, updateProfile, getMyUsageStats, compactSession, listMyMemories, createMyMemory, updateMyMemory, deleteMyMemory, getModuleRecall, getMemoryExtractStatus, getSemanticCache, clearSemanticCache, deleteSemanticCacheEntry, getMyInstructions, saveMyInstructions, listMyAgentMemories, createMyAgentMemory, updateMyAgentMemory, deleteMyAgentMemory, getSessionNote, updateSessionNote, getMyMemoryLayers, updateMyMemoryLayer, updateStaticMemoryLayer, getMySessionMemoryFiles, listKnowledgeBases } from '@/api'
 
 const props = defineProps({
   open: { type: Boolean, default: false },
@@ -872,8 +897,8 @@ const recallStats = ref(null)
 const memoryNewContent = ref('')
 const memoryEditingId = ref('')
 const memoryEditContent = ref('')
-const memoryEditType = ref('fact')
-// 记忆页签：user（用户记忆 AutoMem）/ agent（助手分域记忆）/ layers（五层 Markdown 文件视图）
+const memoryEditType = ref('user')
+// 记忆页签：user（用户长期记忆）/ agent（助手分域记忆）/ layers（记忆 Markdown 文件视图）
 const memoryTab = ref('user')
 const agentKey = ref('wiki_assistant')
 const agentMemories = ref([])
@@ -897,14 +922,14 @@ function switchMemoryTab(tab) {
   }
 }
 const memoryTypeOptions = [
-  { value: 'preference', label: '偏好' },
-  { value: 'fact', label: '事实' },
-  { value: 'goal', label: '目标' },
-  { value: 'feedback', label: '纠正' },
+  { value: 'user', label: '用户信息' },
+  { value: 'feedback', label: '反馈纠正' },
+  { value: 'project', label: '项目目标' },
+  { value: 'reference', label: '参考索引' },
 ]
 
 function memoryTypeLabel(t) {
-  return memoryTypeOptions.find((o) => o.value === (t || 'fact'))?.label || '事实'
+  return memoryTypeOptions.find((o) => o.value === (t || 'user'))?.label || '用户信息'
 }
 
 function memoryUsedText(m) {
@@ -1106,24 +1131,47 @@ async function submitMemoryDelete(m) {
 }
 
 // ============================================
-// 五层 Markdown 文件视图（Managed/User/Project/Local/AutoMem，剔除团队层）
+// 记忆 Markdown 文件视图（静态三层全局规矩 + 个人叠加层 + 长期记忆文件）
 // ============================================
 const layersData = ref(null)
 const layersLoading = ref(false)
 const layersError = ref('')
 const layerKbId = ref('')
 const layerKbOptions = ref([])
-const layerEditKey = ref('user')
+const layerEditKey = ref('static_user')
 const layerEditContent = ref('')
 const layerSaving = ref(false)
 const layerSaved = ref(false)
 const layerSaveError = ref('')
 const layerEditOptions = [
-  { value: 'managed', label: '平台强制 Managed' },
-  { value: 'user', label: '个人全局 User' },
-  { value: 'project', label: '项目共享 Project' },
-  { value: 'local', label: '本地私有 Local' },
+  { value: 'static_user', label: '静态·User（输出约定）' },
+  { value: 'static_project', label: '静态·Project（系统规则）' },
+  { value: 'static_local', label: '静态·Local（检索约束）' },
+  { value: 'user', label: '个人指令 User' },
+  { value: 'project', label: 'KB 共享 Project' },
+  { value: 'local', label: '本人私有 Local' },
 ]
+
+function isStaticLayer(key) {
+  return String(key || '').startsWith('static_')
+}
+
+function layerWritable(key) {
+  if (!layersData.value) return false
+  if (isStaticLayer(key)) return !!layersData.value.static_writable
+  return !!layersData.value.writable?.[key]
+}
+
+function layerMaxChars(key) {
+  if (key === 'user') return 500
+  return layersData.value?.max_write_chars || 4000
+}
+
+function layerContent(key) {
+  if (!layersData.value) return ''
+  if (isStaticLayer(key)) return layersData.value.static?.[key.slice(7)] || ''
+  return layersData.value.contents?.[key] || ''
+}
 
 async function loadLayerKbOptions() {
   if (layerKbOptions.value.length) return
@@ -1143,9 +1191,9 @@ async function loadMemoryLayers() {
   try {
     const res = await getMyMemoryLayers(layerKbId.value)
     layersData.value = res?.data || null
-    layerEditContent.value = layersData.value?.contents?.[layerEditKey.value] || ''
+    layerEditContent.value = layerContent(layerEditKey.value)
   } catch (e) {
-    layersError.value = e?.response?.data?.detail || e?.message || '加载五层记忆失败'
+    layersError.value = e?.response?.data?.detail || e?.message || '加载记忆文件失败'
     layersData.value = null
   } finally {
     layersLoading.value = false
@@ -1155,16 +1203,19 @@ async function loadMemoryLayers() {
 function onLayerEditKeyChange() {
   layerSaved.value = false
   layerSaveError.value = ''
-  layerEditContent.value = layersData.value?.contents?.[layerEditKey.value] || ''
+  layerEditContent.value = layerContent(layerEditKey.value)
 }
 
 async function saveMemoryLayer() {
-  if (layerSaving.value || !layersData.value?.writable?.[layerEditKey.value]) return
+  if (layerSaving.value || !layerWritable(layerEditKey.value)) return
   layerSaving.value = true
   layerSaved.value = false
   layerSaveError.value = ''
   try {
-    const res = await updateMyMemoryLayer(layerEditKey.value, layerEditContent.value, layerKbId.value)
+    const key = layerEditKey.value
+    const res = isStaticLayer(key)
+      ? await updateStaticMemoryLayer(key.slice(7), layerEditContent.value)
+      : await updateMyMemoryLayer(key, layerEditContent.value, layerKbId.value)
     layerEditContent.value = res?.data?.content ?? layerEditContent.value
     layerSaved.value = true
     // 保存后刷新层概览（字符量/落盘状态/镜像同步结果）
@@ -1177,8 +1228,29 @@ async function saveMemoryLayer() {
   }
 }
 
+// 短期记忆文件视图（本人会话限定：transcript/summary/task_state 概览与正文）
+const sessionFilesId = ref('')
+const sessionFilesData = ref(null)
+const sessionFilesLoading = ref(false)
+const sessionFilesError = ref('')
+
+async function loadSessionFiles() {
+  sessionFilesError.value = ''
+  sessionFilesData.value = null
+  if (!sessionFilesId.value) return
+  sessionFilesLoading.value = true
+  try {
+    const res = await getMySessionMemoryFiles(sessionFilesId.value)
+    sessionFilesData.value = res?.data || null
+  } catch (e) {
+    sessionFilesError.value = e?.response?.data?.detail || e?.message || '加载短期记忆文件失败'
+  } finally {
+    sessionFilesLoading.value = false
+  }
+}
+
 // ============================================
-// 我的指令（五层记忆 L1，类比 CLAUDE.md User 层：预写静态规则，优先级高于系统默认）
+// 我的指令（个人叠加层 User，类比 CLAUDE.md User 层：预写静态规则，优先级高于系统默认）
 // ============================================
 const showInstructionModal = ref(false)
 const instructionContent = ref('')
@@ -1218,7 +1290,7 @@ async function saveInstruction() {
 }
 
 // ============================================
-// 会话笔记（五层记忆 L3，Session Memory 显性化：查看/编辑结构化摘要）
+// 会话笔记（短期记忆 Session Memory 显性化：查看/编辑结构化摘要）
 // ============================================
 const showNoteModal = ref(false)
 const noteSessionId = ref('')
@@ -1864,7 +1936,7 @@ function chartTooltip(row) {
   text-align: center;
 }
 
-/* 五层 Markdown 文件视图 */
+/* 静态/动态 Markdown 记忆文件视图 */
 .layer-chips {
   display: flex;
   flex-wrap: wrap;
@@ -1915,6 +1987,10 @@ function chartTooltip(row) {
   overflow-y: auto;
 }
 
+.session-file-block { margin-top: 8px; }
+.session-file-block .memory-meta { display: block; margin-bottom: 4px; }
+.session-file-block .layer-md { max-height: 220px; }
+
 .memory-list {
   list-style: none;
   margin: 0;
@@ -1941,9 +2017,13 @@ function chartTooltip(row) {
   color: #7a6a55;
 }
 
+.memory-type.mt-user { background: #e7f1e9; color: #4b7d54; }
+.memory-type.mt-project { background: #e7eef9; color: #4b6e9d; }
+.memory-type.mt-reference { background: #f0eaf7; color: #7d5a9d; }
+.memory-type.mt-feedback { background: #f9ecec; color: #9d5a4b; }
+/* 旧类型徽标（存量数据兼容） */
 .memory-type.mt-preference { background: #e7f1e9; color: #4b7d54; }
 .memory-type.mt-goal { background: #e7eef9; color: #4b6e9d; }
-.memory-type.mt-feedback { background: #f9ecec; color: #9d5a4b; }
 
 .memory-content {
   flex: 1;

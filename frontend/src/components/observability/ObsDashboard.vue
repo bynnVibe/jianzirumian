@@ -214,10 +214,10 @@ const CATALOG = [
   { id: 'kbs', group: '业务', label: '知识库', drill: 'kbs', hint: '知识库总数', get: (d) => String(d.mon?.business?.counts?.knowledge_bases ?? 0) },
   { id: 'wiki', group: '业务', label: '百科页面', drill: 'wiki', hint: 'llm-wiki 编译页面数', get: (d) => String(d.mon?.business?.counts?.wiki_pages ?? 0) },
   { id: 'memories', group: '业务', label: '记忆条数', drill: 'memories', hint: '跨会话用户记忆条数', get: (d) => String(d.mon?.business?.counts?.memories ?? 0) },
-  { id: 'memory_events', group: '治理', label: '记忆写路径事件', drill: 'memory_events', hint: '五层 Markdown 双写埋点（新增/更新/删除/合并/遗忘，不含抽取运行）', get: (d) => String(d.mon?.memory_context?.write_events_total ?? 0) },
+  { id: 'memory_events', group: '治理', label: '记忆写路径事件', drill: 'memory_events', hint: '静态/动态 Markdown 双写埋点（新增/更新/删除/合并/遗忘/AutoDream 整理，不含抽取运行）', get: (d) => String(d.mon?.memory_context?.write_events_total ?? 0) },
   { id: 'memory_extract', group: '治理', label: '记忆抽取运行', drill: 'memory_extract', hint: '每轮对话后台抽取事件；运行>0 而写入=0 即「跑了但零产出」', warnIf: (d) => (d.mon?.memory_context?.extract_runs?.total ?? 0) > 0 && (d.mon?.memory_context?.write_events_total ?? 0) === 0, get: (d) => String(d.mon?.memory_context?.extract_runs?.total ?? 0) },
-  { id: 'compact_events', group: '治理', label: '压缩链事件', drill: 'compact_events', hint: '三级压缩链：micro 空闲衰减 / auto / manual / 失败与熔断', get: (d) => String(d.mon?.memory_context?.compact_events?.total ?? 0) },
-  { id: 'tokens_saved', group: '治理', label: '压缩节省 Token', hint: 'auto/manual 压缩 Σ(压缩前 − 压缩后)', get: (d) => formatNum(d.mon?.memory_context?.tokens_saved ?? 0) },
+  { id: 'compact_events', group: '治理', label: '压缩链事件', drill: 'compact_events', hint: 'Compaction 链：micro 空闲衰减 / auto / manual / window80 硬触发 / 失败与熔断', get: (d) => String(d.mon?.memory_context?.compact_events?.total ?? 0) },
+  { id: 'tokens_saved', group: '治理', label: '压缩节省 Token', hint: 'auto/manual/window80 压缩 Σ(压缩前 − 压缩后)', get: (d) => formatNum(d.mon?.memory_context?.tokens_saved ?? 0) },
   { id: 'breaker_sessions', group: '治理', label: '熔断会话', hint: '自动压缩连败≥3 被熔断的会话（手动可绕过）', warnIf: (d) => (d.mon?.memory_context?.breaker_sessions ?? 0) > 0, get: (d) => String(d.mon?.memory_context?.breaker_sessions ?? 0) },
 ]
 

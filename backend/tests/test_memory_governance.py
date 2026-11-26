@@ -113,7 +113,7 @@ def test_extract_from_turn_parses_typed_actions(mem_db, monkeypatch):
     asyncio.run(MemoryService.extract_from_turn("u1", "s1", "我对海鲜过敏", "好的，已记住"))
     rows = MemoryService.list_memories("u1")
     assert len(rows) == 1
-    assert rows[0]["memory_type"] == "preference"
+    assert rows[0]["memory_type"] == "user"
     assert rows[0]["importance"] == pytest.approx(0.9)
 
 
@@ -217,7 +217,7 @@ def test_merge_cluster_consolidates_duplicates(mem_db, monkeypatch):
     reply = json.dumps({"content": "用户长期偏好清淡饮食（少油少盐少糖）", "importance": 0.8},
                        ensure_ascii=False)
     monkeypatch.setattr("app.core.llm.LLMFactory.create_for_role", lambda *a, **k: FakeLLM(reply))
-    asyncio.run(MemoryService._merge_cluster("u1", "preference"))
+    asyncio.run(MemoryService._merge_cluster("u1", "user"))
     rows = MemoryService.list_memories("u1")
     assert len(rows) == 1
     assert rows[0]["id"] in ids
@@ -234,7 +234,7 @@ def test_merge_cluster_below_threshold_noop(mem_db, monkeypatch):
         raise AssertionError("不应调用 LLM")
 
     monkeypatch.setattr("app.core.llm.LLMFactory.create_for_role", _boom)
-    asyncio.run(MemoryService._merge_cluster("u1", "preference"))
+    asyncio.run(MemoryService._merge_cluster("u1", "user"))
     assert len(MemoryService.list_memories("u1")) == 2
 
 
@@ -252,18 +252,18 @@ def test_me_memories_crud(mem_db):
     )
 
     user = {"id": "u1"}
-    # 主动写入：偏好措辞自动归 preference，默认高重要度
+    # 主动写入：默认归 user 类型（新四类型体系），默认高重要度
     res = asyncio.run(create_my_memory(MemoryCreateRequest(content="我喜欢喝绿茶养生"), user))
-    assert res["success"] and res["memory_type"] == "preference"
+    assert res["success"] and res["memory_type"] == "user"
     mid = res["id"]
     # 列表
     listing = asyncio.run(list_my_memories(user))
     assert len(listing["memories"]) == 1
-    # 编辑：内容与类型
+    # 编辑：内容与类型（旧类型 fact 归一为 user）
     upd = asyncio.run(update_my_memory(mid, MemoryUpdateRequest(content="我喜欢喝红茶养胃", memory_type="fact"), user))
     assert upd["updated"] and upd["content"] == "我喜欢喝红茶养胃"
     row = next(m for m in MemoryService.list_memories("u1") if m["id"] == mid)
-    assert row["memory_type"] == "fact"
+    assert row["memory_type"] == "user"
     # 删除后不存在 → 404
     assert asyncio.run(delete_my_memory(mid, user))["success"]
     with pytest.raises(HTTPException) as ei:

@@ -1,15 +1,26 @@
 """
-见字如面 - 用户跨会话记忆服务
+见字如面 - 长期记忆服务（跨会话沉淀，参考 Claude Code auto memory 设计）
 
-借鉴 Claude Code auto memory 的设计原理：
-- 类型化记忆（preference/fact/goal/feedback），抽取侧输出 add/update/delete 动作，
-  支持去重、纠正与遗忘，而非只增不改的追加日志；
-- 两层加载：常驻「用户画像卡」（高重要度/偏好类，每会话必注入，类比 MEMORY.md 索引）
-  + 相关检索层（关键词重叠 + 重要度 + 时间衰减 + 类型权重），两层合计受字符预算约束；
-- 索引治理：超上限按「低重要度 + 长期未用」先遗忘；写入后对同类型高重叠簇做 LLM 合并。
-记忆以 markdown 文件为持久记录载体（memory_store 五层存储：AutoMem 每记忆独立 topic .md
-+ MEMORY.md 索引），SQLite user_memories 表为查询镜像（评分/检索/UI/观测），写路径双写；
-敏感内容（密码/密钥/证件等）不落库。
+长期记忆四类型（user/feedback/project/reference）+ MEMORY.md 索引：
+- user：用户个人信息/偏好/事实（原 preference/fact 归并）；
+- feedback：用户对回答方式的纠正与要求；
+- project：用户进行中的目标/计划/任务（原 goal 归并）；
+- reference：外部资源/位置指引（材料在哪、看哪份文档）。
+抽取侧输出 add/update/delete 动作，支持去重、纠正与遗忘，而非只增不改的追加日志。
+
+两个提取动作（均为后台 forked agent，每轮 query loop 完整结束后触发）：
+- extractMemories：扫描该轮对话的整轮 transcript（用户反馈/纠正/信息），
+  主动检测 hasMemoryWritesSince 过滤刚写过的内容，按四类型写新 topic 文件；
+- AutoDream：独立后台子代理按固定 Prompt 整理记忆（合并/去重/晋升/裁剪），
+  三重门控任一不满足立即退出：时间门（≥24h）/会话门（≥5 个新会话产生转录）/
+  并发锁（.consolidate-lock PID 文件锁）。
+
+两层加载：常驻「用户画像卡」（高重要度/user 类，每会话必注入，类比 MEMORY.md 索引）
++ 相关检索层（关键词重叠 + 重要度 + 时间衰减 + 类型权重），两层合计受字符预算约束；
+索引治理：超上限按「低重要度 + 长期未用」先遗忘；写入后对同类型高重叠簇做 LLM 合并。
+记忆以 markdown 文件为持久记录载体（memory_store：users/<uid>/memories/ 每记忆独立
+topic .md + users/<uid>/MEMORY.md 索引），SQLite user_memories 表为查询镜像
+（评分/检索/UI/观测），写路径双写；敏感内容（密码/密钥/证件等）不落库。
 """
 import json
 import logging
@@ -33,12 +44,21 @@ _SENSITIVE_PATTERNS = [
 
 MAX_MEMORIES_PER_USER = 200
 MAX_CONTEXT_MEMORIES = 5
-# 记忆类型（对应 Claude Code auto memory 四类的本系统映射）
-MEMORY_TYPES = ("preference", "fact", "goal", "feedback")
+# 长期记忆四类型（对齐 Claude Code auto memory：user/feedback/project/reference）
+MEMORY_TYPES = ("user", "feedback", "project", "reference")
 # 记忆类型中文展示名（供可观测性概览面板）
-_TYPE_LABELS = {"preference": "偏好", "fact": "事实", "goal": "目标", "feedback": "纠正"}
-# 类型权重：偏好与纠正类记忆的跨会话复用价值更高
-_TYPE_WEIGHT = {"preference": 1.2, "feedback": 1.2, "fact": 1.0, "goal": 1.0}
+_TYPE_LABELS = {"user": "用户信息", "feedback": "反馈纠正", "project": "项目目标", "reference": "参考索引"}
+# 类型权重：用户信息与反馈纠正类记忆的跨会话复用价值更高
+_TYPE_WEIGHT = {"user": 1.2, "feedback": 1.2, "project": 1.0, "reference": 0.9}
+# 旧类型兼容映射（存量 preference/fact/goal 在写入口归一化为新四类型）
+_LEGACY_TYPE_MAP = {"preference": "user", "fact": "user", "goal": "project"}
+
+
+def _normalize_type(memory_type: str) -> str:
+    """类型归一化：旧类型映射到新四类型，未知类型兜底 user。"""
+    t = (memory_type or "").strip()
+    t = _LEGACY_TYPE_MAP.get(t, t)
+    return t if t in MEMORY_TYPES else "user"
 # 查重/定位阈值：分词器含单字 token 且套话前缀重叠普遍，需关键词重叠与
 # 序列相似度同时达标才视为同一条记忆（避免「高血压控盐/血糖控糖」这类误判）
 _DUP_KEYWORD_OVERLAP = 5
@@ -58,11 +78,12 @@ _UNUSED_DAYS = 60.0
 _FRESHNESS_WARN_DAYS = 30.0
 # 置信度上限：查重命中/用户确认后递增，召回评分因子（0.1*confidence）
 _MAX_CONFIDENCE = 5.0
-# 巩固调度门控（Auto Dream 简化版）：距上次 >=24h 且新增会话 >=5 才触发簇合并
+# AutoDream 三重门控：距上次 >=24h 且新增会话（产生转录）>=5 且 .consolidate-lock 空闲
 _CONSOLIDATE_HOURS = 24.0
 _CONSOLIDATE_SESSIONS = 5
 # 主副互斥窗口（秒）：用户刚手动写入记忆后，后台抽取的 LLM 层在该窗口内跳过，
 # 避免竞态重复写；确定性信号层（用户显式「记住/忘记」）不受互斥影响，必须落库。
+# 等价 Claude Code hasMemoryWritesSince：后台抽取写入同样登记，过滤刚写过的内容。
 _MANUAL_WRITE_MUTEX_SECONDS = 120.0
 # 动作定位放宽阈值：find_similar 的查重门槛（重叠≥5 且 sim>0.7）用于「防重复新增」，
 # 但 update/delete 是「找到用户指的那一条」，门槛过高会让纠正/遗忘静默失败。
@@ -113,6 +134,8 @@ _SURFACED_MAX_SESSIONS = 500
 _SURFACED_MAX_IDS = 200
 # 主副互斥：user_id -> 最近一次手动写入时间戳（time.time()）
 _manual_write_at: dict = {}
+# 后台抽取写入登记：user_id -> 最近一次自动写入时间戳（hasMemoryWritesSince 同源）
+_auto_write_at: dict = {}
 
 
 def surfaced_ids(session_id: str) -> set:
@@ -148,9 +171,28 @@ def note_manual_write(user_id: str):
         _manual_write_at[user_id] = time.time()
 
 
+def note_auto_write(user_id: str):
+    """后台抽取写入记忆时登记时间戳（hasMemoryWritesSince：过滤刚写过的内容）。"""
+    if user_id:
+        _auto_write_at[user_id] = time.time()
+
+
 def _manual_write_recent(user_id: str) -> bool:
     ts = _manual_write_at.get(user_id)
     return bool(ts and (time.time() - ts) < _MANUAL_WRITE_MUTEX_SECONDS)
+
+
+def has_memory_writes_since(user_id: str, seconds: float = _MANUAL_WRITE_MUTEX_SECONDS) -> bool:
+    """对齐 Claude Code hasMemoryWritesSince：窗口内是否有手动/自动记忆写入。
+
+    抽取代理据此跳过 LLM 层或过滤与刚写入内容重复的候选，避免对同一件事反复写记忆。
+    """
+    now = time.time()
+    for store in (_manual_write_at, _auto_write_at):
+        ts = store.get(user_id)
+        if ts and (now - ts) < seconds:
+            return True
+    return False
 
 
 def _is_sensitive(text: str) -> bool:
@@ -233,7 +275,7 @@ def extract_explicit_signals(user_message: str) -> list:
     if _EXPLICIT_FORGET_RE.search(text):
         tail = _EXPLICIT_FORGET_RE.split(text, maxsplit=1)[-1].strip(" ，,。.：:、")
         if tail:
-            primary.append({"action": "delete", "type": "fact", "content": "",
+            primary.append({"action": "delete", "type": "user", "content": "",
                             "target_hint": tail[:120], "importance": 0.9})
     # 2) 显式记住：触发词之后的内容为记忆正文（为空则用整句）
     if _EXPLICIT_REMEMBER_RE.search(text):
@@ -241,11 +283,11 @@ def extract_explicit_signals(user_message: str) -> list:
         body = tail or text
         if body and not _is_sensitive(body):
             if _GOAL_RE.search(body):
-                mtype, imp = "goal", 0.8
+                mtype, imp = "project", 0.8
             elif _SELF_PREF_RE.search(body):
-                mtype, imp = "preference", 0.85
+                mtype, imp = "user", 0.85
             else:
-                mtype, imp = "fact", 0.85
+                mtype, imp = "user", 0.85
             primary.append({"action": "add", "type": mtype,
                             "content": _to_third_person(body)[:200], "importance": imp})
     # 3) 逐分句自述信号（疑问句舍弃，但保留疑问句里夹带的自述事实）
@@ -256,11 +298,11 @@ def extract_explicit_signals(user_message: str) -> list:
         if _REPLY_FEEDBACK_RE.search(part):
             mtype, imp = "feedback", 0.75
         elif _SELF_PREF_RE.search(part) and _SELF_REF_RE.search(part):
-            mtype, imp = "preference", 0.8
+            mtype, imp = "user", 0.8
         elif _GOAL_RE.search(part):
-            mtype, imp = "goal", 0.7
+            mtype, imp = "project", 0.7
         elif _SELF_DISCLOSURE_RE.search(part):
-            mtype, imp = "fact", 0.7
+            mtype, imp = "user", 0.7
         else:
             return None
         return {"action": "add", "type": mtype, "_rule": True,
@@ -390,7 +432,7 @@ class MemoryService:
         content = (content or "").strip()
         if content and _is_sensitive(content):
             return None
-        mtype = memory_type if memory_type in MEMORY_TYPES else None
+        mtype = _normalize_type(memory_type) if memory_type else None
         now = datetime.now().isoformat()
         db.execute(
             "UPDATE user_memories SET content = ?, keywords = ?, memory_type = ?,"
@@ -415,7 +457,7 @@ class MemoryService:
         keywords = set(_tokenize_keywords(content))
         best, best_key = None, (0, 0.0)
         for m in MemoryService.list_memories(user_id):
-            if memory_type and (m.get("memory_type") or "fact") != memory_type:
+            if memory_type and (m.get("memory_type") or "user") != memory_type:
                 continue
             overlap = len(keywords & set(m.get("keywords") or []))
             sim = _content_similarity(content, m.get("content") or "")
@@ -443,7 +485,7 @@ class MemoryService:
         keywords = set(_tokenize_keywords(hint))
         best, best_key = None, (0, 0.0)
         for m in MemoryService.list_memories(user_id):
-            if memory_type and (m.get("memory_type") or "fact") != memory_type:
+            if memory_type and (m.get("memory_type") or "user") != memory_type:
                 continue
             overlap = len(keywords & set(m.get("keywords") or []))
             sim = _content_similarity(hint, m.get("content") or "")
@@ -461,7 +503,7 @@ class MemoryService:
     def add_memory(
         user_id: str,
         content: str,
-        memory_type: str = "fact",
+        memory_type: str = "user",
         importance: float = 0.5,
         source_session_id: str = "",
         source_message_id: str = "",
@@ -475,8 +517,7 @@ class MemoryService:
         content = (content or "").strip()
         if not content or _is_sensitive(content):
             return None
-        if memory_type not in MEMORY_TYPES:
-            memory_type = "fact"
+        memory_type = _normalize_type(memory_type)
         if dedup:
             hit = MemoryService.find_similar(user_id, content)
             if hit:
@@ -506,6 +547,7 @@ class MemoryService:
         if rel:
             db.execute("UPDATE user_memories SET file_path = ? WHERE id = ?", (rel, memory_id))
         memory_store.log_memory_event(user_id, "add", "auto", memory_type, content[:60])
+        note_auto_write(user_id)
         # 超出上限时清理最旧、重要度最低、长期未用的记忆
         MemoryService._trim(user_id)
         return {"id": memory_id, "content": content, "memory_type": memory_type}
@@ -532,7 +574,7 @@ class MemoryService:
 
     @staticmethod
     def profile_memories(user_id: str) -> List[dict]:
-        """常驻画像卡：高重要度或偏好类记忆，每会话必注入（类比 Claude MEMORY.md 索引层）。
+        """常驻画像卡：高重要度或 user 类记忆，每会话必注入（类比 Claude MEMORY.md 索引层）。
 
         按重要度降序取 ≤6 条，合计字符受 MEMORY_PROFILE_CHARS 预算约束。
         """
@@ -540,7 +582,7 @@ class MemoryService:
             return []
         rows = db.query(
             "SELECT * FROM user_memories WHERE user_id = ?"
-            " AND (importance >= ? OR memory_type = 'preference')"
+            " AND (importance >= ? OR memory_type = 'user')"
             # 稳定排序（前缀缓存友好）：重要度降序后按创建时间/id 升序，
             # 避免 updated_at 变动导致画像卡顺序抖动、U 区前缀失效。
             " ORDER BY importance DESC, created_at ASC, id ASC LIMIT ?",
@@ -600,7 +642,7 @@ class MemoryService:
         def score(m: dict) -> float:
             overlap = len(meaningful & set(m.get("keywords") or []))
             decay = math.exp(-_days_since(m.get("last_used_at") or m.get("updated_at")) / _DECAY_DAYS)
-            weight = _TYPE_WEIGHT.get(m.get("memory_type") or "fact", 1.0)
+            weight = _TYPE_WEIGHT.get(m.get("memory_type") or "user", 1.0)
             # 置信度因子（0.1*confidence）：反复确认的记忆排序更靠前，但权重低于关键词/重要度
             conf = 0.1 * _clamp_confidence(m.get("confidence"))
             return overlap * 2 + (float(m.get("importance", 0.5)) + decay) * weight + conf
@@ -655,13 +697,13 @@ class MemoryService:
         confidence_sum = 0.0
         last_updated = ""
         for r in rows:
-            mtype = r.get("memory_type") or "fact"
-            by_type[mtype if mtype in by_type else "fact"] += 1
+            mtype = _normalize_type(r.get("memory_type"))
+            by_type[mtype] += 1
             content = r.get("content") or ""
             total_chars += len(content)
             importance_sum += float(r.get("importance") or 0.5)
             confidence_sum += _clamp_confidence(r.get("confidence"))
-            if float(r.get("importance") or 0) >= _PROFILE_IMPORTANCE or mtype == "preference":
+            if float(r.get("importance") or 0) >= _PROFILE_IMPORTANCE or mtype == "user":
                 profile_count += 1
             if r.get("last_used_at"):
                 retrieved_count += 1
@@ -691,16 +733,16 @@ class MemoryService:
     def drill_memories(user_id: str, kind: str = "all") -> dict:
         """记忆概览钻取：按指标/类型返回记忆明细 + 口径说明（只读）。
 
-        kind: all/profile/retrieved/never_used/importance 或 type:<preference|fact|goal|feedback>。
+        kind: all/profile/retrieved/never_used/importance 或 type:<user|feedback|project|reference>（旧类型自动归一）。
         口径与 usage_overview 同源，explanation 代入真实数值推导。
         """
         rows = MemoryService.list_memories(user_id) if user_id else []
         for r in rows:
             r["is_profile"] = (
                 float(r.get("importance") or 0) >= _PROFILE_IMPORTANCE
-                or (r.get("memory_type") or "fact") == "preference"
+                or (r.get("memory_type") or "user") == "user"
             )
-            r["type_label"] = _TYPE_LABELS.get(r.get("memory_type") or "fact", "事实")
+            r["type_label"] = _TYPE_LABELS.get(r.get("memory_type") or "user", "用户信息")
         total = len(rows)
         imp_sum = sum(float(r.get("importance") or 0.5) for r in rows)
         avg = round(imp_sum / total, 3) if total else 0.0
@@ -710,7 +752,7 @@ class MemoryService:
             items = [r for r in rows if r["is_profile"]]
             label = "画像卡候选"
             explanation = (
-                f"画像卡候选 = 重要度 ≥ {_PROFILE_IMPORTANCE} 或类型为「偏好」的记忆，共 {len(items)} 条；"
+                f"画像卡候选 = 重要度 ≥ {_PROFILE_IMPORTANCE} 或类型为「用户信息」的记忆，共 {len(items)} 条；"
                 f"常驻画像卡按重要度降序最多取 {_PROFILE_MAX_ITEMS} 条、字符预算 {budget}。"
             )
         elif kind == "retrieved":
@@ -729,8 +771,8 @@ class MemoryService:
             label = "平均重要度"
             explanation = f"平均重要度 = 全部 {total} 条记忆重要度之和 {imp_sum:.2f} ÷ {total} = {avg}。按重要度降序展示。"
         elif kind.startswith("type:"):
-            t = kind.split(":", 1)[1]
-            items = [r for r in rows if (r.get("memory_type") or "fact") == t]
+            t = _normalize_type(kind.split(":", 1)[1])
+            items = [r for r in rows if _normalize_type(r.get("memory_type")) == t]
             label = f"{_TYPE_LABELS.get(t, t)}类记忆"
             explanation = f"「{_TYPE_LABELS.get(t, t)}」类记忆 = memory_type='{t}' 的记录，共 {len(items)} 条。"
         else:
@@ -755,9 +797,7 @@ class MemoryService:
                 continue
             content = (item.get("content") or "").strip()
             action = (item.get("action") or "add").strip().lower()
-            mtype = item.get("type") or "fact"
-            if mtype not in MEMORY_TYPES:
-                mtype = "fact"
+            mtype = _normalize_type(item.get("type") or "user")
             importance = _clamp_importance(item.get("importance", 0.5))
             hint = (item.get("target_hint") or content).strip()
             if action == "delete":
@@ -791,7 +831,7 @@ class MemoryService:
     async def _merge_cluster(user_id: str, memory_type: str):
         """同类型高重叠簇合并：≥3 条且关键词重叠 ≥5 时 LLM 合并为一条，失败静默。"""
         rows = [m for m in MemoryService.list_memories(user_id)
-                if (m.get("memory_type") or "fact") == memory_type]
+                if (m.get("memory_type") or "user") == memory_type]
         if len(rows) < _MERGE_CLUSTER_SIZE:
             return
         clusters, used = [], set()
@@ -849,12 +889,17 @@ class MemoryService:
                 logger.warning("记忆合并失败（忽略）: %s", e)
 
     @staticmethod
-    async def _llm_extract(user_message: str, assistant_message, recent_user_messages=None):
-        """LLM 抽取层：返回 (items, reason)，reason 供运行事件解释「为何无产出」。"""
+    async def _llm_extract(user_message: str, assistant_message, recent_user_messages=None,
+                           turn_transcript: str = "", existing_memories=None):
+        """extractMemories 的 LLM 层：扫描整轮 transcript，返回 (items, reason)。
+
+        reason 供运行事件解释「为何无产出」。existing_memories 为现有记忆清单
+        （hasMemoryWritesSince 配套：提示代理勿对刚写过/已存在的内容重复新增）。
+        """
         try:
             from app.core.llm import LLMFactory
 
-            # 记忆抽取为后台辅助生成，走网关默认规则（role 仅用于日志显性化）
+            # 记忆抽取为后台辅助生成（forked agent），走网关默认规则（role 仅用于日志显性化）
             llm = LLMFactory.create_for_role("memory_extract")
         except Exception as e:
             logger.warning("记忆抽取初始化失败（忽略）: %s", e)
@@ -870,24 +915,40 @@ class MemoryService:
                 "近期用户消息（仅供判断是否纠正/覆盖旧记忆，不单独据此新增）：\n"
                 + "\n".join(f"- {h}" for h in history) + "\n\n"
             )
+        # 现有记忆清单：代理主动比对去重（hasMemoryWritesSince 语义的 prompt 侧配套）
+        existing_block = ""
+        if existing_memories:
+            existing_block = (
+                "【已有记忆（勿重复新增；仅当用户纠正/覆盖时输出 update）】\n"
+                + "\n".join(f"- [{m.get('memory_type')}] {(m.get('content') or '')[:100]}"
+                            for m in existing_memories[:20]) + "\n\n"
+            )
+        # 整轮 transcript（含工具调用轨迹）优先；无则退回单轮用户/助手消息
+        turn_block = turn_transcript.strip() if turn_transcript else (
+            f"用户: {user_text[:500]}\n助手: {(assistant_message or '')[:500]}"
+        )
         prompt = (
-            "从下面对话中提取用户值得长期记住的个人信息。只记「未来对话有用、且不显而易见」的内容。\n"
+            "你是记忆抽取代理（extractMemories）。扫描下面这一轮对话的完整 transcript，"
+            "提取用户值得长期记住的内容。只记「未来对话有用、且不显而易见」的内容。\n"
             "【必须保存】①用户明确说「记住/记一下/别忘了…」的内容（不得判空）；"
-            "②用户自述的健康/身份/生活事实（如患病、过敏、年龄、职业、家人情况）；"
-            "③饮食/口味/作息偏好与禁忌；④用户自述的目标与计划（type=goal）；"
-            "⑤用户对回答方式的纠正与要求（type=feedback）。\n"
+            "②用户自述的健康/身份/生活事实与饮食/口味/作息偏好禁忌（type=user）；"
+            "③用户对回答方式的纠正与要求（type=feedback）；"
+            "④用户进行中的目标/计划/任务（type=project）；"
+            "⑤外部资源/位置指引，如材料在哪份文档/哪个位置（type=reference）。\n"
             "写入门禁（What-NOT-to-save），以下一律不记：①可从当前上下文或知识库直接推导的内容；"
             "②一次性提问/临时查询本身（但提问里夹带的自述事实仍要保存，"
             "如「我有高血压，能吃什么药」→ 保存「用户有高血压」）；"
-            "③对用户的负面评价或臆测；④活动流水、寒暄等低价值内容；⑤密码/密钥/身份证等敏感信息。\n"
+            "③对用户的负面评价或臆测；④活动流水、寒暄等低价值内容；⑤密码/密钥/身份证等敏感信息；"
+            "⑥已有记忆清单中已存在或刚写入过的内容（避免对同一件事反复写记忆）。\n"
             "若用户纠正或覆盖了此前已记住的内容，输出 action=update 并用 target_hint 描述原记忆；"
             "若用户明确要求遗忘，输出 action=delete 并用 target_hint 描述目标。\n"
             "content 用第三人称（「用户…」）陈述，保留具体信息点，不要写成问句。\n"
-            "type 取值：preference/fact/goal/feedback。仅输出 JSON 数组，每项 "
+            "type 取值：user/feedback/project/reference。仅输出 JSON 数组，每项 "
             "{\"content\": str, \"importance\": 0~1, \"type\": str, "
             "\"action\": \"add|update|delete\", \"target_hint\": str}；确实无可保存内容才输出 []。\n\n"
+            + existing_block
             + context_block
-            + f"用户: {user_text[:500]}\n助手: {(assistant_message or '')[:500]}"
+            + "【本轮 transcript】\n" + turn_block[:6000]
         )
         try:
             collected = ""
@@ -903,15 +964,17 @@ class MemoryService:
 
     @staticmethod
     async def extract_from_turn(user_id: str, session_id: str, user_message, assistant_message,
-                                recent_user_messages=None):
-        """对话结束后的记忆抽取：确定性信号层 + LLM 层双通道，并落「抽取运行」观测事件。
+                                recent_user_messages=None, turn_transcript: str = ""):
+        """extractMemories：每轮 query loop 完整结束后的后台记忆抽取代理。
 
-        结构要点（针对「抽取跑了但面板永远为空」的根因）：
+        扫描该轮对话的所有 transcript（用户反馈/纠正/信息），确定性信号层 + LLM 层
+        双通道，并落「抽取运行」观测事件。结构要点：
         - 显式层始终执行：用户说「记住/忘记…」不依赖模型判断，也不受主副互斥拦截；
+        - hasMemoryWritesSince：近期手动/自动写入后 LLM 层跳过（主副互斥），
+          且与刚写入内容高度重复的候选被过滤，避免对同一件事反复写记忆；
         - LLM 层失败/判空不再静默：reason 写进运行事件 detail，面板可区分
           「未运行 / 跑了无产出 / 模型不可用 / 解析失败」；
-        - 每轮必写一条 action=extract 事件（与 add/update/delete 写事件拆口径），
-          使「记忆写路径事件=0」不再等于「抽取从未运行」。
+        - 每轮必写一条 action=extract 事件（与 add/update/delete 写事件拆口径）。
         返回统计 dict 供观测/测试；任何异常不影响主对话流程。
         """
         result = {"ran": False, "explicit": 0, "llm": 0, "reason": "",
@@ -927,7 +990,7 @@ class MemoryService:
         # 1) 确定性信号层（始终执行，不受手动写入互斥影响）
         explicit = extract_explicit_signals(user_text)
         result["explicit"] = len(explicit)
-        # 2) LLM 层：主副互斥（对齐 Claude Code hasMemoryWritesSince）仅拦此层，
+        # 2) LLM 层：hasMemoryWritesSince（对齐 Claude Code）仅拦此层，
         #    避免用户刚手动写过记忆后后台抽取竞态重复写。
         llm_items, llm_reason = [], ""
         if _manual_write_recent(user_id):
@@ -935,11 +998,13 @@ class MemoryService:
             logger.info("用户 %s 近期手动写入记忆，跳过本轮 LLM 抽取（主副互斥）", user_id)
         else:
             llm_items, llm_reason = await MemoryService._llm_extract(
-                user_text, assistant_message, recent_user_messages)
+                user_text, assistant_message, recent_user_messages,
+                turn_transcript=turn_transcript,
+                existing_memories=MemoryService.list_memories(user_id))
         result["llm"] = len(llm_items)
         result["reason"] = llm_reason
         # 3) 合并执行：显式项优先（单轮 3 条预算内），同内容去重；
-        #    规则自述项与模型项同内容时采纳模型更细的分类（如过敏→preference）与更高重要度，
+        #    规则自述项与模型项同内容时采纳模型更细的分类与更高重要度，
         #    用户显式「记住」项不被模型降级。
         merged, index = [], {}
         for item in explicit + llm_items:
@@ -957,6 +1022,17 @@ class MemoryService:
             merged.append(dict(item))
         for it in merged:
             it.pop("_rule", None)
+        # 4) hasMemoryWritesSince 过滤：窗口内刚写入过且内容高度重复的 add 候选直接丢弃
+        #    （查重转 update 仍会让同一件事每轮置信度虚增，此处提前拦截）。
+        if has_memory_writes_since(user_id):
+            kept_items = []
+            for it in merged:
+                if (it.get("action") or "add") == "add" and it.get("content"):
+                    hit = MemoryService.find_similar(user_id, it["content"])
+                    if hit and _content_similarity(it["content"], hit.get("content") or "") > 0.9:
+                        continue
+                kept_items.append(it)
+            merged = kept_items
         stats = MemoryService.apply_extraction(user_id, session_id, merged)
         result.update(stats)
         detail = (f"显式{len(explicit)}条/模型{len(llm_items)}条→"
@@ -966,15 +1042,118 @@ class MemoryService:
         memory_store.log_memory_event(user_id, "extract", "auto", detail=detail)
         if sum(stats.values()):
             logger.info("用户 %s 记忆抽取动作: %s（%s）", user_id, stats, detail)
-        # 簇合并（索引治理）由 consolidate_if_due 按时间/会话门控调度，不在此无条件合并。
+        # AutoDream（索引治理）由 consolidate_if_due 按三重门控调度，不在此无条件合并。
         return result
 
     @staticmethod
-    async def consolidate_if_due(user_id: str) -> dict:
-        """巩固调度（Auto Dream 简化版）：时间门控 + 会话门控双达标才做簇合并。
+    async def _auto_dream(user_id: str) -> dict:
+        """AutoDream：独立后台整理代理，按固定 Prompt 审视全部长期记忆。
 
-        距上次巩固 >= _CONSOLIDATE_HOURS 小时，且期间新增会话 >= _CONSOLIDATE_SESSIONS
-        才触发；状态存 runtime_config（键 memory_consolidation_state，per-user）。
+        输入=现有记忆清单 + 近期会话摘要（短期沉淀线索）；输出=类型化整理动作
+        （merge/update/delete/add），逐条经写入治理执行。LLM 不可用或输出无法
+        解析时回退逐类型 _merge_cluster（确定性簇合并），保证门控达标必有整理。
+        """
+        rows = MemoryService.list_memories(user_id)
+        stats = {"actions": 0, "fallback": False}
+        if not rows:
+            return stats
+        listing = "\n".join(
+            f"- id={m['id']} type={m.get('memory_type') or 'user'} "
+            f"importance={m.get('importance')} | {m['content']}"
+            for m in rows[:60]
+        )
+        summaries = db.query(
+            "SELECT session_id, summary FROM chat_session_summaries"
+            " WHERE user_id = ? ORDER BY updated_at DESC LIMIT 5", (user_id,))
+        sess_block = "\n".join(
+            f"- 会话 {r['session_id']}: {(r.get('summary') or '')[:300]}" for r in summaries
+        ) or "（无近期会话摘要）"
+        prompt = (
+            "你是记忆整理代理（AutoDream），在后台定期整理一位用户的长期记忆。"
+            "请审视下方全部记忆与近期会话摘要，按固定规则整理：\n"
+            "1. 合并：同一件事的多条记忆合并为一条（保留全部不重复信息点，不新增信息）；\n"
+            "2. 更新：被近期会话证实已过时/被纠正的记忆，改写为最新事实；\n"
+            "3. 删除：相互矛盾且可判定失效、或明显一次性无跨会话价值的记忆；\n"
+            "4. 沉淀：近期会话摘要中反复出现、值得跨会话保留的新信息可新增。\n"
+            "禁止：新增敏感信息（密码/证件号等）、凭空编造、改动静态规矩。\n"
+            "仅输出 JSON 数组，元素为以下动作之一（无动作输出 []）：\n"
+            '{"action":"merge","ids":["id1","id2"],"content":"合并后内容","importance":0.8}\n'
+            '{"action":"update","id":"记忆id","content":"更新后内容","importance":0.7}\n'
+            '{"action":"delete","id":"记忆id"}\n'
+            '{"action":"add","content":"新记忆","type":"user|feedback|project|reference","importance":0.6}\n\n'
+            f"【现有记忆】\n{listing}\n\n【近期会话摘要】\n{sess_block}"
+        )
+        try:
+            from app.core.llm import LLMFactory
+
+            llm = LLMFactory.create_for_role("memory_extract")
+            collected = ""
+            async for chunk in llm.chat([{"role": "user", "content": prompt}], stream=False):
+                collected += chunk
+            items, reason = _parse_extraction_items(collected)
+            if reason == "parse_error":
+                raise ValueError("AutoDream 输出无法解析")
+        except Exception as e:
+            logger.warning("AutoDream 代理不可用，回退簇合并（忽略）: %s", e)
+            stats["fallback"] = True
+            for mtype in MEMORY_TYPES:
+                await MemoryService._merge_cluster(user_id, mtype)
+            return stats
+        valid_ids = {m["id"] for m in rows}
+        for it in items[:10]:
+            try:
+                action = (it.get("action") or "").strip().lower()
+                if action == "merge":
+                    ids = [i for i in (it.get("ids") or []) if i in valid_ids]
+                    content = (it.get("content") or "").strip()
+                    if len(ids) < 2 or not content or _is_sensitive(content):
+                        continue
+                    target = next(m for m in rows if m["id"] == ids[0])
+                    MemoryService.update_memory(
+                        user_id, ids[0], content=content,
+                        importance=_clamp_importance(it.get("importance", target.get("importance"))))
+                    for mid in ids[1:]:
+                        MemoryService.delete_memory(user_id, mid)
+                        valid_ids.discard(mid)
+                    memory_store.log_memory_event(user_id, "merge", "auto",
+                                                  target.get("memory_type") or "user",
+                                                  f"AutoDream {len(ids)} 条合并为 1 条")
+                    stats["actions"] += 1
+                elif action == "update" and it.get("id") in valid_ids:
+                    content = (it.get("content") or "").strip()
+                    if not content or _is_sensitive(content):
+                        continue
+                    MemoryService.update_memory(
+                        user_id, it["id"], content=content,
+                        importance=_clamp_importance(it.get("importance")))
+                    stats["actions"] += 1
+                elif action == "delete" and it.get("id") in valid_ids:
+                    MemoryService.delete_memory(user_id, it["id"])
+                    valid_ids.discard(it["id"])
+                    stats["actions"] += 1
+                elif action == "add":
+                    content = (it.get("content") or "").strip()
+                    if not content or _is_sensitive(content):
+                        continue
+                    if MemoryService.add_memory(
+                            user_id, content,
+                            memory_type=_normalize_type(it.get("type") or "user"),
+                            importance=_clamp_importance(it.get("importance", 0.6))):
+                        stats["actions"] += 1
+            except Exception as e:
+                logger.warning("AutoDream 动作执行失败（忽略）: %s", e)
+        memory_store.log_memory_event(user_id, "dream", "auto",
+                                      detail=f"AutoDream 整理 {stats['actions']} 个动作")
+        return stats
+
+    @staticmethod
+    async def consolidate_if_due(user_id: str) -> dict:
+        """AutoDream 调度：三重门控（任一不满足立即退出）+ 固定 Prompt 整理代理。
+
+        1. 时间门：距上次整合 >= _CONSOLIDATE_HOURS（24h）；
+        2. 会话门：期间新增 >= _CONSOLIDATE_SESSIONS（5）个产生转录的会话；
+        3. 并发锁：.consolidate-lock（PID 文件锁）空闲，防止多进程重复整合。
+        状态存 runtime_config（键 memory_consolidation_state，per-user）。
         由 chat 后台任务尾部调用，失败静默，不阻断主链路。返回 {"ran": bool, ...} 供观测/测试。
         """
         result = {"ran": False, "reason": ""}
@@ -991,32 +1170,42 @@ class MemoryService:
             mine = state.get(user_id) or {}
             now = time.time()
             last_ts = float(mine.get("last_at") or 0.0)
-            # 会话门控：统计上次巩固之后新建的会话数（无 last_at 时统计全部）
-            since_iso = datetime.fromtimestamp(last_ts).isoformat() if last_ts else ""
-            if since_iso:
-                sess_row = db.query_one(
-                    "SELECT COUNT(*) AS c FROM chat_sessions WHERE user_id = ? AND created_at > ?",
-                    (user_id, since_iso),
-                )
-            else:
-                sess_row = db.query_one(
-                    "SELECT COUNT(*) AS c FROM chat_sessions WHERE user_id = ?", (user_id,)
-                )
-            new_sessions = int((sess_row or {}).get("c") or 0)
             hours_elapsed = (now - last_ts) / 3600.0 if last_ts else _CONSOLIDATE_HOURS
             if hours_elapsed < _CONSOLIDATE_HOURS:
                 result["reason"] = "time_gate"
                 return result
+            # 会话门控：上次巩固之后新建、且产生了转录（有对话消息）的会话数
+            since_iso = datetime.fromtimestamp(last_ts).isoformat() if last_ts else ""
+            if since_iso:
+                sess_row = db.query_one(
+                    "SELECT COUNT(*) AS c FROM chat_sessions s WHERE s.user_id = ? AND s.created_at > ?"
+                    " AND EXISTS (SELECT 1 FROM chat_messages m WHERE m.session_id = s.session_id)",
+                    (user_id, since_iso),
+                )
+            else:
+                sess_row = db.query_one(
+                    "SELECT COUNT(*) AS c FROM chat_sessions s WHERE s.user_id = ?"
+                    " AND EXISTS (SELECT 1 FROM chat_messages m WHERE m.session_id = s.session_id)",
+                    (user_id,),
+                )
+            new_sessions = int((sess_row or {}).get("c") or 0)
             if new_sessions < _CONSOLIDATE_SESSIONS:
                 result["reason"] = "session_gate"
                 return result
-            # 双门控达标：对全部类型做高重叠簇合并，然后推进状态
-            for mtype in MEMORY_TYPES:
-                await MemoryService._merge_cluster(user_id, mtype)
-            state[user_id] = {"last_at": now, "sessions_at": new_sessions}
-            runtime_config.set(key, state)
-            result.update({"ran": True, "reason": "ok", "new_sessions": new_sessions})
-            logger.info("用户 %s 记忆巩固完成（新增会话 %d，距上次 %.1fh）", user_id, new_sessions, hours_elapsed)
+            # 并发锁：其他进程正在整合 → 立即退出
+            if not memory_store.acquire_consolidate_lock(user_id):
+                result["reason"] = "lock_gate"
+                return result
+            try:
+                dream = await MemoryService._auto_dream(user_id)
+                state[user_id] = {"last_at": now, "sessions_at": new_sessions}
+                runtime_config.set(key, state)
+                result.update({"ran": True, "reason": "ok", "new_sessions": new_sessions,
+                               "actions": dream.get("actions", 0), "fallback": dream.get("fallback", False)})
+                logger.info("用户 %s AutoDream 完成（新增会话 %d，距上次 %.1fh，动作 %d）",
+                            user_id, new_sessions, hours_elapsed, dream.get("actions", 0))
+            finally:
+                memory_store.release_consolidate_lock(user_id)
         except Exception as e:
             logger.warning("记忆巩固失败（忽略，不影响对话）: %s", e)
             result["reason"] = "error"

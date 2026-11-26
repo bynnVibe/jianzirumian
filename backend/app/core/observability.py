@@ -40,9 +40,12 @@ SEGMENT_LABELS = {
     "system": "系统提示",
     "user_instructions": "用户指令",
     "memory": "长期记忆",
-    "memory_managed": "记忆·平台强制层",
-    "memory_project": "记忆·项目共享层",
-    "memory_local": "记忆·本地私有层",
+    "memory_static_user": "静态记忆·User（输出约定）",
+    "memory_static_project": "静态记忆·Project（系统规则）",
+    "memory_static_local": "静态记忆·Local（检索约束）",
+    "memory_managed": "记忆·平台强制层（旧）",
+    "memory_project": "记忆·KB 共享叠加层",
+    "memory_local": "记忆·本人私有叠加层",
     "memory_profile": "记忆·画像卡",
     "memory_relevant": "记忆·相关检索",
     "agent_memory": "记忆·助手分域",
@@ -746,18 +749,19 @@ def personal_context_overview(user_id: str, days: int = 7, range_mode: str = "da
         for r in seg_rows
     ]
 
-    # 历史压缩（三级压缩链）：边界标记（compact_kind）分布 + 摘要 token 占用
+    # 历史压缩（Compaction 链）：边界标记（compact_kind）分布 + 摘要 token 占用
     comp = db.query_one(
         "SELECT COUNT(*) AS n, COALESCE(SUM(token_estimate), 0) AS tokens,"
         " COALESCE(SUM(compact_kind = 'auto'), 0) AS auto_n,"
         " COALESCE(SUM(compact_kind = 'manual'), 0) AS manual_n,"
         " COALESCE(SUM(compact_kind = 'note'), 0) AS note_n,"
+        " COALESCE(SUM(compact_kind = 'window80'), 0) AS window80_n,"
         " COALESCE(MAX(fail_streak), 0) AS fail_max,"
         " COALESCE(SUM(fail_streak >= 3), 0) AS breaker_n"
         " FROM chat_session_summaries WHERE user_id = ?",
         (user_id,),
     ) or {}
-    # 压缩链事件流（micro/auto/manual/auto_fail/auto_blocked）：次数与 token 节省口径
+    # 压缩链事件流（micro/auto/manual/window80/auto_fail/auto_blocked）：次数与 token 节省口径
     ev_rows = db.query(
         "SELECT kind, COUNT(*) AS n, COALESCE(SUM(before_tokens), 0) AS bt,"
         " COALESCE(SUM(after_tokens), 0) AS at FROM context_compact_events"
@@ -765,14 +769,14 @@ def personal_context_overview(user_id: str, days: int = 7, range_mode: str = "da
         (user_id, since),
     )
     chain = {r["kind"]: int(r["n"]) for r in ev_rows}
-    saved = sum(int(r["bt"]) - int(r["at"]) for r in ev_rows if r["kind"] in ("auto", "manual"))
-    before_sum = sum(int(r["bt"]) for r in ev_rows if r["kind"] in ("auto", "manual"))
-    after_sum = sum(int(r["at"]) for r in ev_rows if r["kind"] in ("auto", "manual"))
+    saved = sum(int(r["bt"]) - int(r["at"]) for r in ev_rows if r["kind"] in ("auto", "manual", "window80"))
+    before_sum = sum(int(r["bt"]) for r in ev_rows if r["kind"] in ("auto", "manual", "window80"))
+    after_sum = sum(int(r["at"]) for r in ev_rows if r["kind"] in ("auto", "manual", "window80"))
 
     from app.services.memory import MemoryService
 
     memory = MemoryService.usage_overview(user_id)
-    # 记忆写路径事件（五层 Markdown 双写埋点）：按动作/层聚合，供写路径健康度展示。
+    # 记忆写路径事件（静态/动态 Markdown 双写埋点）：按动作/层聚合，供写路径健康度展示。
     # action=extract 是「抽取运行」事件（每轮对话必有一条），与实际写入拆口径，
     # 否则运行数会把「写路径事件」虚高，掩盖「跑了但零产出」的真实问题。
     we_rows = db.query(
@@ -825,13 +829,14 @@ def personal_context_overview(user_id: str, days: int = 7, range_mode: str = "da
         "compression": {
             "sessions_with_summary": int(comp.get("n", 0) or 0),
             "summary_tokens": int(comp.get("tokens", 0) or 0),
-            "trigger_tokens": int(getattr(settings, "CONTEXT_COMPACT_TRIGGER_TOKENS", 6000)),
-            # 三级压缩链重规划指标：类型分布/事件流/节省量/熔断水位/空闲衰减阈值
+            "trigger_tokens": int(getattr(settings, "CONTEXT_COMPACT_TRIGGER_TOKENS", 10000)),
+            # Compaction 链指标：类型分布/事件流/节省量/熔断水位/空闲衰减阈值
             "kind_counts": {"auto": int(comp.get("auto_n", 0) or 0),
                             "manual": int(comp.get("manual_n", 0) or 0),
-                            "note": int(comp.get("note_n", 0) or 0)},
+                            "note": int(comp.get("note_n", 0) or 0),
+                            "window80": int(comp.get("window80_n", 0) or 0)},
             "chain_events": {k: chain.get(k, 0) for k in
-                             ("micro", "auto", "manual", "auto_fail", "auto_blocked")},
+                             ("micro", "auto", "manual", "window80", "auto_fail", "auto_blocked")},
             "tokens_saved": max(0, saved),
             "compress_ratio": round(1 - after_sum / before_sum, 3) if before_sum else 0.0,
             "fail_streak_max": int(comp.get("fail_max", 0) or 0),
@@ -1375,7 +1380,7 @@ def monitor_metrics(days: int = 7, range_mode: str = "days") -> dict:
         " COALESCE(SUM(prompt_chars), 0) AS prompt_chars,"
         " COALESCE(SUM(completion_chars), 0) AS completion_chars"
         " FROM usage_daily WHERE day >= ? GROUP BY day ORDER BY day", (day_since,))]
-    # 记忆与上下文治理（五层 Markdown 写路径 + 三级压缩链）：全局监控指标。
+    # 记忆与上下文治理（静态/动态 Markdown 写路径 + Compaction 压缩链）：全局监控指标。
     # 写路径指标排除 action=extract（抽取运行事件），另列 extract_runs 供「跑了但零产出」诊断。
     mem_ev_rows = db.query(
         "SELECT layer, action, COUNT(*) AS n FROM memory_write_events"
@@ -1390,9 +1395,10 @@ def monitor_metrics(days: int = 7, range_mode: str = "days") -> dict:
         " COALESCE(SUM(kind = 'micro'), 0) AS micro,"
         " COALESCE(SUM(kind = 'auto'), 0) AS auto,"
         " COALESCE(SUM(kind = 'manual'), 0) AS manual,"
+        " COALESCE(SUM(kind = 'window80'), 0) AS window80,"
         " COALESCE(SUM(kind = 'auto_fail'), 0) AS fail,"
         " COALESCE(SUM(kind = 'auto_blocked'), 0) AS blocked,"
-        " COALESCE(SUM(CASE WHEN kind IN ('auto','manual')"
+        " COALESCE(SUM(CASE WHEN kind IN ('auto','manual','window80')"
         "   THEN before_tokens - after_tokens ELSE 0 END), 0) AS saved"
         " FROM context_compact_events WHERE created_at >= ?", (since,)) or {}
     breaker_row = db.query_one(
@@ -1415,7 +1421,7 @@ def monitor_metrics(days: int = 7, range_mode: str = "days") -> dict:
             "last_detail": mem_ex_last.get("detail") or "",
         },
         "compact_events": {k: int(cmp_ev.get(k, 0) or 0)
-                           for k in ("total", "micro", "auto", "manual", "fail", "blocked")},
+                           for k in ("total", "micro", "auto", "manual", "window80", "fail", "blocked")},
         "tokens_saved": max(0, int(cmp_ev.get("saved", 0) or 0)),
         "breaker_sessions": int(breaker_row.get("n", 0) or 0),
     }

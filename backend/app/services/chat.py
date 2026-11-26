@@ -109,6 +109,7 @@ class Message:
         search_results: Optional[List[dict]] = None,
         use_knowledge: bool = False,
         use_search: bool = False,
+        is_realtime: bool = False,
         message_id: str = None,
         attachments: Optional[List[dict]] = None,
         interrupted: bool = False,
@@ -123,6 +124,8 @@ class Message:
         self.search_results = search_results or []
         self.use_knowledge = use_knowledge
         self.use_search = use_search
+        # 实时类答案写时打标（route.is_realtime）：读时投影下一轮即衰减，不等空闲衰减
+        self.is_realtime = is_realtime
         self.attachments = attachments or []  # 用户消息附件元数据 [{file_id, filename, kind}]
         # Agent 中间过程快照：旧版 {plan, tools, tool_sources}；v2 额外携带
         # steps/error/intent/trace_id/status 等（仅写入时存在的键，旧消息形状不变）
@@ -145,6 +148,7 @@ class Message:
             "search_results": self.search_results,
             "use_knowledge": self.use_knowledge,
             "use_search": self.use_search,
+            "is_realtime": self.is_realtime,
             "attachments": self.attachments,
             "interrupted": self.interrupted,
             "agent_process": self.agent_process,
@@ -230,6 +234,7 @@ class ChatService:
                     search_results=json.loads(m_row["search_results"] or "[]"),
                     use_knowledge=bool(m_row["use_knowledge"]),
                     use_search=bool(m_row["use_search"]),
+                    is_realtime=bool(m_row.get("is_realtime", 0)),
                     message_id=m_row["message_id"],
                     attachments=json.loads(m_row["attachments"] or "[]"),
                     interrupted=bool(m_row.get("interrupted", 0)),
@@ -250,6 +255,16 @@ class ChatService:
         except Exception as e:
             logger.error("保存会话失败: %s", e)
             raise
+        # 短期记忆镜像（与完整会话记录融合）：transcript 只读流水账全量重生成，
+        # task_state 投影任务进度；压缩链不改写 transcript。落盘失败不阻断主链路。
+        try:
+            from app.services import memory_store
+            memory_store.write_transcript(session)
+            last_assistant = next(
+                (m for m in reversed(session.messages) if getattr(m, "role", "") == "assistant"), None)
+            memory_store.write_task_state(session, last_assistant)
+        except Exception as e:
+            logger.warning("短期记忆镜像落盘失败（忽略）: %s", e)
 
     def _persist_session_transaction(self, conn, session):
             conn.execute(
@@ -263,8 +278,8 @@ class ChatService:
             conn.execute("DELETE FROM chat_messages WHERE session_id = ?", (session.session_id,))
             conn.executemany(
                 "INSERT INTO chat_messages (message_id, session_id, seq, role, content,"
-                " sources, search_results, use_knowledge, use_search, attachments, created_at, interrupted, agent_process, cache_info)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " sources, search_results, use_knowledge, use_search, is_realtime, attachments, created_at, interrupted, agent_process, cache_info)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 [
                     (
                         m.message_id, session.session_id, seq, m.role, m.content,
@@ -272,6 +287,7 @@ class ChatService:
                         json.dumps(m.search_results, ensure_ascii=False),
                         1 if m.use_knowledge else 0,
                         1 if m.use_search else 0,
+                        1 if m.is_realtime else 0,
                         json.dumps(m.attachments, ensure_ascii=False),
                         session.created_at, int(m.interrupted),
                         json.dumps(m.agent_process, ensure_ascii=False) if m.agent_process else "",
@@ -653,9 +669,10 @@ class ChatService:
         # segment 级 token 度量：系统提示段
         obs.note_segment("system", "\n".join(m.get("content", "") for m in llm_messages))
 
-        # 五层记忆读取路径（Claude Code 存储分级，剔除 Team）：Managed→User→Project→Local
-        # 自下而上叠加注入，靠后注入优先级更高（recency bias）；markdown 持久层读时投影。
-        # Project/Local 仅在 kb_id 存在且对当前用户可见（public 或本人私有库）时注入。
+        # 静态记忆全量加载（Claude Code 存储分级改造：去掉 Managed/Team）：
+        # 全局 User（输出友好度）→ Project（系统规则/格式）→ Local（检索约束），
+        # 靠后注入优先级更高（recency bias）；markdown 持久层读时投影。
+        # KB Project / 本人 Local 叠加层仅在 kb_id 存在且对当前用户可见时注入。
         from app.services import memory_store
         kb_visible_id = ""
         if kb_id and user_id and user_id != "guest":
@@ -665,21 +682,21 @@ class ChatService:
                 kb_visible_id = kb_id
         static_layers = memory_store.static_layer_messages(user_id, kb_visible_id)
         for _layer_msg in static_layers:
-            if _layer_msg["segment"] == "memory_managed":
+            if _layer_msg["segment"].startswith("memory_static_"):
                 llm_messages.append({"role": "system", "content": _layer_msg["content"]})
-                obs.note_segment("memory_managed", _layer_msg["content"])
+                obs.note_segment(_layer_msg["segment"], _layer_msg["content"])
 
         # L1 用户指令层（类比 CLAUDE.md User 层）：静态头之后、画像卡之前注入，
-        # 靠后注入优先级更高（Managed < User，recency bias）；同用户跨会话稳定，前缀缓存友好。
+        # 靠后注入优先级更高（全局静态 < 个人指令，recency bias）；同用户跨会话稳定，前缀缓存友好。
         instruction_text = user_instructions.get_instruction(user_id)
         instruction_msgs = user_instructions.format_instruction_messages(instruction_text)
         if instruction_msgs:
             llm_messages.extend(instruction_msgs)
             obs.note_segment("user_instructions", instruction_text)
 
-        # Project/Local 层：用户指令之后注入（优先级高于 User 层），半静态前缀缓存友好
+        # KB Project / 本人 Local 叠加层：用户指令之后注入（优先级更高），半静态前缀缓存友好
         for _layer_msg in static_layers:
-            if _layer_msg["segment"] != "memory_managed":
+            if not _layer_msg["segment"].startswith("memory_static_"):
                 llm_messages.append({"role": "system", "content": _layer_msg["content"]})
                 obs.note_segment(_layer_msg["segment"], _layer_msg["content"])
 
@@ -787,7 +804,7 @@ class ChatService:
         # 历史消息不含本次刚保存的用户提问（最后一条）
         history_ctx = history_messages[:-1] if history_messages else []
         llm_messages.extend(history_ctx)
-        obs.note_segment("history", "\n".join(m.get("content", "") for m in history_ctx))
+        obs.note_segment("history", session_summary.history_segment_text(history_ctx))
         # U 区：画像卡在追加式历史之后、工具/相关记忆之前——画像被重写只失效尾部小段
         llm_messages.extend(chat_agent._profile_messages(profile_text))
 
@@ -1128,7 +1145,8 @@ class ChatService:
             async with aclosing(self._personal_tool_turn(session, user_msg, tool_messages, selected_tools,
                     rule_id, model, use_knowledge, use_search, sources, search_results,
                     force_refresh or route.is_realtime or bool(re.search(r"最新|实时|现在|当前|latest|real.?time", query, re.I)),
-                    runtime_skill["records"], runtime_skill.get("identity"), intent=_intent or None)) as stream:
+                    runtime_skill["records"], runtime_skill.get("identity"), intent=_intent or None,
+                    is_realtime=route.is_realtime)) as stream:
                 async for event in stream:
                     yield event
             return
@@ -1328,6 +1346,7 @@ class ChatService:
             search_results=search_results if llm_error is None else [],
             use_knowledge=use_knowledge,
             use_search=use_search,
+            is_realtime=route.is_realtime,
             cache_info=getattr(llm, "cache_info", {}) if llm_error is None else {},
             agent_process=fast_process,
         )
@@ -1423,12 +1442,14 @@ class ChatService:
         yield f"data: {self._json_event('done', {'session_id': session.session_id, 'user_message_id': user_msg.message_id, 'message': assistant_msg.to_dict()})}\n\n"
 
     async def _personal_tool_turn(self, session, user_msg, messages, tools, rule_id, model,
-                                  use_knowledge, use_search, sources, search_results, force_refresh, skill_records, skill_identity=None, intent=None):
+                                  use_knowledge, use_search, sources, search_results, force_refresh, skill_records, skill_identity=None, intent=None,
+                                  is_realtime=False):
         """个人工具轮次：预留稳定消息，原生调用、来源与取消终态共同持久化。"""
         from app.core.tool_stream import ToolModelUnavailable
         from app.services.tools.base import ToolContext
         from app.services.tools.native import run_tool_loop
-        assistant = Message(role="assistant", content="", use_knowledge=use_knowledge, use_search=use_search)
+        assistant = Message(role="assistant", content="", use_knowledge=use_knowledge, use_search=use_search,
+                            is_realtime=is_realtime)
         session.add_message(assistant)
         self._persist_session(session)
         result, finished = {}, False
@@ -1534,6 +1555,7 @@ class ChatService:
             search_results=result.get("search_results", []),
             use_knowledge=use_knowledge,
             use_search=use_search,
+            is_realtime=bool(result.get("is_realtime")),
             agent_process=agent_snapshot,
         )
         assistant_msg.agent_process["final_message_id"] = assistant_msg.message_id
@@ -1682,29 +1704,45 @@ class ChatService:
             return first_results, context_text, sources
 
     async def _post_turn_background(self, session, user_msg, assistant_msg, llm_provider):
-        """在当前请求总预算内完成摘要与记忆；普通错误降级，取消继续传播。"""
+        """在当前请求总预算内完成摘要与记忆；普通错误降级，取消继续传播。
+
+        每轮 query loop 完整结束后后台执行：Session Memory 摘要（事件触发含
+        本轮工具调用）→ extractMemories（整轮 transcript 扫描）→ AutoDream 调度。
+        """
         try:
             module_recall.flush_turn_modules(assistant_msg.message_id)
         except Exception as e:
             logger.warning("模块召回度量落库异常: %s", e)
+        # 本轮 transcript（extractMemories 扫描范围）与工具调用标记（摘要事件触发）
+        proc = getattr(assistant_msg, "agent_process", None) or {}
+        turn_tools = proc.get("tools") or []
+        turn_has_tools = bool(turn_tools)
+        turn_lines = [f"用户：{getattr(user_msg, 'content', '')}",
+                      f"助手：{getattr(assistant_msg, 'content', '')}"]
+        if turn_tools:
+            names = [t.get("tool_name") or t.get("name") or "tool"
+                     for t in turn_tools if isinstance(t, dict)]
+            turn_lines.append("工具调用：" + "、".join(names))
+        turn_transcript = "\n".join(turn_lines)
         try:
-            await session_summary.maybe_summarize(session, llm_provider)
+            await session_summary.maybe_summarize(session, llm_provider, turn_has_tools=turn_has_tools)
         except Exception as e:
             logger.warning("会话摘要任务异常: %s", e)
         try:
             # 记忆抽取窗口：近 3 条用户消息（含本轮），供跨轮纠正/覆盖判断；
-            # 单轮窗口看不到上下文时模型只能保守判空，是「抽取零产出」的成因之一。
+            # 整轮 transcript 一并传入，后台抽取代理扫描本轮全部对话内容。
             recent_user_messages = [
                 m.content for m in session.messages if getattr(m, "role", "") == "user"
             ][-3:]
             await memory_service.extract_from_turn(
                 session.user_id, session.session_id, user_msg.content, assistant_msg.content,
                 recent_user_messages=recent_user_messages,
+                turn_transcript=turn_transcript,
             )
         except Exception as e:
             logger.warning("用户记忆抽取任务异常: %s", e)
         try:
-            # 巩固调度（Auto Dream 简化版）：时间/会话双门控达标才做簇合并，失败静默
+            # AutoDream 调度：三重门控（24h/5 个新转录会话/.consolidate-lock）达标才整理，失败静默
             await memory_service.consolidate_if_due(session.user_id)
         except Exception as e:
             logger.warning("记忆巩固任务异常: %s", e)
