@@ -158,9 +158,12 @@ def get_my_memory_drill(
 
 # 压缩链事件中文展示名（与 session_summary 埋点 kind 同源）
 _COMPACT_KIND_LABELS = {
-    "micro": "微压缩·空闲衰减", "auto": "自动压缩", "manual": "手动压缩",
-    "window80": "Compaction·80% 硬触发",
-    "auto_fail": "自动压缩失败", "auto_blocked": "熔断拦截",
+    "offload": "L0·结果落盘", "dedup": "L0·去重引用",
+    "micro": "L1·微压缩", "micro_skip": "L1·微压缩放弃",
+    "session_memory": "L2·Session Memory", "auto_compact_hit": "L2·Auto 命中",
+    "auto_compact": "L2·Auto 摘要", "manual": "手动压缩",
+    "full": "L3·兜底压缩", "full_fallback": "L3·兜底降级",
+    "auto_fail": "Auto 压缩失败", "auto_blocked": "熔断拦截",
 }
 _MEMORY_ACTION_LABELS = {
     "add": "新增", "update": "更新", "delete": "删除", "merge": "簇合并", "forget": "超限遗忘",
@@ -174,7 +177,7 @@ def get_my_compact_drill(
     limit: int = Query(30, ge=1, le=100),
     user: dict = Depends(get_current_user),
 ):
-    """三级压缩链钻取：本人压缩事件流 + 会话摘要边界标记（类型/压缩前 token/熔断计数）。"""
+    """四层压缩链钻取：本人压缩事件流 + 会话摘要边界标记（类型/压缩前 token/熔断计数）。"""
     user_id = user.get("id")
     if user.get("role") not in ("user", "admin", "ops") or not user_id or user_id in ("guest", "system", "-"):
         raise HTTPException(status_code=403, detail="请使用正式账号查看压缩链明细")
@@ -188,7 +191,7 @@ def get_my_compact_drill(
         r["created_at"] = (r["created_at"] or "")[:16]
     summaries = db.query(
         "SELECT session_id, compact_kind, before_tokens, token_estimate, fail_streak,"
-        " covered_until_message_id, edited_by_user, updated_at"
+        " covered_until_message_id, boundary_message_id, edited_by_user, updated_at"
         " FROM chat_session_summaries WHERE user_id = ? ORDER BY updated_at DESC LIMIT ?",
         (user_id, limit))
     for r in summaries:
@@ -198,9 +201,14 @@ def get_my_compact_drill(
         "events": events,
         "summaries": summaries,
         "explanation": (
-            "三级压缩链：microCompact（空闲衰减，读时投影不落库）→ autoCompact（token 阈值触发的"
-            "九节结构化摘要，连续失败 3 次熔断）→ SessionMemoryCompact（SESSION.md 持久载体，"
-            "DB 缺失时文件恢复）。tokens_saved = 自动/手动压缩事件 Σ(before_tokens − after_tokens)。"
+            "四层压缩链（触发频率递减、代价递增，均作用于本会话 128K 窗口）："
+            "L0 日常约束（offload 超大工具结果落盘留 2KB 预览 + dedup 重复内容替换为引用）→ "
+            "L1 micro 微压缩（工具结果 ≥20K 进入，可释放 <10K 放弃记 micro_skip，占位符保留配对）→ "
+            "L2 系统压缩（session_memory 首次 10K 起增量记录；auto_compact ≥95K 触发，"
+            "summary.md 命中记 auto_compact_hit 零调用，未命中 fork 九段式摘要替换历史）→ "
+            "L3 full 兜底（Auto 连败 3 次 / ≥119,040 即窗口 93% / 上游超长被动触发）。"
+            "tokens_saved = Auto/Full/手动事件 Σ(before_tokens − after_tokens)；"
+            "micro_tokens_saved 与 daily_tokens_saved 分别统计 L1 释放量与 L0 节省量。"
         ),
     }
 
@@ -690,7 +698,7 @@ _DRILL_EXPLAIN = {
     "memories": "记忆条数 = 区间内抽取的跨会话用户记忆（user_memories）条数。",
     "memory_events": "记忆写路径事件 = 区间内静态/动态 Markdown 双写埋点（memory_write_events，排除抽取运行），按动作（新增/更新/删除/合并/遗忘/AutoDream 整理）与层（静态 User/Project/Local、个人叠加层、长期记忆、助手分域）聚合。",
     "memory_extract": "记忆抽取运行 = 区间内 action='extract' 的 extractMemories 运行事件（每轮 query loop 结束后后台扫描整轮 transcript，必落一条），明细含「显式N条/模型M条→新增a更新u删除d」与模型层无产出原因（empty 判空/llm_error 调用失败/llm_unavailable 角色未绑定/manual_mutex 主副互斥/parse_error 解析失败）；运行数 > 0 而写入数 = 0 即「跑了但零产出」。",
-    "compact_events": "上下文压缩链事件 = 区间内 Compaction 链埋点（context_compact_events）：micro 空闲衰减/auto 自动压缩/manual 手动压缩/window80 上下文达 80% 硬触发（summary.md 替换历史）/auto_fail 失败/auto_blocked 熔断拦截，含压缩前后 token。",
+    "compact_events": "上下文四层压缩链事件 = 区间内 context_compact_events 埋点（均作用于本会话 128K 窗口）：L0 offload 超大工具结果落盘（留 2KB 预览+路径）/dedup 重复内容替换为引用；L1 micro 微压缩（工具结果 ≥20K 进入、可释放 <10K 放弃记 micro_skip，占位符保留配对）；L2 session_memory 会话记忆增量记录（首次 10K）/auto_compact ≥95K 摘要替换历史（summary.md 命中记 auto_compact_hit 零调用）/manual 手动压缩；L3 full 兜底（Auto 连败 3 次 / ≥119040 即窗口 93% / 上游超长）与 full_fallback 零调用确定性兜底；auto_fail 压缩失败、auto_blocked 历史熔断拦截。含压缩前后 token：tokens_saved 只计 Auto/Full/手动，L0/L1 节省量另列 daily_tokens_saved / micro_tokens_saved。",
     "feedbacks": "点赞/点踩 = 区间内用户反馈（message_feedbacks）记录，rating 区分赞/踩。",
     "eval_runs": "回归评测运行 = 区间内发起的评测运行（eval_runs）次数，摘要含成功率与相关度均值。",
     "skill_reviews": "Skill 预审 = 区间内添加/修改技能时的安全与能力可行性评审记录，verdict=reject 计为高危拒绝。",

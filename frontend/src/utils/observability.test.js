@@ -1,13 +1,15 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { runInNewContext } from 'node:vm'
 import { parse, compileScript } from '@vue/compiler-sfc'
 import * as Vue from 'vue'
 import { renderToString } from '@vue/server-renderer'
 import MarkdownIt from 'markdown-it'
+import * as contextTokens from './contextTokens.js'
 
 const read = (path) => readFileSync(new URL(path, import.meta.url), 'utf8')
+const exists = (path) => existsSync(new URL(path, import.meta.url))
 const observation = read('../views/ObservabilityView.vue')
 const business = {
   days: 7, retention_days: 30,
@@ -56,6 +58,8 @@ async function observationHarness(canOps = false, fail = false) {
   const component = new Function('modules', `${code}\nreturn __component;`)({
     vue: { ...Vue, onMounted: (fn) => { mounted = fn }, onActivated: () => {} },
     '@/stores/auth': { useAuthStore: () => ({ canOps }) }, '@/api': api,
+    // 上下文 Token 展示口径：用真实纯函数模块（span Token / 压缩标记 / 128K 量纲）
+    '@/utils/contextTokens': contextTokens,
     // 查询缓存测试桩：直通 fetcher（不缓存），聚焦视图加载分支断言
     '@/stores/queryCache': { useQueryCacheStore: () => ({ versions: {}, cachedGet: (r, p, fetcher) => fetcher() }), TTL_MONITOR: 30000 },
     'vue-router': { useRoute: () => Vue.reactive({ query: {} }), useRouter: () => ({ push() {} }) },
@@ -275,9 +279,10 @@ test('登录页帮助入口共用不换行容器，样例在新标签打开', ()
   assert.match(descriptor.styles[0].content, /\.auth-help-links\s*\{[^}]*display: flex;[^}]*flex-wrap: nowrap;/)
 })
 
-test('两份静态样例一致，网关导航和可观测性角色切换脚本可执行', () => {
+test('静态样例可用（本地有根副本时校验两份一致），网关导航和可观测性角色切换脚本可执行', () => {
   const html = read('../../public/系统样例.html')
-  assert.equal(html, read('../../../系统样例.html'))
+  // 根目录 系统样例.html 仅本地保留、不入公开仓库；存在时才校验与 public 副本字节一致
+  if (exists('../../../系统样例.html')) assert.equal(html, read('../../../系统样例.html'))
   assert.match(html, /均为模拟数据/)
   assert.match(html, /id="demo-obs-technical" hidden/)
   const nodes = new Map()

@@ -1,43 +1,30 @@
 """
-见字如面 - 短期记忆（会话记忆）与上下文压缩链（参考 Claude Code 设计）
+见字如面 - 短期记忆（会话记忆）与上下文四层压缩（对齐 Claude Code，128K 会话窗口）
 
-短期记忆四模块（transcript/Session Memory/Task State/Compaction）中，本模块实现
-Session Memory（summary.md 摘要笔记）与 Compaction（摘要替换历史）；transcript.md
-只读流水账与 task_state.md 任务进度投影由 memory_store 落盘、chat 收尾接线。
+一个会话 = 一个上下文窗口（CHAT_CONTEXT_WINDOW，名义 128K=128000，K=1000）。
+四层压缩按「触发频率越来越低、代价越来越高」排列，只作用于本会话窗口：
 
-第一级 microCompact（读时投影，不落库）：
-- 位置无关三档冻结 clip——实时类助手答案（写时 is_realtime 打标）入历史即衰减到
-  CLIP_OLD_CHARS（下一轮即生效，不等空闲衰减）；最近 KEEP_RECENT_FULL 条内助手长回答
-  超 FULL_ZONE_MAX_CHARS 单条帽投影为头部摘录；其余较早消息固定 CLIP_MID_CHARS
-  截断（完整原文仍存会话记录）；渲染只依赖消息自身内容/标签，历史前缀 append-only
-  稳定，利于模型前缀缓存命中；
-- 空闲衰减变体（对齐 CC 时间衰减 Micro-Compact）：会话空闲超过 MICRO_COMPACT_IDLE_MINUTES
-  分钟后，旧消息（最近 MICRO_COMPACT_KEEP_FULL 条之外）进一步压到 CLIP_OLD_CHARS，
-  同样只改读时投影，原文不动。
+  L0 日常约束：Output Cap（每轮 4K）/ Tool-Result Offloading（落盘+2KB预览+路径）/
+     Deduplication（重复结果引用替换）——由 context_window 与 llm 层实现，零模型调用。
+  L1 微压缩 Micro Compaction：可重现工具结果合计 ≥20K 进入、可释放 <10K 放弃，
+     旧结果改占位符、配对不变——context_window.micro_compact，每次 API 调用前，零调用。
+  L2 系统压缩：
+     2a Session Memory（本模块 maybe_summarize 后台 forked agent → summary.md）：
+        首次水位 ≥10K；后续「增长 ≥5K 且 工具调用 ≥3 且 自然断点」三者同时满足；
+        只落盘落库，不提前替换历史。
+     2b Auto Compaction（本模块 auto_compact，≥95K=128K−20K−13K）：summary.md 命中
+        零调用直接替换；未命中 fork 压缩代理生成九段式摘要替换历史，保留 ≥10K 且最近 3 轮。
+  L3 兜底压缩 Full Compaction（本模块 full_compact）：Auto 连续失败 ≥3 / ≥93% 窗口 /
+     上游超长触发；全部工具结果落盘、仅留最近 1 轮，含零调用确定性兜底。
 
-第二级 Session Memory（maybe_summarize，后台 forked agent 结构化摘要 → summary.md）：
-- 首次触发：上下文 token 估算达到 CONTEXT_COMPACT_TRIGGER_TOKENS（默认 10K）立即创建；
-  条数/字符阈值兜底，过小会话豁免；
-- 后续更新触发（任一达标）：距上次摘要时点上下文增长 ≥ SESSION_MEMORY_GROWTH_TOKENS
-  （默认 5K）/ 本轮有工具调用（turn_has_tools）/ 对话暂停（空闲 ≥
-  SESSION_MEMORY_PAUSE_MINUTES）；事件触发绕过批更新门控，阈值路径保留批门控
-  （摘要前缀稳定）；
-- 全量历史送摘要器（总预算保护），九节 checklist（1-5 节沿用既有契约，
-  6-9 节对齐 CC：用户消息枚举/知识来源与附件/当前工作最细颗粒度/错误与纠正）；
-- 递归守卫（同会话并发压缩互斥）、熔断（连续失败 ≥ COMPACT_FAIL_STREAK_LIMIT
-  停自动压缩，force 手动可绕过）；边界标记 compact_kind/before_tokens 落库；
-- 手动压缩：force=True + focus 侧重点；自动模式再水化附「抑制追问」指令
-  （对齐 CC suppressFollowUpQuestions）。
+短期记忆五模块（transcript/Session Memory/Task State/Tool Results/Compaction）中，本模块实现
+Session Memory 与 Compaction；transcript.jsonl 只读黑匣子由 memory_store 追加式落盘、
+task_state 会话期内存对象在对话暂停时落盘。工具结果账本（原文落盘 tool-results/）/窗口状态/
+历史装配/微压缩由 context_window 承担。摘要持久载体 users/<uid>/sessions/<sid>/summary.md（frontmatter
+记覆盖点/边界/类型/编辑标记/水位）；DB 缺失时从文件恢复（文件优先）。
 
-第三级 Compaction（摘要替换历史，融合既有压缩链）：
-- 硬触发：上下文达到模型窗口 COMPACT_WINDOW_RATIO（默认 80%）以上时，强制刷新
-  摘要（compact_kind=window80，绕过批门控/熔断）并在装配时仅保留最近
-  KEEP_RECENT_MESSAGES 条 tail，其余历史由 summary.md 摘要替换；
-- 摘要持久载体 users/<uid>/sessions/<sid>/summary.md（frontmatter 记覆盖点/类型/
-  编辑标记/上下文水位）；DB 摘要缺失时从文件恢复（文件优先的持久记录语义）。
-
-再水化：注入「摘要 + continuation 指令」，已知信息不重复询问。
-失败时静默降级为原有的按条数截断策略，不阻断聊天主流程。
+再水化：注入「摘要 + continuation 指令 + Task State 要点 + 落盘回执路径」，已知信息不重复询问。
+失败时静默降级，不阻断聊天主流程。
 """
 import logging
 from datetime import datetime
@@ -47,126 +34,58 @@ from app.config import settings
 from app.core import db
 from app.core import observability as obs
 from app.services import memory_store
+from app.services import context_window as cw
 
 logger = logging.getLogger("jianziruyang.session_summary")
 
-# 兜底触发阈值：消息数量或历史总字符数任一超过即触发（token 阈值优先）。
-SUMMARY_TRIGGER_MESSAGE_COUNT = int(getattr(settings, "SUMMARY_TRIGGER_MESSAGE_COUNT", 12))
-SUMMARY_TRIGGER_CHAR_COUNT = int(getattr(settings, "SUMMARY_TRIGGER_CHAR_COUNT", 6000))
-# Session Memory 首次触发：上下文 token 估算达到该值（默认 10K）立即创建 summary.md
+# Session Memory 首次触发：会话水位第一次达到该值（默认 10K）创建 summary.md
 CONTEXT_COMPACT_TRIGGER_TOKENS = int(getattr(settings, "CONTEXT_COMPACT_TRIGGER_TOKENS", 10000))
-# Session Memory 后续更新触发：距上次摘要时点上下文增长 ≥ 该 token 数（默认 5K）
+# Session Memory 后续更新：距上次摘要水位增长 ≥ 该值（默认 5K，与工具数/自然断点同时满足）
 SESSION_MEMORY_GROWTH_TOKENS = int(getattr(settings, "SESSION_MEMORY_GROWTH_TOKENS", 5000))
-# Session Memory 对话暂停触发：空闲 ≥ 该分钟数视为暂停（后台更新摘要笔记）
+# Session Memory 后续更新：期间工具调用累计 ≥ 该次数
+SESSION_MEMORY_TOOL_CALLS = int(getattr(settings, "SESSION_MEMORY_TOOL_CALLS", 3))
+# Session Memory 摘要正文 token 上限（九段式）
+SESSION_MEMORY_MAX_TOKENS = int(getattr(settings, "SESSION_MEMORY_MAX_TOKENS", 2000))
+# 对话暂停落盘 task_state 的空闲阈值（摘要触发语义已退役，落盘行为保留）
 SESSION_MEMORY_PAUSE_MINUTES = float(getattr(settings, "SESSION_MEMORY_PAUSE_MINUTES", 10))
-# Compaction 硬触发比例：上下文占模型窗口 ≥ 80% 时用摘要替换历史
-COMPACT_WINDOW_RATIO = float(getattr(settings, "COMPACT_WINDOW_RATIO", 0.8))
-# 过小会话豁免：消息数低于该值不压缩（摘要收益不抵信息损耗）
-COMPACT_MIN_MESSAGES = 8
-# 压缩后仍保留最近 N 条消息不进摘要
-KEEP_RECENT_MESSAGES = 6
-# 摘要批更新门控：距上次摘要覆盖点新增「可摘要消息」（不含最近保留区）不足该值时
-# 不重算摘要（摘要前缀稳定，利于前缀缓存）
-SUMMARY_BATCH_MIN_MESSAGES = int(getattr(settings, "SUMMARY_BATCH_MIN_MESSAGES", 6))
-# 无摘要时的全量冻结窗口上限（固定容量：未达上限前历史前缀完全 append-only）
-FREEZE_MAX_MESSAGES = SUMMARY_TRIGGER_MESSAGE_COUNT * 2
-
-# ---- 第一级 microCompact 空闲衰减参数（对齐 CC 60 分钟时间衰减）----
-MICRO_COMPACT_IDLE_MINUTES = float(getattr(settings, "MICRO_COMPACT_IDLE_MINUTES", 60))
-MICRO_COMPACT_KEEP_FULL = 5
+# 熔断阈值：Auto 连续失败达到该值升级为 Full（force 手动不受限）
+COMPACT_FAIL_STREAK_LIMIT = int(getattr(settings, "COMPACT_FAIL_STREAK_LIMIT", 3))
+# 送摘要器的历史总预算（字符）：超预算保留最近部分（摘要器窗口保护）
+SUMMARY_TRANSCRIPT_MAX_CHARS = 60000
+# 单条消息送摘要器的字符上限
+SUMMARY_TRANSCRIPT_PER_MESSAGE = 4000
+# 实时类助手答案入历史即衰减的字符上限（位置无关规则，保留）
 CLIP_OLD_CHARS = int(getattr(settings, "CLIP_OLD_CHARS", 200))
-
-# ---- 第二级 autoCompact 治理参数 ----
-# 熔断阈值：连续失败达到该值后停止自动压缩（force 手动不受限），降级复用既有会话记忆
-COMPACT_FAIL_STREAK_LIMIT = 3
-# 送摘要器的全量历史总预算（字符）：超预算保留最近部分（摘要器窗口保护）
-SUMMARY_TRANSCRIPT_MAX_CHARS = 20000
-# 单条消息送摘要器的字符上限（全量历史口径，较旧版 400 字大幅放宽）
-SUMMARY_TRANSCRIPT_PER_MESSAGE = 2000
 # 递归守卫：同会话并发压缩互斥（对齐 CC querySource 守卫，防摘要器自触发）
 _compacting: set = set()
-# 熔断计数（无摘要行的会话用模块 dict 承载；有摘要行时镜像到 fail_streak 列）
-_fail_streak: dict = {}
-_FAIL_STREAK_MAX_SESSIONS = 500
-
-
-def _clip_history(messages: List[dict]) -> List[dict]:
-    """微压缩冻结 clip：实时衰减 + 全文区单条帽 + 较早消息 mid 截断。
-
-    位置无关设计（前缀缓存友好）：单条消息的渲染结果只取决于自身内容/写时标签
-    与「是否位于最近 keep_full 条」，不随窗口滑动/总条数变化而重排；历史消息一旦
-    渲染即冻结，仅最近 keep_full 条在退出全文区时发生一次性截断迁移。system 角色
-    消息（如摘要）与短消息不截断。完整原文仍存会话记录。
-
-    三档读时投影（均位置无关）：
-    - 实时衰减：is_realtime 打标的助手答案入历史即按 CLIP_OLD_CHARS 渲染
-      （实时答案下一轮即过期，不等 60 分钟空闲衰减）；
-    - 全文区帽：最近 keep_full 条内超 FULL_ZONE_MAX_CHARS 的助手长回答渲染为
-      头部摘录+原长尾注（用户消息不帽，保留完整意图）；
-    - 较早消息：固定 CLIP_MID_CHARS 截断并附原长尾注。
-    """
-    mid = int(getattr(settings, "CLIP_MID_CHARS", 400))
-    keep_full = int(getattr(settings, "KEEP_RECENT_FULL", 4))
-    cap = int(getattr(settings, "FULL_ZONE_MAX_CHARS", 1200))
-    if mid <= 0 or not messages:
-        return messages
-    n = len(messages)
-    result = []
-    for i, m in enumerate(messages):
-        content = m.get("content", "") or ""
-        role = m.get("role", "user")
-        if role == "system":
-            result.append(m)
-            continue
-        if m.get("is_realtime") and role == "assistant" and len(content) > CLIP_OLD_CHARS:
-            result.append({
-                "role": role,
-                "content": content[:CLIP_OLD_CHARS] + f"\n…（实时答案已衰减，原长 {len(content)} 字符）",
-            })
-            continue
-        if i >= n - keep_full:
-            if role == "assistant" and cap > 0 and len(content) > cap:
-                result.append({
-                    "role": role,
-                    "content": content[:cap] + f"\n…（长回答摘录，原长 {len(content)} 字符）",
-                })
-            else:
-                result.append(m)
-            continue
-        if len(content) <= mid:
-            result.append(m)
-            continue
-        result.append({
-            "role": role,
-            "content": content[:mid] + f"\n…（较早消息已截断，原长 {len(content)} 字符）",
-        })
-    return result
 
 
 def history_segment_text(messages: List[dict]) -> str:
-    """可观测 history 段口径：剔除再水化摘要等 system 消息，避免重复计量。
-
-    摘要正文已在 build_context_messages 内单独 note_segment("summary")；
-    history 段若再含摘要 system 消息会双计（钻取占比虚高）。
-    """
-    return "\n".join(m.get("content", "") for m in messages if m.get("role") != "system")
+    """可观测 history 段口径：剔除再水化摘要等 system 消息，避免重复计量。"""
+    return cw.history_segment_text(messages)
 
 
 def estimate_context_tokens(session) -> int:
-    """估算会话注入上下文的 token 占用：摘要段 + tail 历史（clip 前原文口径）。"""
+    """会话窗口水位：优先取最近一次主链路调用的真实 prompt_tokens（session_context_state），
+    缺失时按「摘要 + 全量历史原文 + 窗口内工具结果」估算（回合结束由真实 usage 校准）。"""
+    sid = getattr(session, "session_id", "")
+    state = cw.get_state(sid)
+    real = int(state.get("ctx_tokens") or 0)
+    if real > 0:
+        return real
     total = 0
-    summary = get_summary(session.session_id)
+    summary = get_summary(sid)
     if summary:
         total += obs.estimate_tokens(summary.get("summary") or "")
-    for m in session.messages[-KEEP_RECENT_MESSAGES * 2:]:
-        total += obs.estimate_tokens(m.content or "")
+    for m in getattr(session, "messages", []) or []:
+        total += obs.estimate_tokens(getattr(m, "content", "") or "")
+    total += cw.live_tool_result_tokens(sid, (summary or {}).get("boundary_message_id") or "")
     return total
 
 
 def compaction_window_threshold() -> int:
-    """Compaction 硬触发阈值：模型窗口 × COMPACT_WINDOW_RATIO（默认 80%）。"""
-    window = int(getattr(settings, "CHAT_CONTEXT_WINDOW", 131072))
-    return int(window * COMPACT_WINDOW_RATIO)
+    """Auto Compaction 触发阈值（窗口 − 摘要预留 − 输入缓冲，128K→95K）。"""
+    return cw.auto_compact_threshold()
 
 
 def _session_idle_minutes(session) -> float:
@@ -182,44 +101,16 @@ def _session_idle_minutes(session) -> float:
     return max(0.0, (datetime.now() - dt).total_seconds() / 60.0)
 
 
-def _micro_decay(messages: List[dict]) -> tuple:
-    """microCompact 空闲衰减：最近 MICRO_COMPACT_KEEP_FULL 条之外压到 CLIP_OLD_CHARS。
-
-    读时投影（不落库），system 消息与短消息不动。返回 (渲染结果, 被衰减条数)。
-    """
-    n = len(messages)
-    result, clipped = [], 0
-    for i, m in enumerate(messages):
-        content = m.get("content", "") or ""
-        if m.get("role") == "system" or i >= n - MICRO_COMPACT_KEEP_FULL or len(content) <= CLIP_OLD_CHARS:
-            result.append(m)
-            continue
-        result.append({
-            "role": m.get("role", "user"),
-            "content": content[:CLIP_OLD_CHARS] + f"\n…（空闲衰减压缩，原长 {len(content)} 字符）",
-        })
-        clipped += 1
-    return result, clipped
-
-
 def _get_fail_streak(session_id: str, existing: Optional[dict]) -> int:
-    if session_id in _fail_streak:
-        return _fail_streak[session_id]
-    return int((existing or {}).get("fail_streak") or 0)
+    return cw.get_fail_streak(session_id)
 
 
 def _note_compact_fail(session, existing: Optional[dict]):
-    """熔断计数 +1（无摘要行时仅记模块 dict，不创建空摘要行）。"""
+    """Auto 连续失败计数 +1（持久化到 session_context_state，进程重启不丢）。"""
     sid = session.session_id
-    n = _get_fail_streak(sid, existing) + 1
-    _fail_streak[sid] = n
-    if len(_fail_streak) > _FAIL_STREAK_MAX_SESSIONS:
-        for key in list(_fail_streak.keys())[:len(_fail_streak) - _FAIL_STREAK_MAX_SESSIONS]:
-            _fail_streak.pop(key, None)
+    n = cw.note_auto_fail(sid, getattr(session, "user_id", ""))
     if existing:
         db.execute("UPDATE chat_session_summaries SET fail_streak = ? WHERE session_id = ?", (n, sid))
-    memory_store.log_compact_event(sid, getattr(session, "user_id", ""), "auto_fail",
-                                   detail=f"连续失败 {n} 次")
 
 
 def get_summary(session_id: str) -> Optional[dict]:
@@ -237,11 +128,12 @@ def get_summary(session_id: str) -> Optional[dict]:
         "user_id": rec.get("user_id") or "",
         "summary": rec.get("summary") or "",
         "covered_until_message_id": rec.get("covered_until_message_id") or "",
+        "boundary_message_id": rec.get("boundary_message_id") or "",
         "token_estimate": obs.estimate_tokens(rec.get("summary") or ""),
         "edited_by_user": int(rec.get("edited_by_user") or 0),
         "created_at": rec.get("updated_at") or "",
         "updated_at": rec.get("updated_at") or "",
-        "compact_kind": rec.get("compact_kind") or "auto",
+        "compact_kind": rec.get("compact_kind") or "session_memory",
         "before_tokens": int(rec.get("before_tokens") or 0),
         "ctx_tokens_at_update": int(rec.get("ctx_tokens_at_update") or 0),
         "fail_streak": 0,
@@ -286,251 +178,496 @@ def update_session_note(session_id: str, user_id: str, text: str) -> Optional[di
     existing = get_summary(session_id)
     now = datetime.now().isoformat()
     covered = (existing or {}).get("covered_until_message_id") or ""
+    boundary = (existing or {}).get("boundary_message_id") or ""
     db.execute(
         "INSERT INTO chat_session_summaries"
-        " (session_id, user_id, summary, covered_until_message_id, token_estimate,"
-        " edited_by_user, created_at, updated_at)"
-        " VALUES (?,?,?,?,?,?,?,?)"
+        " (session_id, user_id, summary, covered_until_message_id, boundary_message_id,"
+        " token_estimate, edited_by_user, created_at, updated_at)"
+        " VALUES (?,?,?,?,?,?,?,?,?)"
         " ON CONFLICT(session_id) DO UPDATE SET"
         " summary=excluded.summary, token_estimate=excluded.token_estimate,"
         " edited_by_user=excluded.edited_by_user, updated_at=excluded.updated_at",
-        (session_id, user_id, note, covered, obs.estimate_tokens(note), 1, now, now),
+        (session_id, user_id, note, covered, boundary, obs.estimate_tokens(note), 1, now, now),
     )
     # Session Memory：用户编辑同步落 summary.md（edited_by_user=1，文件持久记录）
     memory_store.write_session_memory(session_id, user_id, note, {
-        "covered_until_message_id": covered, "compact_kind": "note",
-        "edited_by_user": 1, "updated_at": now, "before_tokens": 0,
+        "covered_until_message_id": covered, "boundary_message_id": boundary,
+        "compact_kind": "note", "edited_by_user": 1, "updated_at": now, "before_tokens": 0,
     })
     return {"session_id": session_id, "note": note, "edited_by_user": 1, "updated_at": now}
 
 
 def _save_summary(session_id: str, user_id: str, summary: str, covered_until_message_id: str,
-                  token_estimate: int, compact_kind: str = "auto", before_tokens: int = 0,
-                  ctx_tokens_at_update: int = 0):
+                  token_estimate: int, compact_kind: str = "session_memory", before_tokens: int = 0,
+                  ctx_tokens_at_update: int = 0, boundary_message_id: Optional[str] = None):
+    """写摘要行 + summary.md。
+
+    boundary_message_id=None 表示沿用既有压缩边界（Session Memory 只记不替换历史）；
+    显式传值（含空串）表示推进/清空边界（Auto/Full 才替换历史）。
+    """
     now = datetime.now().isoformat()
+    if boundary_message_id is None:
+        boundary_message_id = (get_summary(session_id) or {}).get("boundary_message_id") or ""
     db.execute(
         "INSERT INTO chat_session_summaries"
-        " (session_id, user_id, summary, covered_until_message_id, token_estimate,"
-        "  created_at, updated_at, compact_kind, before_tokens, fail_streak, ctx_tokens_at_update)"
-        " VALUES (?,?,?,?,?,?,?,?,?,0,?)"
+        " (session_id, user_id, summary, covered_until_message_id, boundary_message_id,"
+        "  token_estimate, created_at, updated_at, compact_kind, before_tokens, fail_streak,"
+        "  ctx_tokens_at_update)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,0,?)"
         " ON CONFLICT(session_id) DO UPDATE SET"
         " summary=excluded.summary, covered_until_message_id=excluded.covered_until_message_id,"
+        " boundary_message_id=excluded.boundary_message_id,"
         " token_estimate=excluded.token_estimate, updated_at=excluded.updated_at,"
         " compact_kind=excluded.compact_kind, before_tokens=excluded.before_tokens, fail_streak=0,"
         " ctx_tokens_at_update=excluded.ctx_tokens_at_update",
-        (session_id, user_id, summary, covered_until_message_id, token_estimate, now, now,
-         compact_kind, int(before_tokens), int(ctx_tokens_at_update)),
+        (session_id, user_id, summary, covered_until_message_id, boundary_message_id,
+         token_estimate, now, now, compact_kind, int(before_tokens), int(ctx_tokens_at_update)),
     )
-    # 压缩成功：清熔断计数（模块 dict + DB 列已在 upsert 中归零）
-    _fail_streak.pop(session_id, None)
+    # 压缩成功：清熔断计数（session_context_state 与 DB 列同步归零）
+    cw.reset_fail_streak(session_id)
+    cw.reset_tool_calls(session_id)
+    cw.set_last_compact(session_id, compact_kind)
     # Session Memory：摘要笔记同步落 summary.md（短期记忆持久载体，按用户隔离）
     memory_store.write_session_memory(session_id, user_id, summary, {
-        "covered_until_message_id": covered_until_message_id, "compact_kind": compact_kind,
+        "covered_until_message_id": covered_until_message_id,
+        "boundary_message_id": boundary_message_id, "compact_kind": compact_kind,
         "edited_by_user": 0, "updated_at": now, "before_tokens": int(before_tokens),
         "ctx_tokens_at_update": int(ctx_tokens_at_update),
     })
 
 
+# 九段式结构化摘要契约（1-5 节沿用既有契约，6-9 节对齐 CC compaction，防关键信息遗漏）
+NINE_SECTION_SPEC = (
+    "按九节输出，每节一行、以序号开头，无内容的小节写「无」，去除寒暄与重复内容：\n"
+    "1.用户意图与当前任务 2.已给出的关键结论/建议 3.用户约束与偏好（本会话提及） "
+    "4.未决问题 5.下一步\n"
+    "6.所有用户消息枚举（逐条列出用户的关键诉求，不得遗漏） "
+    "7.知识来源与附件状态（引用过的文档/链接/附件及处理状态） "
+    "8.当前工作（最细颗粒度：正在做什么、卡点、立即要做的动作） "
+    "9.错误与纠正（出现过的错误、用户纠正及修正结论）"
+)
+
+
+def _transcript_text(messages) -> str:
+    """送摘要器的历史文本：单条/总量双预算保护摘要器窗口（不做粗截断丢信息）。"""
+    transcript = "\n".join(
+        f"{'用户' if getattr(m, 'role', '') == 'user' else '助手'}: "
+        f"{(getattr(m, 'content', '') or '')[:SUMMARY_TRANSCRIPT_PER_MESSAGE]}"
+        for m in messages
+    )
+    if len(transcript) > SUMMARY_TRANSCRIPT_MAX_CHARS:
+        transcript = "…（较早历史超出摘要器预算，已省略）\n" + transcript[-SUMMARY_TRANSCRIPT_MAX_CHARS:]
+    return transcript
+
+
+async def _fork_summary_agent(prompt: str, max_tokens: int) -> str:
+    """fork 压缩代理：走网关 memory_agent 业务路由，输出上限按摘要预留显式指定。
+
+    压缩自身的模型调用落 LLM span（name=compact_summary），失败不计入主 trace 失败
+    （压缩失败按现有上下文继续，属可降级路径）。
+    """
+    import time
+
+    from app.core.llm import LLMFactory
+
+    llm = LLMFactory.create_for_role("memory_agent")
+    t0 = time.monotonic()
+    collected = ""
+    try:
+        async for chunk in llm.chat([{"role": "user", "content": prompt}], stream=False,
+                                    max_tokens=max_tokens):
+            collected += chunk
+    except Exception as e:
+        obs.record_llm("compact_summary", prompt, collected, t0=t0,
+                       status="error", error=str(e), fail_trace=False)
+        raise
+    obs.record_llm("compact_summary", prompt, collected, t0=t0, fail_trace=False)
+    return collected.strip()
+
+
+def _summary_prompt(transcript: str, prior_summary: str = "", focus: str = "",
+                    max_tokens: int = 0, keep_note: bool = False) -> str:
+    limit = max_tokens or SESSION_MEMORY_MAX_TOKENS
+    return (
+        f"请将以下对话历史压缩为结构化摘要（{limit} Token 以内），{NINE_SECTION_SPEC}\n\n"
+        + (f"【压缩侧重点】{focus.strip()}\n\n" if focus and focus.strip() else "")
+        + ("【用户编辑过的笔记】以下内容为用户手工确认，必须原样保留其要点，不得丢弃：\n"
+           f"{prior_summary}\n\n" if keep_note and prior_summary else
+           (f"【已有摘要】\n{prior_summary}\n\n" if prior_summary else ""))
+        + f"【新增对话】\n{transcript}"
+    )
+
+
+def _covered_index(messages, covered_id: str) -> int:
+    for i, m in enumerate(messages):
+        if getattr(m, "message_id", "") == covered_id:
+            return i
+    return -1
+
+
 async def maybe_summarize(session, llm_provider: str = None, force: bool = False, focus: str = "",
-                          turn_has_tools: bool = False) -> Optional[dict]:
-    """Session Memory：检查会话是否需要生成/更新摘要笔记（后台 forked agent），落 summary.md。
+                          turn_has_tools: bool = False, natural_break: bool = True) -> Optional[dict]:
+    """L2a Session Memory：后台 forked agent 生成/更新 summary.md，**不替换上下文历史**。
 
     触发口径（对齐 Claude Code）：
-    - 首次：上下文 ≥ CONTEXT_COMPACT_TRIGGER_TOKENS（默认 10K）立即创建；条数/字符兜底；
-    - 后续：增长 ≥ SESSION_MEMORY_GROWTH_TOKENS（5K）/ 本轮有工具调用 / 对话暂停
-      （空闲 ≥ SESSION_MEMORY_PAUSE_MINUTES）任一达标即更新（事件触发绕过批门控）；
-    - Compaction 硬触发：上下文 ≥ 窗口 80% 时强制刷新（compact_kind=window80）。
-    force=True 时无视阈值强制触发（手动 compact），focus 作为压缩侧重点拼入 prompt；
-    返回压缩统计 {covered_messages, before_chars, after_chars, compact_kind}，未触发/失败返回 None。
-    治理：递归守卫（同会话互斥）、熔断（连续失败停自动）、边界标记（compact_kind/before_tokens）。
+    - 首次：会话水位第一次 ≥ CONTEXT_COMPACT_TRIGGER_TOKENS（10K）；
+    - 后续：距上次摘要水位增长 ≥5K **且** 期间工具调用累计 ≥3 次 **且** 处于自然断点
+      （本轮正常结束：非中断、非错误、无待处理 HITL），三者同时满足才更新。
+    force=True 为手动压缩（/compact），走 Auto Compaction 同一流程（事件 manual）。
+    退役：条数/字符兜底、过小会话豁免、批门控、暂停触发、「本轮有工具即触发」
+    （turn_has_tools 参数保留兼容，不再参与触发判定）。
+    返回统计 {covered_messages, before_chars, after_chars, compact_kind}，未触发/失败返回 None。
     """
-    messages = session.messages
+    # 对话暂停（空闲 ≥ SESSION_MEMORY_PAUSE_MINUTES）视为会话过程结束：
+    # 把在途 Task State 内存对象落盘 task_state.md（恢复对话后重新建立内存对象）
+    if not force and _session_idle_minutes(session) >= SESSION_MEMORY_PAUSE_MINUTES:
+        memory_store.flush_task_state(session.session_id, getattr(session, "user_id", ""))
+    if force:
+        return await auto_compact(session, focus=focus, manual=True)
+
+    messages = getattr(session, "messages", []) or []
     existing = get_summary(session.session_id)
-    hard = False          # Compaction 80% 硬触发
-    event_trigger = False  # 增长/工具调用/暂停事件触发（绕过批门控）
-    if not force:
-        # 过小会话豁免（借鉴 Claude Code：压缩收益不抵信息损耗）
-        if len(messages) < COMPACT_MIN_MESSAGES:
+    ctx_now = estimate_context_tokens(session)
+    if existing is None:
+        if ctx_now < CONTEXT_COMPACT_TRIGGER_TOKENS:
             return None
-        before_tokens = estimate_context_tokens(session)
-        hard = before_tokens >= compaction_window_threshold()
-        if existing is None:
-            # 首次触发：10K 立即创建；token 未超时条数/字符阈值兜底（保留既有语义）
-            if before_tokens <= CONTEXT_COMPACT_TRIGGER_TOKENS and not hard:
-                total_chars = sum(len(m.content) for m in messages)
-                if len(messages) <= SUMMARY_TRIGGER_MESSAGE_COUNT and total_chars <= SUMMARY_TRIGGER_CHAR_COUNT:
-                    return None
-        else:
-            # 后续更新：增长 5K / 工具调用 / 对话暂停（任一达标），阈值路径保留兜底
-            growth = before_tokens - int(existing.get("ctx_tokens_at_update") or 0)
-            idle = _session_idle_minutes(session)
-            event_trigger = (growth >= SESSION_MEMORY_GROWTH_TOKENS
-                             or turn_has_tools
-                             or idle >= SESSION_MEMORY_PAUSE_MINUTES)
-            if not (event_trigger or hard or before_tokens > CONTEXT_COMPACT_TRIGGER_TOKENS):
-                return None
+    else:
+        growth = ctx_now - int(existing.get("ctx_tokens_at_update") or 0)
+        tool_calls = int(cw.get_state(session.session_id).get("tool_calls_since_summary") or 0)
+        if not (growth >= SESSION_MEMORY_GROWTH_TOKENS
+                and tool_calls >= SESSION_MEMORY_TOOL_CALLS and natural_break):
+            return None
+        # 用户编辑过的笔记不被后台覆盖（edited_by_user=1）
+        if int(existing.get("edited_by_user") or 0):
+            return None
 
     # 递归守卫（对齐 CC querySource）：同会话已有压缩在途时直接跳过，防并发重入
     if session.session_id in _compacting:
         return None
-    # L3 用户笔记优先：用户编辑过的摘要不被「自动」压缩覆盖（edited_by_user=1）。
-    # 手动 compact（force=True）是用户显式动作，仍允许重新生成；再水化复用已落库摘要。
-    if not force and existing and int(existing.get("edited_by_user") or 0):
-        return None
-    # 熔断（对齐 CC 连续失败 3 次停自动压缩）：降级复用既有会话记忆；
-    # force 手动与 window80 硬触发（窗口约束优先）可绕过
-    if not force and not hard and _get_fail_streak(session.session_id, existing) >= COMPACT_FAIL_STREAK_LIMIT:
-        memory_store.log_compact_event(session.session_id, getattr(session, "user_id", ""),
-                                       "auto_blocked", detail="熔断：复用既有会话记忆")
-        logger.info("会话 %s 自动压缩熔断中（连续失败 ≥%d），复用既有会话记忆",
-                    session.session_id, COMPACT_FAIL_STREAK_LIMIT)
-        return None
-    # 批更新门控：已有摘要且新增「可摘要消息」（总条数 - 最近保留区 - 已覆盖数）不足 N 条
-    # 时不重算（摘要前缀稳定，利于前缀缓存）；force/硬触发/事件触发（增长/工具/暂停）绕过。
-    if not force and not hard and not event_trigger and existing:
-        covered_id = existing.get("covered_until_message_id")
-        covered_idx = next(
-            (i for i, m in enumerate(messages) if m.message_id == covered_id), -1)
-        if covered_idx >= 0:
-            new_coverable = len(messages) - KEEP_RECENT_MESSAGES - (covered_idx + 1)
-            if new_coverable < SUMMARY_BATCH_MIN_MESSAGES:
-                return None
-    to_summarize = messages[:-KEEP_RECENT_MESSAGES] if len(messages) > KEEP_RECENT_MESSAGES else []
+    covered_idx = _covered_index(messages, (existing or {}).get("covered_until_message_id") or "")
+    to_summarize = messages[covered_idx + 1:] if covered_idx >= 0 else messages
     if not to_summarize:
         return None
-    before_chars = sum(len(m.content) for m in to_summarize)
+    before_chars = sum(len(getattr(m, "content", "") or "") for m in to_summarize)
 
     _compacting.add(session.session_id)
     try:
-        from app.core.llm import LLMFactory
-
-        # 会话摘要为后台辅助生成，走网关默认规则（role 仅用于日志显性化）
-        llm = LLMFactory.create_for_role("session_summary")
-        # 全量历史送摘要器（对齐 CC：不再 400 字粗截断），单条/总量双预算保护摘要器窗口
-        transcript = "\n".join(
-            f"{'用户' if m.role == 'user' else '助手'}: {m.content[:SUMMARY_TRANSCRIPT_PER_MESSAGE]}"
-            for m in to_summarize
-        )
-        if len(transcript) > SUMMARY_TRANSCRIPT_MAX_CHARS:
-            transcript = "…（较早历史超出摘要器预算，已省略）\n" + transcript[-SUMMARY_TRANSCRIPT_MAX_CHARS:]
-        prior_summary = existing["summary"] if existing else ""
-        max_chars = int(getattr(settings, "SUMMARY_MAX_CHARS", 400))
-        # 结构化摘要契约（九节 checklist：1-5 节沿用既有契约，6-9 节对齐 CC compaction，防关键信息遗漏）
-        prompt = (
-            f"请将以下对话历史压缩为结构化摘要（{max_chars}字以内），按九节输出，每节一行、以序号开头，"
-            "无内容的小节写「无」，去除寒暄与重复内容：\n"
-            "1.用户意图与当前任务 2.已给出的关键结论/建议 3.用户约束与偏好（本会话提及） "
-            "4.未决问题 5.下一步\n"
-            "6.所有用户消息枚举（逐条列出用户的关键诉求，不得遗漏） "
-            "7.知识来源与附件状态（引用过的文档/链接/附件及处理状态） "
-            "8.当前工作（最细颗粒度：正在做什么、卡点、立即要做的动作） "
-            "9.错误与纠正（出现过的错误、用户纠正及修正结论）\n\n"
-            + (f"【压缩侧重点】{focus.strip()}\n\n" if focus and focus.strip() else "")
-            + (f"【已有摘要】\n{prior_summary}\n\n" if prior_summary else "")
-            + f"【新增对话】\n{transcript}"
-        )
-        collected = ""
-        async for chunk in llm.chat([{"role": "user", "content": prompt}], stream=False):
-            collected += chunk
-        summary = collected.strip()
+        prompt = _summary_prompt(
+            _transcript_text(to_summarize),
+            prior_summary=(existing or {}).get("summary") or "", focus=focus,
+            max_tokens=SESSION_MEMORY_MAX_TOKENS)
+        summary = await _fork_summary_agent(prompt, SESSION_MEMORY_MAX_TOKENS)
         if not summary:
             _note_compact_fail(session, existing)
             return None
-        before_tokens_est = obs.estimate_tokens("\n".join(m.content for m in to_summarize))
-        compact_kind = "manual" if force else ("window80" if hard else "auto")
-        # 上下文水位：记录本次摘要时点的上下文 token 估算，供后续「增长 5K」触发比对
-        ctx_now = estimate_context_tokens(session)
+        before_tokens_est = obs.estimate_tokens("\n".join(
+            getattr(m, "content", "") or "" for m in to_summarize))
+        # Session Memory 只记不替换：boundary_message_id=None 沿用既有压缩边界
         _save_summary(
             session.session_id, session.user_id, summary,
             to_summarize[-1].message_id, obs.estimate_tokens(summary),
-            compact_kind=compact_kind, before_tokens=before_tokens_est,
+            compact_kind="session_memory", before_tokens=before_tokens_est,
             ctx_tokens_at_update=ctx_now,
         )
-        # 压缩链观测事件：边界标记（类型/压缩前后 token）供可观测性钻取
-        memory_store.log_compact_event(session.session_id, session.user_id, compact_kind,
+        memory_store.log_compact_event(session.session_id, session.user_id, "session_memory",
                                        before_tokens=before_tokens_est,
                                        after_tokens=obs.estimate_tokens(summary),
                                        detail=f"覆盖 {len(to_summarize)} 条")
-        # L5：摘要覆盖点推进（compact）后重置本会话记忆去重集合，允许压缩后合理重注入
-        # （对齐 Claude Code collectSurfacedMemories「compact 后自然重置」语义）。
-        try:
-            from app.services.memory import memory_service
-            memory_service.reset_surfaced(session.session_id)
-        except Exception:
-            pass
+        _reset_surfaced(session.session_id)
         stats = {
             "covered_messages": len(to_summarize),
             "before_chars": before_chars,
             "after_chars": len(summary),
-            "compact_kind": compact_kind,
+            "compact_kind": "session_memory",
         }
-        logger.info(
-            "会话 %s 摘要已更新%s：覆盖 %d 条历史消息，%d 字 → %d 字（token 估算 %d → %d）",
-            session.session_id, "（手动压缩）" if force else "", len(to_summarize),
-            before_chars, len(summary), before_tokens_est, obs.estimate_tokens(summary),
-        )
+        logger.info("会话 %s Session Memory 已更新：覆盖 %d 条，%d 字 → %d 字（水位 %d）",
+                    session.session_id, len(to_summarize), before_chars, len(summary), ctx_now)
         return stats
     except Exception as e:
-        logger.warning("会话摘要生成失败（降级为按条数截断，忽略）: %s", e)
+        logger.warning("Session Memory 生成失败（降级为不压缩，忽略）: %s", e)
         _note_compact_fail(session, existing)
         return None
     finally:
         _compacting.discard(session.session_id)
 
 
-def build_context_messages(session, max_recent: int) -> List[dict]:
-    """构建带摘要压缩的历史消息：若有摘要，前置「摘要 + continuation 指令」system 消息
-    + 摘要覆盖点之后的 tail；否则取全量冻结窗口（固定容量，未达上限前 append-only）。
+def _reset_surfaced(session_id: str):
+    """摘要覆盖点推进后重置本会话记忆去重集合（对齐 CC compact 后自然重置语义）。"""
+    try:
+        from app.services.memory import memory_service
+        memory_service.reset_surfaced(session_id)
+    except Exception:
+        pass
 
-    无论是否有摘要，较早消息均施加两档冻结 clip（_clip_history）：渲染位置无关，
-    历史前缀稳定，利于模型前缀缓存命中，同时控制历史窗口 Token。
-    microCompact 空闲衰减：会话空闲超阈值时旧消息进一步压缩（读时投影，不落库）。
+
+def build_context_messages(session, max_recent: int = 0) -> List[dict]:
+    """构建会话历史区（CC 式连续窗口）：原文保留 + 工具配对入账 + 压缩边界。
+
+    - 未压缩：全量历史原文（追加式，不做条数窗口/字符 clip），max_recent 参数保留兼容但不再裁剪；
+    - 已压缩（boundary_message_id 非空）：前置「摘要 + continuation 指令 + Task State 要点
+      + 最近落盘回执」system 消息，其后为边界之后的原文；
+    - 每轮工具交互以配对消息进入历史（助手 [工具调用 #id] + 用户 [工具结果 #id]），
+      渲染形态由账本 state/storage 决定（正文 / 预览+路径 / 引用 / 占位符）。
+    无压缩事件时上一轮历史区是下一轮的严格前缀（前缀缓存不变量）。
     """
     summary = get_summary(session.session_id)
-    if not summary or not (summary.get("summary") or "").strip():
-        msgs = session.messages
-        window = msgs if len(msgs) <= FREEZE_MAX_MESSAGES else msgs[-FREEZE_MAX_MESSAGES:]
-        result = _clip_history([
-            {"role": m.role, "content": m.content, "is_realtime": getattr(m, "is_realtime", False)}
-            for m in window
-        ])
-    else:
-        recent = session.messages[-max_recent * 2:]
+    history = cw.build_history_messages(session, summary)
+    if not summary or not (summary.get("summary") or "").strip() \
+            or not (summary.get("boundary_message_id") or ""):
+        # Session Memory 只记不替换：有摘要但无压缩边界时仍走全量原文
+        return history
 
-        covered_id = summary.get("covered_until_message_id")
-        covered_idx = -1
-        for i, m in enumerate(session.messages):
-            if m.message_id == covered_id:
-                covered_idx = i
-                break
-        tail = session.messages[covered_idx + 1:] if covered_idx >= 0 else recent
+    # 再水化（借鉴 Claude Code）：摘要 + continuation 指令，避免重复询问已知信息；
+    # 自动压缩附「抑制追问」指令（对齐 CC suppressFollowUpQuestions），手动压缩不附加。
+    summary_text = (
+        f"【此前对话摘要】\n{summary['summary']}\n"
+        "请基于摘要与最近消息继续对话，已知信息不要重复询问。"
+    )
+    if (summary.get("compact_kind") or "") in ("auto_compact", "auto_compact_hit", "full", "full_fallback"):
+        summary_text += "\n（自动压缩后请直接推进当前任务，避免不必要的追问确认。）"
+    # Task State 要点：压缩后保留任务进度，避免重复推进已完成步骤
+    try:
+        state = memory_store.get_task_state(session.session_id) or {}
+        bits = [f"目标：{state.get('goal')}"] if state.get("goal") else []
+        if state.get("status"):
+            bits.append(f"状态：{state['status']}")
+        if state.get("steps"):
+            bits.append("步骤：" + "；".join(str(s)[:60] for s in state["steps"][:5]))
+        if bits:
+            summary_text += "\n【任务进度】" + " | ".join(bits)
+    except Exception:
+        pass
+    # 落盘回执：压缩后提示模型可回读被清除/落盘的工具结果原文
+    receipts = cw.recent_offload_receipts(session.session_id, 5)
+    if receipts:
+        summary_text += "\n【可回读的工具结果】\n" + "\n".join(receipts)
+    obs.note_segment("summary", summary_text)
+    return [{"role": "system", "content": summary_text}] + history
 
-        # Compaction 硬触发（上下文 ≥ 窗口 80%）：仅保留最近 KEEP_RECENT_MESSAGES 条，
-        # 其余历史由 summary.md 摘要替换（transcript.md 原始流水账不受影响）。
-        if estimate_context_tokens(session) >= compaction_window_threshold() and len(tail) > KEEP_RECENT_MESSAGES:
-            tail = tail[-KEEP_RECENT_MESSAGES:]
 
-        # 再水化（借鉴 Claude Code）：摘要 + continuation 指令，避免重复询问已知信息；
-        # 自动压缩附「抑制追问」指令（对齐 CC suppressFollowUpQuestions），手动压缩不附加。
-        summary_text = (
-            f"【此前对话摘要】\n{summary['summary']}\n"
-            "请基于摘要与最近消息继续对话，已知信息不要重复询问。"
-        )
-        if (summary.get("compact_kind") or "auto") == "auto":
-            summary_text += "\n（自动压缩后请直接推进当前任务，避免不必要的追问确认。）"
-        obs.note_segment("summary", summary_text)
-        result = [{"role": "system", "content": summary_text}]
-        result.extend(_clip_history([
-            {"role": m.role, "content": m.content, "is_realtime": getattr(m, "is_realtime", False)}
-            for m in tail
-        ]))
+# ---------------------------------------------------------------------------
+# L2b Auto Compaction（≥95K）：summary.md 命中零调用，未命中 fork 压缩代理
+# ---------------------------------------------------------------------------
 
-    # microCompact 空闲衰减（第一级时间衰减变体）：仅读时投影，完整原文仍存会话记录
-    idle = _session_idle_minutes(session)
-    if idle >= MICRO_COMPACT_IDLE_MINUTES:
-        result, clipped = _micro_decay(result)
-        if clipped:
-            memory_store.log_compact_event(
-                session.session_id, getattr(session, "user_id", ""), "micro",
-                detail=f"空闲 {int(idle)} 分钟，衰减 {clipped} 条旧消息")
-    return result
+def _messages_tokens(messages) -> int:
+    return sum(obs.estimate_tokens(getattr(m, "content", "") or "") for m in messages)
+
+
+async def auto_compact(session, focus: str = "", manual: bool = False) -> Optional[dict]:
+    """Auto Compaction：水位 ≥95K（窗口−摘要预留20K−输入缓冲13K）时替换历史。
+
+    - 命中（零调用）：summary.md 非空且覆盖点之后的全部消息可放进保留区上限 → 边界设到覆盖点；
+    - 未命中：fork 压缩代理（memory_agent，输出上限=摘要预留）生成九段式摘要，
+      丢弃覆盖点到保留区起点之间的历史，保留 ≥10K 且最近 3 轮（上限 40K，3 轮优先）。
+    失败：auto_fail_streak+1（事件 auto_fail），连续 ≥3 次升级 Full Compaction。
+    manual=True 为手动 /compact：无视阈值与熔断，事件 manual。
+    """
+    sid = getattr(session, "session_id", "")
+    uid = getattr(session, "user_id", "") or ""
+    messages = getattr(session, "messages", []) or []
+    if not sid or not messages:
+        return None
+    if sid in _compacting:
+        return None
+    existing = get_summary(sid)
+    ctx_now = estimate_context_tokens(session)
+    if not manual:
+        if ctx_now < cw.auto_compact_threshold():
+            return None
+        # 熔断由「停止自动压缩」改为「升级兜底压缩」
+        if cw.get_fail_streak(sid) >= COMPACT_FAIL_STREAK_LIMIT:
+            return await full_compact(session, reason="auto_fail_streak")
+
+    boundary, keep_start = cw.compute_keep_boundary(session, existing)
+    keep_max = int(getattr(settings, "AUTO_COMPACT_KEEP_MAX_TOKENS", 40000))
+    covered_id = (existing or {}).get("covered_until_message_id") or ""
+    covered_idx = _covered_index(messages, covered_id)
+    prior_summary = (existing or {}).get("summary") or ""
+    edited = int((existing or {}).get("edited_by_user") or 0)
+    reserve = int(getattr(settings, "COMPACT_SUMMARY_RESERVE_TOKENS", 20000))
+
+    _compacting.add(sid)
+    try:
+        after_covered = messages[covered_idx + 1:] if covered_idx >= 0 else messages
+        hit = bool(prior_summary.strip()) and _messages_tokens(after_covered) <= keep_max
+        if hit:
+            # 命中：零模型调用，直接用摘要替换覆盖点之前的历史
+            new_boundary, new_covered = covered_id, covered_id
+            summary, kind = prior_summary, ("manual" if manual else "auto_compact_hit")
+            dropped = messages[:covered_idx + 1] if covered_idx >= 0 else []
+        else:
+            to_summarize = messages[covered_idx + 1:keep_start] if covered_idx >= 0 else messages[:keep_start]
+            if not to_summarize:
+                return None
+            prompt = _summary_prompt(
+                _transcript_text(to_summarize), prior_summary=prior_summary, focus=focus,
+                max_tokens=reserve, keep_note=bool(edited))
+            summary = await _fork_summary_agent(prompt, reserve)
+            if not summary:
+                _note_compact_fail(session, existing)
+                return None
+            new_boundary = boundary
+            new_covered = getattr(messages[keep_start - 1], "message_id", "") if keep_start > 0 else ""
+            kind = "manual" if manual else "auto_compact"
+            dropped = to_summarize
+        before_tokens = _messages_tokens(dropped)
+        after_tokens = obs.estimate_tokens(summary)
+        _save_summary(sid, uid, summary, new_covered, after_tokens,
+                      compact_kind=kind, before_tokens=before_tokens,
+                      ctx_tokens_at_update=ctx_now, boundary_message_id=new_boundary)
+        memory_store.log_compact_event(sid, uid, kind, before_tokens=before_tokens,
+                                       after_tokens=after_tokens,
+                                       detail=f"丢弃 {len(dropped)} 条，边界 {new_boundary[:8]}")
+        _reset_surfaced(sid)
+        obs.record_context_action(
+            "auto_compact", before_tokens, after_tokens,
+            detail=f"{kind}：丢弃 {len(dropped)} 条，边界 {new_boundary[:8]}",
+            meta={"hit": bool(hit), "manual": bool(manual), "compact_kind": kind,
+                  "dropped_messages": len(dropped), "boundary_message_id": new_boundary})
+        logger.info("会话 %s Auto Compaction(%s)：水位 %d，丢弃 %d 条（%d→%d tok）",
+                    sid, kind, ctx_now, len(dropped), before_tokens, after_tokens)
+        return {
+            "covered_messages": len(dropped),
+            "before_chars": sum(len(getattr(m, "content", "") or "") for m in dropped),
+            "after_chars": len(summary),
+            "compact_kind": kind,
+            "before_tokens": before_tokens,
+            "after_tokens": after_tokens,
+            "boundary_message_id": new_boundary,
+        }
+    except Exception as e:
+        logger.warning("Auto Compaction 失败（本次按现有上下文继续）: %s", e)
+        _note_compact_fail(session, existing)
+        return None
+    finally:
+        _compacting.discard(sid)
+
+
+# ---------------------------------------------------------------------------
+# L3 兜底压缩 Full Compaction：比 Auto 更彻底，保证有结果
+# ---------------------------------------------------------------------------
+
+def _deterministic_summary(session, existing: Optional[dict]) -> str:
+    """零调用确定性兜底：既有摘要 + 用户消息逐条枚举 + Task State + 来源/附件清单。"""
+    lines = []
+    prior = (existing or {}).get("summary") or ""
+    if prior.strip():
+        lines.append("【既有摘要】\n" + prior.strip())
+    users = [getattr(m, "content", "") or "" for m in getattr(session, "messages", []) or []
+             if getattr(m, "role", "") == "user"]
+    if users:
+        lines.append("6.所有用户消息枚举：\n" + "\n".join(
+            f"- {u[:200]}" for u in users[-30:]))
+    try:
+        state = memory_store.get_task_state(session.session_id) or {}
+        if state:
+            lines.append("8.当前工作：" + memory_store.render_task_state(state)[:600])
+    except Exception:
+        pass
+    receipts = cw.recent_offload_receipts(session.session_id, 10)
+    if receipts:
+        lines.append("7.知识来源与附件状态（可回读）：\n" + "\n".join(receipts))
+    return "\n\n".join(lines)[:SESSION_MEMORY_MAX_TOKENS * 4]
+
+
+async def full_compact(session, reason: str = "") -> Optional[dict]:
+    """Full Compaction：Auto 连续失败 ≥3 / 水位 ≥93% 窗口 / 上游上下文超长时兜底。
+
+    1. 窗口内全部工具结果转落盘回执（不可重现也落盘，不丢信息）；
+    2. 原文只保留最近 1 轮（取消 10K 下限）；
+    3. 摘要按 transcript 分块重新生成（分块→合并）；模型再失败走零调用确定性兜底；
+    4. 成功后 auto_fail_streak 归零，事件 full / full_fallback。
+    """
+    sid = getattr(session, "session_id", "")
+    uid = getattr(session, "user_id", "") or ""
+    messages = getattr(session, "messages", []) or []
+    if not sid or not messages:
+        return None
+    if sid in _compacting:
+        return None
+    existing = get_summary(sid)
+    ctx_now = estimate_context_tokens(session)
+    reserve = int(getattr(settings, "COMPACT_SUMMARY_RESERVE_TOKENS", 20000))
+    _compacting.add(sid)
+    try:
+        cw.clear_all_tool_results(sid, uid)
+        starts = [i for i, m in enumerate(messages) if getattr(m, "role", "") == "user"]
+        keep_start = starts[-1] if starts else max(0, len(messages) - 1)
+        to_summarize = messages[:keep_start]
+        boundary = getattr(messages[keep_start - 1], "message_id", "") if keep_start > 0 else ""
+        summary, kind = "", "full"
+        if to_summarize:
+            try:
+                summary = await _chunked_summary(to_summarize, existing, reserve)
+            except Exception as e:
+                logger.warning("Full Compaction 摘要生成失败，走确定性兜底: %s", e)
+                summary = ""
+        if not summary:
+            summary = _deterministic_summary(session, existing)
+            kind = "full_fallback"
+        before_tokens = _messages_tokens(to_summarize)
+        after_tokens = obs.estimate_tokens(summary)
+        covered = getattr(messages[keep_start - 1], "message_id", "") if keep_start > 0 else ""
+        _save_summary(sid, uid, summary, covered, after_tokens, compact_kind=kind,
+                      before_tokens=before_tokens, ctx_tokens_at_update=ctx_now,
+                      boundary_message_id=boundary)
+        memory_store.log_compact_event(sid, uid, kind, before_tokens=before_tokens,
+                                       after_tokens=after_tokens,
+                                       detail=f"{reason or '兜底'}；仅留最近 1 轮")
+        _reset_surfaced(sid)
+        obs.record_context_action(
+            "full_compact", before_tokens, after_tokens,
+            detail=f"{kind}：{reason or '兜底'}，仅留最近 1 轮",
+            meta={"reason": reason, "compact_kind": kind,
+                  "dropped_messages": len(to_summarize), "boundary_message_id": boundary})
+        logger.info("会话 %s Full Compaction(%s)：水位 %d，%d→%d tok", sid, kind,
+                    ctx_now, before_tokens, after_tokens)
+        return {
+            "covered_messages": len(to_summarize),
+            "before_chars": sum(len(getattr(m, "content", "") or "") for m in to_summarize),
+            "after_chars": len(summary),
+            "compact_kind": kind,
+            "before_tokens": before_tokens,
+            "after_tokens": after_tokens,
+            "boundary_message_id": boundary,
+        }
+    finally:
+        _compacting.discard(sid)
+
+
+async def _chunked_summary(messages, existing: Optional[dict], reserve: int) -> str:
+    """分块摘要 → 合并：超摘要器预算的历史按块压缩，再合并为九段式总摘要。"""
+    text = _transcript_text(messages)
+    prior = (existing or {}).get("summary") or ""
+    if len(text) <= SUMMARY_TRANSCRIPT_MAX_CHARS:
+        return await _fork_summary_agent(
+            _summary_prompt(text, prior_summary=prior, max_tokens=reserve), reserve)
+    chunks, buf = [], ""
+    for m in messages:
+        piece = f"{'用户' if getattr(m, 'role', '') == 'user' else '助手'}: {(getattr(m, 'content', '') or '')[:SUMMARY_TRANSCRIPT_PER_MESSAGE]}\n"
+        if len(buf) + len(piece) > SUMMARY_TRANSCRIPT_MAX_CHARS and buf:
+            chunks.append(buf)
+            buf = ""
+        buf += piece
+    if buf:
+        chunks.append(buf)
+    partials = []
+    for i, chunk in enumerate(chunks, 1):
+        part = await _fork_summary_agent(
+            _summary_prompt(chunk, max_tokens=reserve // 2), reserve // 2)
+        if part:
+            partials.append(f"【第 {i}/{len(chunks)} 段】\n{part}")
+    if not partials:
+        return ""
+    merged = "\n\n".join(partials)
+    return await _fork_summary_agent(
+        _summary_prompt(merged, prior_summary=prior, max_tokens=reserve), reserve)
+
+
+def should_full_compact(session) -> bool:
+    """L3 触发判定：水位 ≥93% 窗口，或 Auto 连续失败 ≥3 且水位仍 ≥95K。"""
+    ctx = estimate_context_tokens(session)
+    if ctx >= cw.full_compact_threshold():
+        return True
+    return (ctx >= cw.auto_compact_threshold()
+            and cw.get_fail_streak(getattr(session, "session_id", "")) >= COMPACT_FAIL_STREAK_LIMIT)

@@ -43,7 +43,7 @@ _FAILOVER_STATUS = {401, 403, 408, 429}
 # 首块保护：上游返回 200 但长时间不产出任何 chunk（排队/挂起）时视为失败上游并切换，
 # 避免慢上游吃满调用方（意图改写/证据判断等）的全部超时预算后才暴露。
 # 工具类角色（短输出任务）首块期限更紧；回答类放宽。
-_UTILITY_ROLES = {"intent_rewrite", "evidence_check", "memory_extract", "session_summary"}
+_UTILITY_ROLES = {"intent_rewrite", "evidence_check", "memory_agent", "memory_extract", "session_summary"}
 _FIRST_CHUNK_UTILITY = 8.0
 _FIRST_CHUNK_DEFAULT = 15.0
 # 预提交阶段单上游尝试上限：慢滴答（持续产出无正文 chunk）也不得吃满总预算，

@@ -618,13 +618,14 @@ class MemoryService:
         return note_manual_write(user_id)
 
     @staticmethod
-    def retrieve_relevant(
+    def find_relevant_memories(
         user_id: str,
         query: str,
         limit: int = MAX_CONTEXT_MEMORIES,
         exclude_ids: Optional[list] = None,
     ) -> List[dict]:
-        """相关检索层：关键词重叠 + 重要度 + 时间衰减 + 类型权重评分。
+        """动态加载 · 按需检索层（对齐 Claude Code findRelevantMemories）：
+        关键词重叠 + 重要度 + 时间衰减 + 类型权重评分。
 
         exclude_ids 用于与画像卡去重（已在常驻层注入的不再重复注入）。
         """
@@ -658,6 +659,9 @@ class MemoryService:
                 [(now, m["id"]) for m in chosen],
             )
         return chosen
+
+    # 兼容别名：旧调用点/测试沿用 retrieve_relevant（与 findRelevantMemories 同一实现）
+    retrieve_relevant = find_relevant_memories
 
     @staticmethod
     def usage_overview(user_id: str) -> dict:
@@ -853,7 +857,7 @@ class MemoryService:
         try:
             from app.core.llm import LLMFactory
 
-            llm = LLMFactory.create_for_role("memory_extract")
+            llm = LLMFactory.create_for_role("memory_agent")
         except Exception as e:
             logger.warning("记忆合并初始化失败（忽略）: %s", e)
             return
@@ -899,8 +903,9 @@ class MemoryService:
         try:
             from app.core.llm import LLMFactory
 
-            # 记忆抽取为后台辅助生成（forked agent），走网关默认规则（role 仅用于日志显性化）
-            llm = LLMFactory.create_for_role("memory_extract")
+            # 记忆抽取为后台辅助生成（forked agent），与 Session Memory/AutoDream 统一走
+            # 网关 memory_agent 业务路由（同一角色绑定同一规则/模型）
+            llm = LLMFactory.create_for_role("memory_agent")
         except Exception as e:
             logger.warning("记忆抽取初始化失败（忽略）: %s", e)
             return [], "llm_unavailable"
@@ -1086,7 +1091,7 @@ class MemoryService:
         try:
             from app.core.llm import LLMFactory
 
-            llm = LLMFactory.create_for_role("memory_extract")
+            llm = LLMFactory.create_for_role("memory_agent")
             collected = ""
             async for chunk in llm.chat([{"role": "user", "content": prompt}], stream=False):
                 collected += chunk

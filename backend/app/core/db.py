@@ -323,10 +323,11 @@ def init_db(conn: sqlite3.Connection):
             edited_by_user           INTEGER NOT NULL DEFAULT 0,
             created_at               TEXT NOT NULL,
             updated_at               TEXT NOT NULL,
-            compact_kind             TEXT NOT NULL DEFAULT 'auto',
+            compact_kind             TEXT NOT NULL DEFAULT 'session_memory',
             before_tokens            INTEGER NOT NULL DEFAULT 0,
             fail_streak              INTEGER NOT NULL DEFAULT 0,
-            ctx_tokens_at_update     INTEGER NOT NULL DEFAULT 0
+            ctx_tokens_at_update     INTEGER NOT NULL DEFAULT 0,
+            boundary_message_id      TEXT NOT NULL DEFAULT ''
         );
 
         CREATE TABLE IF NOT EXISTS memory_write_events (
@@ -740,6 +741,50 @@ def init_db(conn: sqlite3.Connection):
         );
         CREATE INDEX IF NOT EXISTS idx_token_segments_started ON agent_token_segments(created_at);
         CREATE INDEX IF NOT EXISTS idx_token_segments_seg ON agent_token_segments(segment, created_at);
+
+        -- 上下文四层压缩 · 工具结果账本（会话级）：每个工具结果一行，跨轮留在会话窗口内。
+        -- storage: inline(原文在上下文) | offloaded(超大已落盘，上下文仅预览+路径)。
+        -- state: live(在窗口) | dedup_ref(去重引用，指向 ref_id) | cleared(微压缩/压缩已清除占位)。
+        -- reproducible: 1=可重现（微压缩可清除，可重新调用/回读）；0=不可重现（草稿/HITL/副作用，永不清除）。
+        CREATE TABLE IF NOT EXISTS session_tool_results (
+            id            TEXT PRIMARY KEY,
+            session_id    TEXT NOT NULL,
+            user_id       TEXT NOT NULL DEFAULT '',
+            message_id    TEXT NOT NULL DEFAULT '',
+            turn_seq      INTEGER NOT NULL DEFAULT 0,
+            seq           INTEGER NOT NULL DEFAULT 0,
+            tool_name     TEXT NOT NULL DEFAULT '',
+            args_json     TEXT NOT NULL DEFAULT '{}',
+            args_sig      TEXT NOT NULL DEFAULT '',
+            content_hash  TEXT NOT NULL DEFAULT '',
+            tokens        INTEGER NOT NULL DEFAULT 0,
+            raw_tokens    INTEGER NOT NULL DEFAULT 0,
+            reproducible  INTEGER NOT NULL DEFAULT 0,
+            storage       TEXT NOT NULL DEFAULT 'inline',
+            path          TEXT NOT NULL DEFAULT '',
+            preview       TEXT NOT NULL DEFAULT '',
+            content       TEXT NOT NULL DEFAULT '',
+            state         TEXT NOT NULL DEFAULT 'live',
+            ref_id        TEXT NOT NULL DEFAULT '',
+            created_at    TEXT NOT NULL,
+            cleared_at    TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_tool_results_session ON session_tool_results(session_id, seq);
+        CREATE INDEX IF NOT EXISTS idx_tool_results_hash ON session_tool_results(session_id, content_hash);
+
+        -- 上下文四层压缩 · 会话窗口状态（一会话一行）：真实水位/工具结果占用/摘要后工具计数/
+        -- Auto 连续失败计数/最近压缩类型。替代模块内 dict，进程重启不丢；只按 session_id 存取。
+        CREATE TABLE IF NOT EXISTS session_context_state (
+            session_id              TEXT PRIMARY KEY,
+            user_id                 TEXT NOT NULL DEFAULT '',
+            ctx_tokens              INTEGER NOT NULL DEFAULT 0,
+            tool_result_tokens      INTEGER NOT NULL DEFAULT 0,
+            tool_calls_since_summary INTEGER NOT NULL DEFAULT 0,
+            auto_fail_streak        INTEGER NOT NULL DEFAULT 0,
+            last_compact_kind       TEXT NOT NULL DEFAULT '',
+            last_compact_at         TEXT NOT NULL DEFAULT '',
+            updated_at              TEXT NOT NULL DEFAULT ''
+        );
 
         -- Tool Routing 调用链分析（工具治理可观测性）：一次工具调用 = 一条记录。
         -- 由 tools.invoke.invoke_tool 在「约束钩子 → 执行」全链路落库，聚合出五项核心指标：
@@ -1911,7 +1956,7 @@ def init_db(conn: sqlite3.Connection):
             conn.execute("ALTER TABLE user_memories ADD COLUMN file_path TEXT NOT NULL DEFAULT ''")
             logger.info("user_memories 补加列: file_path")
         sum_cols = {r[1] for r in conn.execute("PRAGMA table_info(chat_session_summaries)")}
-        for col, ddl in (("compact_kind", "TEXT NOT NULL DEFAULT 'auto'"),
+        for col, ddl in (("compact_kind", "TEXT NOT NULL DEFAULT 'session_memory'"),
                          ("before_tokens", "INTEGER NOT NULL DEFAULT 0"),
                          ("fail_streak", "INTEGER NOT NULL DEFAULT 0")):
             if col not in sum_cols:
@@ -1937,6 +1982,50 @@ def init_db(conn: sqlite3.Connection):
         from app.services import memory_store
         memory_store.migrate_taxonomy_v3(conn)
         conn.execute("INSERT INTO schema_migrations VALUES ('memory_taxonomy_v3',?)",
+                     (datetime.now().isoformat(),))
+    if not conn.execute("SELECT 1 FROM schema_migrations WHERE version='memory_gateway_role_v1'").fetchone():
+        # forked agent 网关业务路由统一：Session Memory/extractMemories/AutoDream 共用
+        # memory_agent 角色（同一路由）。存量 session_summary/memory_extract 若有绑定，
+        # 复制到 memory_agent（满足「要有对应配置」）；无绑定则留空回退默认规则。
+        import uuid as _uuid_ma
+        src = conn.execute(
+            "SELECT rule_id, model_name FROM gateway_role_routes"
+            " WHERE role IN ('session_summary','memory_extract')"
+            " AND (rule_id != '' OR model_name != '')"
+            " ORDER BY updated_at DESC LIMIT 1").fetchone()
+        if src and not conn.execute(
+                "SELECT 1 FROM gateway_role_routes WHERE role='memory_agent'").fetchone():
+            conn.execute(
+                "INSERT INTO gateway_role_routes (id, role, rule_id, model_name, updated_at)"
+                " VALUES (?,?,?,?,?)",
+                (str(_uuid_ma.uuid4()), "memory_agent", src[0], src[1],
+                 datetime.now().isoformat()))
+        conn.execute("INSERT INTO schema_migrations VALUES ('memory_gateway_role_v1',?)",
+                     (datetime.now().isoformat(),))
+    if not conn.execute("SELECT 1 FROM schema_migrations WHERE version='context_compact_v2'").fetchone():
+        # 上下文四层压缩改造（对齐 Claude Code，128K 会话窗口）：
+        # - chat_session_summaries 补 boundary_message_id（压缩边界，与摘要覆盖点分离），
+        #   存量回填为 covered_until_message_id（保持「已被摘要替换」现状不回退）；
+        # - agent_spans 补 input_tokens/output_tokens（所有 span 估算口径）、ctx_tokens（窗口水位）、
+        #   meta（落盘/去重/清除标记 JSON）；prompt/completion/cached_tokens 语义不变（仅 LLM span）；
+        # - 压缩事件/摘要类型枚举迁移：auto→session_memory、window80→auto_compact。
+        sum_cols2 = {r[1] for r in conn.execute("PRAGMA table_info(chat_session_summaries)")}
+        if "boundary_message_id" not in sum_cols2:
+            conn.execute("ALTER TABLE chat_session_summaries ADD COLUMN boundary_message_id TEXT NOT NULL DEFAULT ''")
+            conn.execute("UPDATE chat_session_summaries SET boundary_message_id = covered_until_message_id"
+                         " WHERE boundary_message_id = ''")
+        span_cols = {r[1] for r in conn.execute("PRAGMA table_info(agent_spans)")}
+        for col, ddl in (("input_tokens", "INTEGER NOT NULL DEFAULT 0"),
+                         ("output_tokens", "INTEGER NOT NULL DEFAULT 0"),
+                         ("ctx_tokens", "INTEGER NOT NULL DEFAULT 0"),
+                         ("meta", "TEXT NOT NULL DEFAULT '{}'")):
+            if col not in span_cols:
+                conn.execute(f"ALTER TABLE agent_spans ADD COLUMN {col} {ddl}")
+        conn.execute("UPDATE context_compact_events SET kind='session_memory' WHERE kind='auto'")
+        conn.execute("UPDATE context_compact_events SET kind='auto_compact' WHERE kind='window80'")
+        conn.execute("UPDATE chat_session_summaries SET compact_kind='session_memory' WHERE compact_kind='auto'")
+        conn.execute("UPDATE chat_session_summaries SET compact_kind='auto_compact' WHERE compact_kind='window80'")
+        conn.execute("INSERT INTO schema_migrations VALUES ('context_compact_v2',?)",
                      (datetime.now().isoformat(),))
     from app.core.cache_schema import migrate as migrate_cache
     migrate_cache(conn)

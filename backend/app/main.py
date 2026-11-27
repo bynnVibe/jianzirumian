@@ -217,6 +217,12 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        # 进程关闭视为会话过程结束：在途 Task State 内存对象统一落盘 task_state.md
+        try:
+            from app.services import memory_store
+            memory_store.flush_all_task_states()
+        except Exception as e:
+            logger.warning("Task State 关闭落盘失败: %s", e)
         runtime.stop()
         _heavy_shutdown()
         from app.services.url_imports import url_imports

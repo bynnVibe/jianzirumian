@@ -102,7 +102,7 @@ const upstreamModels = computed(() => {
 // 防 LLM 角色误选 embedding/rerank/ocr 上游模型（反之亦然）；未登记 role 归 llm。
 const ROLE_CATEGORY = {
   chat_answer: 'llm', assistant: 'llm', intent_rewrite: 'llm',
-  evidence_check: 'llm', wiki_compile: 'llm', memory_extract: 'llm',
+  evidence_check: 'llm', wiki_compile: 'llm', memory_agent: 'llm', memory_extract: 'llm',
   session_summary: 'llm', knowledge_summarize: 'llm', text_polish: 'llm',
   content_polish: 'llm',
   embed: 'embedding', rerank: 'rerank', ocr: 'ocr',

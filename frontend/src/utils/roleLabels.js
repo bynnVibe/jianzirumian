@@ -9,6 +9,7 @@ export const ROLE_LABELS = {
   embed: '向量化',
   rerank: '重排序',
   ocr: 'OCR 识别',
+  memory_agent: '记忆代理（统一）',
   memory_extract: '记忆抽取',
   session_summary: '会话摘要',
   knowledge_summarize: '知识点总结',

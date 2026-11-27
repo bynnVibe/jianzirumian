@@ -1,8 +1,8 @@
 <p align="center">
   <img src="https://img.shields.io/badge/部署拓扑-5%20层容器-blueviolet" alt="5-Layer Topology">
   <img src="https://img.shields.io/badge/工具治理-6%20步工作流-orange" alt="6-Step Tool Workflow">
-  <img src="https://img.shields.io/badge/后端回归-1240%2B%20用例-green" alt="Backend Tests">
-  <img src="https://img.shields.io/badge/前端测试-55%20用例-green" alt="Frontend Tests">
+  <img src="https://img.shields.io/badge/后端回归-1450%2B%20用例-green" alt="Backend Tests">
+  <img src="https://img.shields.io/badge/前端测试-82%20用例-green" alt="Frontend Tests">
   <img src="https://img.shields.io/badge/技术栈-FastAPI%20%2B%20Vue%203-brightgreen" alt="Tech Stack">
   <img src="https://img.shields.io/badge/部署-Docker%20%2B%20阿里云%20ECS-brightgreen" alt="Deploy">
 </p>
@@ -13,7 +13,7 @@
 >
 > 面向个人知识管理的智能问答系统：手写笔记图片经 OCR 转为文字，自动构建向量知识库，结合大语言模型（LLM）实现基于知识库的精准问答；支持联网搜索补充知识库未覆盖的信息，并以 Agent 编排、个人工具、Skill 沉淀与模型网关构成完整的受控执行体系。
 
-本地体验：<http://localhost:5173>（部署后） · 使用指导：`/guide` · [用户使用手册](./docs/用户使用手册.md) · [可交互系统样例](./系统样例.html)
+本地体验：<http://localhost:5173>（部署后） · 使用指导：`/guide` · [用户使用手册](./docs/用户使用手册.md) · [可交互系统样例](./frontend/public/系统样例.html)
 
 ---
 
@@ -21,12 +21,14 @@
 
 - 📝 **手写笔记 → 知识库**：两段式上传（解析 → 确认入库），多引擎 OCR（PaddleOCR / 阿里云百炼 / 自定义），图片裁剪旋转 + 模糊检测，Word/PDF 表格 Markdown 化
 - 🧠 **Agentic RAG**：混合检索（FAISS + BM25 + RRF + Rerank）+ 复杂度分流 Agent（固定流水线 / ReAct / Plan&Execute）+ 证据充分性自校验 + Human-in-the-Loop 确认
+- 🧬 **对齐 Claude Code 的记忆系统**：静态三层 + 动态短期（transcript.jsonl 只读黑匣子 / Session Memory 摘要 / task_state 会话期内存对象 / tool-results 结果落盘 / 上下文四层压缩）+ 长期四类型与 MEMORY.md 索引；静态加载 + 动态加载（索引全量注入 + findRelevantMemories 检索），extractMemories 每轮抽取 / AutoDream 门控整理，记忆 forked agent 统一走网关 `memory_agent` 路由
+- 🧮 **上下文四层压缩（128K 会话窗口）**：日常约束（输出帽 4K / 超大工具结果落盘留预览与路径 / 重复结果去重）→ 微压缩（≥20K 进入、可释放 <10K 放弃，占位符保工具配对）→ 系统压缩（Session Memory 三条件更新 + Auto 95K 摘要，命中零模型调用）→ 兜底 Full（连败升级 / 119K 硬触发）；一个会话一个连续窗口，历史区逐字节稳定保前缀缓存，调用链每个 span 可监控 Token
 - 🛠️ **个人工具六步治理**：聊天 `@tool` 发起 → 创建确认 → 配置审批 → 样例测试 → 标准化评测 → 启用 → 注册调用；工具以**功能名**注册（如 `get_current_weather`），默认全员可调用、可按工具设置用户黑名单
 - 🧩 **Skill 沉淀飞轮**：`@skills` 联网发现 + 安全预审 + 草稿确认安装，高频能力建议 → 一键沉淀 → 业务验收闭环
 - 🌐 **自建模型网关**：OpenAI 兼容统一出网，业务路由 / 多模态上游分类 / 密钥配额 / 熔断切换 / 安全审计 / Token 分析
 - 📚 **llm-wiki 知识编译**：入库资料自动编译为百科词条，对话高频主题沉淀私人 digest，「问得越多 → 检索越准」
 - 📊 **回归评测两域**：RAG 五页签（Ragas 四指标 + Hit@K/MRR）+ Agent 三页签（轨迹匹配 + DeepEval 六指标），BadCase 闭环回归
-- 🔭 **Agent 可观测性**：DashBoard / 日志 / 指标告警 / 链路追踪四模块，全局告警铃铛与安全风险弹窗；静态/动态记忆写路径与 Compaction 压缩链治理指标（个人/管理员钻取）
+- 🔭 **Agent 可观测性**：DashBoard / 日志 / 指标告警 / 链路追踪四模块，全局告警铃铛与安全风险弹窗；静态/动态记忆写路径与上下文四层压缩治理指标（个人/管理员钻取）；调用链每个 span 均显示入/出 Token 与窗口水位（LLM 真实 usage，其余估算）
 - 🔒 **受控执行**：缺参数不猜测、隔离 Worker 不可用即拒绝、四级证据验证，绝不假成功
 - 📱 **移动端适配**：≤768px 自动切换移动布局，手机浏览器同样可用
 - 👀 **零依赖预览**：登录页「系统样例」可交互静态样例 + `/guide` 内置使用指导，不连真实服务即可体验全部界面
@@ -37,7 +39,7 @@
 
 | 域 | 入口 | 核心能力 |
 |------|------|------|
-| 💬 知识问答 | 聊天页 | 流式 RAG、复杂度分流 Agent、截图检索、会话压缩、用户记忆、答案缓存 v2 |
+| 💬 知识问答 | 聊天页 | 流式 RAG、复杂度分流 Agent、截图检索、上下文四层压缩（128K 窗口）、用户记忆、答案缓存 v2 |
 | 📤 知识上传 | `/kb/upload` | 两段式解析入库、图片编辑、链接导入、重复指纹校验、入库历史 |
 | 🗂️ 知识库工作台 | `/kb` | 总览 + 详情 8 页签（文档/检索测试/思维导图/知识总结/知识图谱/收藏/百科/RAG评估） |
 | 🛠️ 工具治理中心 | `/admin/tools` | 六步评测工作流、功能名注册表、按工具用户黑名单、执行记录 |
@@ -103,7 +105,7 @@ API 层 (app/api/*，路由与鉴权) → 服务层 (app/services/*，业务编�
 | 注册/登录 | 首个注册用户自动成为管理员；Token 认证 + 24h 滑动续期（**持续操作则登录态一直续期**，前端活动心跳周期调用鉴权接口，仅闲置超时才过期退出）；管理员可开关开放注册、管理用户 |
 | 游客模式 | 未注册可直接体验对话，受每日免费次数限制（计数持久化） |
 | 知识库权限 | 公共库全员可见；个人库仅属主可见，向量检索阶段**物理隔离**，任何用户（含管理员）不会检索到他人私人库 |
-| 个人中心 | 左下角用户菜单 5 项：**修改个人信息**（用户名/联系方式/密码）、**使用看板**（提问/检索/上传/Token 等总量统计 + 每日趋势，近 7/30/90 天）、**我的记忆**（用户/助手记忆浏览编辑删除 + 召回统计 + **记忆文件**页签：静态三层/个人叠加层字符量与落盘状态、长期记忆文件与 MEMORY.md 索引、按会话查看短期记忆 transcript/summary/task_state）、**我的指令**（≤500 字个人规则，个人叠加层 User）、**语义缓存**（v2 个人域、合同核验与固定有效期，见下） |
+| 个人中心 | 左下角用户菜单 5 项：**修改个人信息**（用户名/联系方式/密码）、**使用看板**（提问/检索/上传/Token 等总量统计 + 每日趋势，近 7/30/90 天）、**我的记忆**（用户/助手记忆浏览编辑删除 + 召回统计 + **记忆文件**页签：静态三层/个人叠加层字符量与落盘状态、长期记忆文件与 MEMORY.md 索引、按会话查看短期记忆 transcript.jsonl（JSONL 只读黑匣子）/summary/task_state（会话期内存对象，结束落盘 task_state.md，在途标「内存中」））、**我的指令**（≤500 字个人规则，个人叠加层 User）、**语义缓存**（v2 个人域、合同核验与固定有效期，见下） |
 
 ### 移动端适配
 
@@ -156,8 +158,8 @@ API 层 (app/api/*，路由与鉴权) → 服务层 (app/services/*，业务编�
 - **正文流式体验**：生成正文与过程事件分离，`reasoning_content` 不进入答案，过滤正文开头明确的推理标签块，并用最终答案提示约束过程化自述。主聊天收到大块正文时分帧平滑展示；这不能消除检索、模型首块或代理缓冲带来的等待。主聊天与知识助手最终回答流失败不再静默切成非流式整段补答
 - **Markdown 富文本渲染**：回答中的表格/列表/代码等 Markdown 在页面以真实样式渲染（表格带表头底色、斑马纹与横向滚动，不再散排成纯文本）；最终答案约束引导 LLM 对对比、清单、打分、参数等结构化数据优先输出 Markdown 表格
 - **联网搜索**：独立开关，DuckDuckGo（免费）/ AnySearch / Bing / SerpAPI 多源可选
-- **会话管理**：多会话历史按日期分组、用户隔离；**Compaction 压缩链**（参考 Claude Code compaction）——micro 空闲衰减（三档分级截断 + 空闲 ≥60 分钟读时衰减，最近 5 条保留全文）→ auto 摘要压缩（上下文达 10K Token 首次触发，此后增长 5K/工具调用/对话暂停由后台代理更新 summary.md，递归守卫 + 连败 3 次熔断、手动可绕过）→ **window80 硬触发**（上下文达总窗口 80% 立即用 summary.md 替换历史、保留最近消息，绕过熔断但尊重用户编辑）；短期记忆按会话落 transcript.md 只读流水账 / summary.md 摘要 / task_state.md 任务进度，DB 缺失时文件恢复；会话列表手动「压缩历史」（可填侧重点）保留，压缩后注入「摘要 + continuation 指令」再水化，自动模式抑制不必要的追问
-- **用户记忆（静态/动态双轨 Markdown）**：参考 Claude Code 记忆设计，全部以 markdown 文件持久保存、按用户维度隔离，SQLite 仅作查询镜像。**静态记忆**为全局规矩全量加载：User 输出友好度约定（中文回答/对比优先表格/长文本先摘要）、Project 知识库系统规则与结果格式（先结论后引用、引用带页码/章节）、Local 知识检索约束（只限本人权限内知识/能力边界），仅管理员可演进；另有个人叠加层（我的指令/KB 共享 Project/本人私有 Local）。**动态记忆·短期**=会话四模块（transcript/Session Memory/Task State/Compaction）；**动态记忆·长期**=user/feedback/project/reference 四类型跨会话记忆，每条独立 .md + MEMORY.md 索引，支持纠正覆盖、置信度递增与自动合并；extractMemories 每轮对话结束后台扫描整轮 transcript 抽取（hasMemoryWritesSince 去重），AutoDream 按「≥24h + ≥5 个新会话 + .consolidate-lock 并发锁」三重门控固定 Prompt 整理；读路径静态三层 + 叠加层注入 + 两层加载（常驻画像卡 + 相关检索）；侧边栏「我的记忆」含用户/助手/记忆文件三页签；敏感信息（密码/token/证件号等）正则拦截不落库；写路径与压缩链全程事件埋点供可观测性治理监控
+- **会话管理**：多会话历史按日期分组、用户隔离；**上下文四层压缩**（参考 Claude Code，一个会话一个 **128K = 128,000 Token** 连续窗口，触发频率递减、代价递增）——**L0 日常约束**（每轮输出帽 4K；单条 >8K 或单轮合计 >16K 的工具结果原文落盘，上下文只留 2KB 预览 + 路径，`read_tool_result` 分页回读；重复读取/重复执行结果去重为引用）→ **L1 微压缩**（每次调用前跑，工具结果合计 ≥20K 进入、可释放 <10K 放弃；旧的可重现输出换占位符但保留工具配对，本轮/最近 3 个/子 agent/Task/HITL 结果绝不裁剪）→ **L2 系统压缩**（Session Memory 首次 10K，后续「增长 ≥5K + 工具 ≥3 次 + 本轮自然结束」三条件才更新 summary.md，只记不删；Auto Compaction 水位 **95K** 触发，摘要完整覆盖时**零模型调用**替换，未命中 fork 九段式摘要，保留「≥10K / 最近 3 轮 / ≤40K」交集）→ **L3 兜底 Full**（Auto 连败 3 次升级、或水位 ≥ 窗口 93%（**119,040**）、或上游报超长被动触发；全部工具结果落盘、仅留最近 1 轮原文，模型失败走确定性兜底）；短期记忆按会话落 transcript.jsonl 只读黑匣子 / summary.md 摘要 / task_state.md 任务进度 / tool-results 工具结果原文，DB 缺失时文件恢复；输入区「🧮 上下文 x/128K」弹层展示真实水位、工具结果占用、距自动压缩余量与阈值刻度，超窗自动尾部裁剪并标注，保护区超窗则提示「上下文已满，请新开对话」；输出帽截断的回答可点「继续」续写；会话列表手动「压缩历史」（可填侧重点）保留，压缩后注入「摘要 + continuation 指令」再水化，自动模式抑制不必要的追问
+- **用户记忆（静态/动态双轨 Markdown）**：参考 Claude Code 记忆设计，全部以 markdown 文件持久保存、按用户维度隔离，SQLite 仅作查询镜像。**静态记忆**为全局规矩全量加载：User 输出友好度约定（中文回答/对比优先表格/长文本先摘要）、Project 知识库系统规则与结果格式（先结论后引用、引用带页码/章节）、Local 知识检索约束（只限本人权限内知识/能力边界），仅管理员可演进；另有个人叠加层（我的指令/KB 共享 Project/本人私有 Local）。**动态记忆·短期**=会话五模块（transcript/Session Memory/Task State/Tool Results/四层压缩）；**动态记忆·长期**=user/feedback/project/reference 四类型跨会话记忆，每条独立 .md + MEMORY.md 索引，支持纠正覆盖、置信度递增与自动合并；extractMemories 每轮对话结束后台扫描整轮 transcript 抽取（hasMemoryWritesSince 去重），AutoDream 按「≥24h + ≥5 个新会话 + .consolidate-lock 并发锁」三重门控固定 Prompt 整理；读路径静态三层 + 叠加层注入 + 两层加载（常驻画像卡 + 相关检索）；侧边栏「我的记忆」含用户/助手/记忆文件三页签；敏感信息（密码/token/证件号等）正则拦截不落库；写路径与压缩链全程事件埋点供可观测性治理监控
 - **Skill 配置（用户技能管理）**：侧边栏「Skill 配置」（`/skills`）让用户管理可复用技能并决定是否应用，借鉴成熟 Agent 的 Skill 理念。保留 `prompt`（chat，注入对话系统提示）与 `playbook`（url_import 链接抓取策略 / polish 正文清洗策略），新增按需加载的 `agent_skill`（chat，SKILL.md 与资源包）；内置「网页链接抓取回退策略」「链接正文清洗策略」（默认启用）、「知识总结（book-to-skill）」（`scope=kb_summary`，默认关闭，开启后驱动知识库详情页「知识总结」页签的五段式结构化摘要）与「通俗化健康结论」（默认关闭）仅可开关不可删改，内置/我的技能分组可折叠展开；自定义技能支持 CRUD + 导入本地技能文件（.json/.md/.txt）+ 校验（名称/内容/playbook JSON/敏感信息/上限 50），**新建/编辑/导入时经安全预审**（5 类高安全风险 + 6 类本项目无法实现的能力，命中拒绝落库并告知原因），预审行为全程留痕于 `skill_review_logs` 并在可观测性页「Skill 安全预审」面板重点暴露，按用户隔离、开关即时生效。技能分**个人/公共两种可见性**（`user_skills.visibility`）：个人技能仅属主可见可用，公共技能全员可见可用（列表标注「来自 X」且共享只读），新建时可选归属；可观测性「技能沉淀建议」识别到高频能力缺口时，侧边提供「同意沉淀」按钮，点击弹出编辑弹窗（选择公共/个人 + 名称/描述/指令内容/其他需求输入）一键沉淀为可用技能；沉淀编辑弹窗内置「市场相似 Skill 搜寻」，聚合 Skills.sh / ClawHub 等主流市场（不可达源自动降级不阻断），命中以卡片呈现（名称/描述/热度/来源）并可一键应用填充编辑表单。**聊天框添加个人 Skill**——输入 `@skills 描述或链接`（也保留自然语言添加入口），发现阶段显式联网查资料但不改变普通聊天的联网开关。候选读取、完整资源和安全／兼容检查后只生成草稿，展开可看 SKILL.md、依赖、来源及未验证项；用户确认当前 hash 后才安装，缺依赖保持未启用。确认幂等，取消／过期不能安装，刷新回到原助手轮次。外部包不自动执行 README、hooks、安装脚本或 pip install；来源适配与模型生成均按草稿实际标识展示。
 - **聊天附件确认入库**：默认只识别或总结；明确保存意图只生成确认卡，点击确认后才写入可写知识库。默认私人库，24小时有效，刷新保留状态；游客不可写，失败/中断不自动重试。
 - **截图检索（粘贴即问）**：聊天输入框直接 `Cmd/Ctrl + V` 粘贴截图（自动命名 `截图_时分秒.png` 并标「截图检索」），后端 OCR 识别图中文字后**并入知识库检索查询**再走上述问答流水线：只贴图不打字=以图中文字提问，贴图 + 一句话=检索查询含图中文字而回答仍针对你的问题；识别内容按 `OCR_RETRIEVAL_CHARS`（默认 300 字）裁剪避免稀释检索信号，完整原文仍注入对话上下文；未开「知识检索」时只识别作答，入库意图仍走确认卡
@@ -210,7 +212,7 @@ API 层 (app/api/*，路由与鉴权) → 服务层 (app/services/*，业务编�
 
 | 能力 | 说明 |
 |------|------|
-| 业务路由（系统唯一模型入口） | 系统各模块（问答/知识助手/意图改写/证据校验/百科编译，记忆抽取/会话摘要/知识点总结/OCR 润色等后台角色，及多模态向量化 embed/重排序 rerank/OCR 识别 ocr）按角色绑定路由规则与模型；模型解析优先级：调用方显式模型（聊天页下拉选模型）> 业务路由绑定 > 网关默认模型（须在命中规则上游清单内）> 规则内随机均衡；未绑定角色自动回退默认规则；**类别感知选路**：角色按 `ROLE_CATEGORY` 只在同类上游（embed→embedding/rerank→rerank/ocr→ocr/其余→llm）内选候选，前端模型候选也按类别过滤互不串类；原系统设置中的 LLM/知识助手/OpenRouter 免费模型配置已合并至此 |
+| 业务路由（系统唯一模型入口） | 系统各模块（问答/知识助手/意图改写/证据校验/百科编译，记忆代理 memory_agent（Session Memory/extractMemories/AutoDream 等记忆 forked agent 统一路由）/知识点总结/OCR 润色等后台角色，及多模态向量化 embed/重排序 rerank/OCR 识别 ocr）按角色绑定路由规则与模型；模型解析优先级：调用方显式模型（聊天页下拉选模型）> 业务路由绑定 > 网关默认模型（须在命中规则上游清单内）> 规则内随机均衡；未绑定角色自动回退默认规则；**类别感知选路**：角色按 `ROLE_CATEGORY` 只在同类上游（embed→embedding/rerank→rerank/ocr→ocr/其余→llm）内选候选，前端模型候选也按类别过滤互不串类；原系统设置中的 LLM/知识助手/OpenRouter 免费模型配置已合并至此 |
 | 多模态上游分类（网关唯一来源） | 「上游管理」按 `category` 分 **LLM / OCR / Embedding / ReRank** 四类分组折叠（组头 chevron + 计数徽标），添加/编辑弹窗含「类别」下拉；网络 OCR/Embedding/ReRank 连接配置只存于网关上游，首次启动幂等种子化把系统设置生效的网络 provider 迁入并绑定 embed/rerank/ocr 角色；系统设置对应区块改为只读摘要 + 「前往网关」跳转（写入接口返 410），仅保留 provider 类型切换与 local 引擎字段；系统的 Embedding/ReRank/OCR 调用默认经 `/v1/embeddings`、`/v1/reranks`、`/v1/chat`（ocr 角色）穿过网关出网，网关未就绪时自动降级直连；**上游「连通测试」按 `category` 选择探测端点与请求体**（embedding→`/embeddings` 发 `{input}`、rerank→`/reranks` 发 `{query,documents}`、其余→`/chat/completions` 发最小 chat），逐模型探测、任一成功即更新健康度与延迟，401/403/404/429 精确归因——修复了改造前一律发 chat 请求到 `/chat/completions` 导致 Embedding/ReRank 上游测试误报 400/404 的问题 |
 | 密钥与配额 | 请求次数原子认领；Token 为事后计量软限额，不是硬费用上限。模型授权、过期校验；密钥仅存哈希，明文只展示一次；**用户密钥（key_type=user）生成时强制绑定 ≥1 个用户（bound_users）**，沿用 Token/请求限额；系统内部出网使用自动创建的「系统内部调用」密钥，密钥页顶部卡片显性化其配置过程（自动创建/存储位置/携带方式/自愈）并支持一键轮换 |
 | 负载均衡与故障切换 | 渠道优先级分层 + 同层权重加权随机（A-Res）；失败自动切换，**连续失败 ≥5 次熔断（circuit_open）、1~4 次降级（degraded），冷却 60s 后半开探测、成功一次恢复 healthy 并 EMA 更新延迟**（熔断期间路由不再锤击该上游）；openai/anthropic/ollama 三协议归一化为 OpenAI 形态（含流式 SSE） |
@@ -230,7 +232,7 @@ Skill 草稿声明 `allowed-tools` 时，卡片展开「关联工具依赖」，
 
 - **Redis 文件缓存**：知识库原始文件（图片/Word/PDF/预览 PDF）经 Redis 加速来源跳转与预览；公共库全局共享、个人库按属主隔离；Redis 不可用自动降级直读磁盘；响应头 `X-File-Cache` 标注命中状态
 - **最终答案与工具缓存分离**：最终答案使用 `semantic_cache_v2` 的个人签名合同与固定期限；工具结果使用 owner、工具版本、参数、凭据作用域等精确 key。未知工具不缓存；错误不当成功缓存、过期失败不暗中返回旧结果。模型供应商前缀缓存不等于复用旧答案。
-- **持久化**：认证会话（`auth_sessions`）、游客计数（`guest_usage`）、工具调用、用户记忆、用户技能配置（`user_skills`，含公共/个人 `visibility`）与技能预审留痕（`skill_review_logs`）、知识总结（`kb_doc_summaries`，book-to-skill 五段式摘要）、入库指纹（`ingest_dedup`）、对话沉淀日志（`wiki_topic_digest_log`）、答案缓存（`semantic_cache_v2`）、个人能力建议状态（`capability_suggestions`）、个人工具版本／草稿／测试／执行／加密凭据、系统提示词版本（`prompt_versions`）与 Prompt/Skill 专项评测记录（`prompt_skill_evals`）等均落库 SQLite，服务重启不丢状态；聊天会话懒加载 + 短期缓存，避免内存压力
+- **持久化**：认证会话（`auth_sessions`）、游客计数（`guest_usage`）、工具调用、用户记忆、用户技能配置（`user_skills`，含公共/个人 `visibility`）与技能预审留痕（`skill_review_logs`）、知识总结（`kb_doc_summaries`，book-to-skill 五段式摘要）、入库指纹（`ingest_dedup`）、对话沉淀日志（`wiki_topic_digest_log`）、上下文工具结果账本（`session_tool_results`）与会话窗口状态（`session_context_state`，水位/失败计数进程重启不丢）、答案缓存（`semantic_cache_v2`）、个人能力建议状态（`capability_suggestions`）、个人工具版本／草稿／测试／执行／加密凭据、系统提示词版本（`prompt_versions`）与 Prompt/Skill 专项评测记录（`prompt_skill_evals`）等均落库 SQLite，服务重启不丢状态；聊天会话懒加载 + 短期缓存，避免内存压力
 
 ### 隔离 Python Worker：部署与验收前置
 
@@ -411,7 +413,7 @@ compose 所有端口默认回环，公网流量由**宿主 Nginx** 反代回环 
 
 | 工作流 | 触发 | 内容 |
 |------|------|------|
-| `ci.yml` | push 到 main/master、PR | ① 后端离线隔离回归（`backend/tests/run_isolated.py`，不读真实 .env、不连业务 DB/外网）；② 前端单元测试 + 生产构建（`npm test` / `npm run build`）；③ 部署快照一致性（`scripts/sync_deploy.py --check`） |
+| `ci.yml` | push 到 main/master、PR | ① 后端离线隔离回归（`backend/tests/run_isolated.py`，不读真实 .env、不连业务 DB/外网；该目录仅本地保留，公开仓库缺失时显式跳过）；② 前端单元测试 + 生产构建（`npm test` / `npm run build`）；③ 部署快照一致性（`scripts/sync_deploy.py --check`） |
 | `docker-images.yml` | 手动（workflow_dispatch，SLIM 开关可选）或 v* tag | Docker 构建后端/前端镜像（默认 SLIM=1 瘦身）并导出 tar.gz 工件（保留 14 天），供阿里云 ECS 离线 `server-load`；不推送 registry、不读取密钥 |
 
 安全约定：工作流事件字段不直接插值到 shell，经环境变量引号传递（如 SLIM 开关）。
@@ -441,22 +443,22 @@ jianziruyang/
 │   │                        # agent_orchestrator/capability_catalog/sandbox/ 为能力编排与受控执行层；
 │   │                        # personal_tools/personal_tool_specs/tool_workflow 为个人工具六步治理
 │   ├── app/core/            # 数据库、运行所有权、模型、检索与观测；requirement_contract 需求契约
-│   ├── tests/               # 正式隔离回归（run_isolated.py 为官方隔离入口）
+│   ├── tests/               # 隔离回归 run_isolated.py（仅本地保留，不入公开仓库）
 │   └── .env.example         # 唯一必须手工准备的配置文件模板
 ├── frontend/
 │   ├── src/views/           # 页面（知识库总览/详情、工具治理、评测平台、可观测性、网关、GuideView 等）
 │   ├── src/components/      # 确认卡、kb/* 知识库面板、observability/*、gateway/*、WikiAssistant 等
 │   ├── src/stores/          # Pinia 与 SSE 客户端（assistant.js 含面板宽度/页面状态上下文）
+│   ├── public/系统样例.html  # 可交互静态界面样例（登录页入口，站点访问 /系统样例.html）
 │   └── src/mobile.css       # 全局移动端兜底适配（≤768px 表格横滚/网格收单列/模态全屏/触控）
 ├── monitoring/              # Prometheus 抓取、告警与 Grafana 装配
 ├── scripts/                 # 部署保护、HTTPS 示例、开发脚本（dev-daemon/deploy-aliyun/sync_deploy）
 ├── docker-images/           # 与主配置同步的部署快照
 ├── .github/workflows/       # GitHub Actions：CI 质量门禁与镜像构建导出
-├── docs/                    # 用户使用手册（含系统使用样例/使用指导附录）等文档
-└── 系统样例.html            # 可交互静态界面样例（与 frontend/public 副本同步，登录页入口）
+└── docs/                    # 架构图 architecture.html 入库；使用手册等个人文档仅本地保留
 ```
 
-运行数据、密钥、依赖与日志不随仓库分发。
+运行数据、密钥、依赖与日志不随仓库分发。`backend/tests/` 与根目录演示/分析页（`简历项目介绍.html`、`系统样例.html`、`项目技术要点分析.html`）同样仅本地保留、不入公开仓库；站点与 README 引用的样例以 `frontend/public/系统样例.html` 为准。
 
 ---
 
@@ -470,8 +472,9 @@ jianziruyang/
 | 回归评测 | 2 域 8 页签（RAG 五 + Agent 三），Ragas 四指标 + Hit@K/MRR + DeepEval 六指标 |
 | 可观测性 | 4 模块（DashBoard/日志/指标告警/链路追踪）+ 个人视图 + 记忆/上下文治理监控（写路径事件、压缩链事件、节省 Token、熔断会话，钻取明细） |
 | 安全审计规则 | 约 25 条内置规则、6 大类别、4 种处置模式 |
-| 后端隔离回归 | 1240+ 用例（`run_isolated.py`，不读 .env、不连业务 DB/外网） |
-| 前端单元测试 | 55 用例（node --test）+ 生产构建门禁 |
+| 上下文压缩 | 4 层（日常约束 / 微压缩 / 系统压缩 / 兜底 Full），会话窗口 128K=128,000 Token；阈值 20K·95K·119,040，每轮输出帽 4K |
+| 后端隔离回归 | 1450+ 用例（`run_isolated.py`，不读 .env、不连业务 DB/外网；测试目录仅本地保留） |
+| 前端单元测试 | 82 用例（node --test）+ 生产构建门禁 |
 | 镜像体积 | 默认 ~2.3GB / SLIM 瘦身 ~574MB |
 | 生产运行内存 | 全拓扑约 1.5~2.5GB（SLIM + 云端模型） |
 
@@ -563,6 +566,8 @@ npm --prefix frontend test
 npm --prefix frontend run build
 python3 scripts/sync_deploy.py --check
 ```
+
+`backend/tests/` 仅本地保留、不随公开仓库分发：从 GitHub 克隆后不含该目录，上述第一条命令与 CI 的后端回归步骤会显式跳过，前端测试/构建与部署快照一致性检查照常执行。
 
 浏览器离线验收可运行 `backend/.venv/bin/python backend/tests/preview_capabilities.py --check` 做冒烟，或 `--serve` 在 `127.0.0.1:18765` 打开最新前端构建（先执行 `npm --prefix frontend run build`）。该入口使用每次新建的隔离 SQLite、合成账号、真实应用路由与显式外部依赖桩，禁止出站连接，不加载 `.env` 或启动生产后台任务。它验证界面与状态流，不替代真实模型、API 或 Linux Worker 验收；结束后停止该预览进程。
 

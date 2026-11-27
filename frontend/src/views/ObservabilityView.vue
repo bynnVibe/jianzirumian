@@ -295,8 +295,8 @@
         <div class="metric-card drillable" title="记忆条数，点击查看明细" @click="openDrill('memories', '记忆条数')"><span class="metric-num">{{ monitor.business.counts.memories || 0 }}</span><span class="metric-label">记忆条数</span></div>
       </section>
 
-      <!-- ============ 记忆与上下文治理（静态/动态 Markdown 写路径 × Compaction 压缩链） ============ -->
-      <div class="aspect-title">记忆与上下文治理（静态/动态 Markdown 写路径 × Compaction 压缩链）</div>
+      <!-- ============ 记忆与上下文治理（静态/动态 Markdown 写路径 × 四层压缩链） ============ -->
+      <div class="aspect-title">记忆与上下文治理（静态/动态 Markdown 写路径 × 四层压缩链）</div>
       <section class="cards" v-if="monitor && monitor.memory_context">
         <div class="metric-card drillable" title="记忆写路径事件，点击查看明细" @click="openDrill('memory_events', '记忆写路径事件')">
           <span class="metric-num">{{ monitor.memory_context.write_events_total }}</span>
@@ -322,10 +322,12 @@
       <section class="panel" v-if="monitor && monitor.memory_context">
         <div class="panel-head"><span class="panel-title">治理分布（{{ rangeLabel }}）</span></div>
         <div class="chain-chips">
-          <span class="chain-chip">微压缩·空闲衰减 {{ monitor.memory_context.compact_events.micro }}</span>
-          <span class="chain-chip">自动压缩 {{ monitor.memory_context.compact_events.auto }}</span>
+          <span class="chain-chip">L0 落盘 {{ monitor.memory_context.compact_events.offload || 0 }} / 去重 {{ monitor.memory_context.compact_events.dedup || 0 }}</span>
+          <span class="chain-chip">L1 微压缩 {{ monitor.memory_context.compact_events.micro || 0 }}（放弃 {{ monitor.memory_context.compact_events.micro_skip || 0 }}）</span>
+          <span class="chain-chip">L2 Session Memory {{ monitor.memory_context.compact_events.session_memory || 0 }}</span>
+          <span class="chain-chip">L2 Auto {{ monitor.memory_context.compact_events.auto_compact || 0 }}（命中 {{ monitor.memory_context.compact_events.auto_compact_hit || 0 }}）</span>
+          <span class="chain-chip">L3 兜底 {{ monitor.memory_context.compact_events.full || 0 }}</span>
           <span class="chain-chip">手动压缩 {{ monitor.memory_context.compact_events.manual }}</span>
-          <span class="chain-chip">Compaction·80% 硬触发 {{ monitor.memory_context.compact_events.window80 || 0 }}</span>
           <span class="chain-chip" :class="{ warn: monitor.memory_context.compact_events.fail }">失败 {{ monitor.memory_context.compact_events.fail }}</span>
           <span class="chain-chip" :class="{ warn: monitor.memory_context.compact_events.blocked }">熔断拦截 {{ monitor.memory_context.compact_events.blocked }}</span>
         </div>
@@ -341,7 +343,9 @@
         <p class="ctx-hint">
           写路径 = 静态/动态 Markdown 双写埋点（新增/更新/删除/簇合并/超限遗忘/AutoDream 整理，含助手分域镜像）；
           抽取运行 = extractMemories 每轮对话后台扫描整轮 transcript 的事件（与写入拆口径：运行数 &gt; 0 而写入数 = 0 即「跑了但零产出」，明细含模型层无产出原因）；
-          压缩链 = micro 空闲衰减 / auto 摘要压缩 / manual 手动 / window80 上下文达 80% 硬触发（summary.md 替换历史）/ 失败与熔断拦截。点击卡片查看逐条明细与口径说明。
+          压缩链 = L0 日常约束（offload 超大工具结果落盘 + dedup 去重引用）/ L1 micro 微压缩（≥20K 进入、可释放 &lt;10K 放弃）/
+          L2 session_memory 增量记录与 auto_compact ≥95K 摘要替换（summary.md 命中零调用）/ L3 full 兜底（连败 3 次或 ≥119,040）/ manual 手动 / 失败与熔断拦截。
+          节省口径：替换历史层 {{ formatNum(monitor.memory_context.tokens_saved) }} tok · 微压缩释放 {{ formatNum(monitor.memory_context.micro_tokens_saved) }} tok · 日常约束节省 {{ formatNum(monitor.memory_context.daily_tokens_saved) }} tok。点击卡片查看逐条明细与口径说明。
         </p>
       </section>
 
@@ -624,20 +628,28 @@
             <span class="metric-label">统计请求数</span>
           </div>
           <div class="metric-card">
-            <span class="metric-num">{{ myContext.context_window.history_rounds }}</span>
-            <span class="metric-label">历史窗口（轮）</span>
+            <span class="metric-num">{{ fmtTok(myContext.compression.thresholds?.window || 128000) }}</span>
+            <span class="metric-label">会话窗口容量（Token）</span>
           </div>
           <div class="metric-card">
             <span class="metric-num">{{ myContext.compression.sessions_with_summary }}</span>
             <span class="metric-label">已压缩会话</span>
           </div>
-          <div class="metric-card drillable" title="点击查看 Compaction 压缩链明细" @click="openGovDrill('compact')">
+          <div class="metric-card drillable" title="点击查看四层压缩链明细" @click="openGovDrill('compact')">
             <span class="metric-num">{{ formatNum(myContext.compression.tokens_saved) }}</span>
-            <span class="metric-label">压缩节省 Token</span>
+            <span class="metric-label">压缩节省 Token（替换历史层）</span>
+          </div>
+          <div class="metric-card">
+            <span class="metric-num">{{ formatNum(myContext.compression.micro_tokens_saved) }}</span>
+            <span class="metric-label">微压缩释放 Token</span>
+          </div>
+          <div class="metric-card">
+            <span class="metric-num">{{ formatNum(myContext.compression.daily_tokens_saved) }}</span>
+            <span class="metric-label">日常约束节省 Token</span>
           </div>
           <div class="metric-card">
             <span class="metric-num">{{ ((myContext.compression.compress_ratio || 0) * 100).toFixed(1) }}%</span>
-            <span class="metric-label">摘要压缩率（auto/manual）</span>
+            <span class="metric-label">摘要压缩率（Auto/Full/手动）</span>
           </div>
           <div class="metric-card">
             <span class="metric-num" :class="{ warn: myContext.compression.breaker_sessions }">{{ myContext.compression.breaker_sessions }}</span>
@@ -647,23 +659,27 @@
         <p class="ctx-hint">
           上下文告警水位 {{ formatNum(myContext.context_window.warn_threshold) }} Token/请求 ·
           记忆注入预算 {{ myContext.context_window.memory_ctx_chars_budget }} 字符 ·
-          历史压缩触发 {{ formatNum(myContext.compression.trigger_tokens) }} Token，当前摘要占用 {{ formatNum(myContext.compression.summary_tokens) }} Token。
+          Session Memory 首次触发 {{ formatNum(myContext.compression.trigger_tokens) }} Token，当前摘要占用 {{ formatNum(myContext.compression.summary_tokens) }} Token ·
+          单轮输出上限 {{ fmtTok(myContext.compression.thresholds?.output_cap || 4000) }}。
         </p>
 
-        <div class="ctx-sub-title">Compaction 压缩链（micro 衰减 → auto 摘要 → window80 硬触发）</div>
+        <div class="ctx-sub-title">四层压缩链（L0 日常约束 → L1 微压缩 → L2 系统压缩 → L3 兜底）</div>
         <div class="chain-chips">
-          <span class="chain-chip">微压缩·空闲衰减 {{ myContext.compression.chain_events?.micro || 0 }}</span>
-          <span class="chain-chip">自动压缩 {{ myContext.compression.chain_events?.auto || 0 }}</span>
+          <span class="chain-chip">L0 落盘 {{ myContext.compression.chain_events?.offload || 0 }} / 去重 {{ myContext.compression.chain_events?.dedup || 0 }}</span>
+          <span class="chain-chip">L1 微压缩 {{ myContext.compression.chain_events?.micro || 0 }}（放弃 {{ myContext.compression.chain_events?.micro_skip || 0 }}）</span>
+          <span class="chain-chip">L2 Session Memory {{ myContext.compression.chain_events?.session_memory || 0 }}</span>
+          <span class="chain-chip">L2 Auto {{ myContext.compression.chain_events?.auto_compact || 0 }}（命中 {{ myContext.compression.chain_events?.auto_compact_hit || 0 }}）</span>
+          <span class="chain-chip">L3 兜底 {{ (myContext.compression.chain_events?.full || 0) + (myContext.compression.chain_events?.full_fallback || 0) }}</span>
           <span class="chain-chip">手动压缩 {{ myContext.compression.chain_events?.manual || 0 }}</span>
-          <span class="chain-chip">Compaction·80% 硬触发 {{ myContext.compression.chain_events?.window80 || 0 }}</span>
           <span class="chain-chip" :class="{ warn: myContext.compression.chain_events?.auto_fail }">失败 {{ myContext.compression.chain_events?.auto_fail || 0 }}</span>
           <span class="chain-chip" :class="{ warn: myContext.compression.chain_events?.auto_blocked }">熔断拦截 {{ myContext.compression.chain_events?.auto_blocked || 0 }}</span>
-          <span class="chain-chip">边界标记 auto {{ myContext.compression.kind_counts?.auto || 0 }} / manual {{ myContext.compression.kind_counts?.manual || 0 }} / note {{ myContext.compression.kind_counts?.note || 0 }} / window80 {{ myContext.compression.kind_counts?.window80 || 0 }}</span>
+          <span class="chain-chip">边界标记 session_memory {{ myContext.compression.kind_counts?.session_memory || 0 }} / auto_compact {{ myContext.compression.kind_counts?.auto_compact || 0 }} / full {{ myContext.compression.kind_counts?.full || 0 }} / manual {{ myContext.compression.kind_counts?.manual || 0 }} / note {{ myContext.compression.kind_counts?.note || 0 }}</span>
         </div>
         <p class="ctx-hint">
-          空闲 ≥ {{ myContext.compression.idle_decay_minutes }} 分钟触发读时衰减（最近 5 条保留全文，不落库）；
-          上下文达窗口 80% 硬触发 Compaction，用 summary.md 摘要替换历史（保留最近消息）；
-          自动压缩连续失败 3 次熔断（手动与 80% 硬触发可绕过，当前最大连败 {{ myContext.compression.fail_streak_max }}）；
+          L0：单轮输出 ≤{{ fmtTok(myContext.compression.thresholds?.output_cap || 4000) }}，超大工具结果落盘只留约 2KB 预览 + 路径（read_tool_result 按需回读），重复内容替换为引用；
+          L1：工具结果合计 ≥{{ fmtTok(myContext.compression.thresholds?.micro_trigger || 20000) }} 进入微压缩，可释放 &lt;10K 则放弃（micro_skip），占位符保留调用/结果配对，本轮与最近 3 个结果不裁剪；
+          L2：Session Memory 首次 {{ formatNum(myContext.compression.trigger_tokens) }} Token 起增量记录（只记不替换）；上下文 ≥{{ fmtTok(myContext.compression.thresholds?.auto || 95000) }} 触发 Auto Compaction，summary.md 命中零调用直接替换，未命中 fork 九段式摘要（保留 ≥10K 与最近 3 轮）；
+          L3：Auto 连败 3 次或 ≥{{ fmtTok(myContext.compression.thresholds?.full || 119040) }}（窗口 93%）兜底全量压缩，上游上下文超长时被动触发并重试一次（当前最大连败 {{ myContext.compression.fail_streak_max }}）；
           摘要持久于短期记忆 summary.md，数据库缺失时按文件恢复。
         </p>
         <div class="gov-actions">
@@ -707,7 +723,7 @@
         </div>
         <p class="ctx-hint">
           写路径按动作：<template v-for="(n, a) in myContext.memory.write_events?.by_action || {}" :key="a">{{ memActionLabel(a) }} {{ n }} · </template>
-          双写 SQLite 查询镜像与 markdown 文件（长期记忆每条独立 .md + MEMORY.md 索引；短期记忆按会话落 transcript/summary/task_state）。可在侧栏「我的记忆 → 记忆文件」查看与编辑。
+          双写 SQLite 查询镜像与 markdown 文件（长期记忆每条独立 .md + MEMORY.md 索引；短期记忆按会话落 transcript.jsonl 黑匣子/summary 摘要，task_state 会话期内存对象、结束落盘）。可在侧栏「我的记忆 → 记忆文件」查看与编辑。
         </p>
       </section>
 
@@ -795,7 +811,7 @@
                   <span class="span-kind-badge" :class="span.kind">{{ span.kind }}</span>
                   <span class="span-name">{{ span.name }}</span>
                   <span class="status-dot" :class="span.status"></span>
-                  <span class="span-meta">{{ formatMs(span.latency_ms) }}<template v-if="span.prompt_tokens || span.completion_tokens"> · {{ span.prompt_tokens }}+{{ span.completion_tokens }} tok</template></span>
+                  <span class="span-meta">{{ formatMs(span.latency_ms) }}<template v-if="spanTokenText(span)"> · {{ spanTokenText(span) }}</template></span>
                   <span class="span-arrow" :class="{ open: expandedSpans.has(span.id) }">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
                       <polyline points="6 9 12 15 18 9" />
@@ -804,6 +820,8 @@
                 </button>
                 <div v-if="expandedSpans.has(span.id)" class="span-body">
                   <p v-if="span.error" class="inline-error">{{ span.error }}</p>
+                  <p v-if="spanMetaText(span)" class="span-ctx-meta">{{ spanMetaText(span) }}</p>
+                  <p v-if="span.ctx_tokens" class="span-ctx-meta">窗口水位 {{ fmtTok(span.ctx_tokens) }} / {{ fmtTok(128000) }}</p>
                   <template v-if="span.input">
                     <span class="span-io-label">PROMPT / 入参</span>
                     <pre class="span-text">{{ span.input }}</pre>
@@ -878,6 +896,9 @@
           <span>状态：<b :class="{ 'cell-err': traceDetail.status === 'error' }">{{ statusText(traceDetail.status) }}</b></span>
           <span>延迟：{{ formatMs(traceDetail.latency_ms) }}</span>
           <span>Token：{{ traceDetail.prompt_tokens }} + {{ traceDetail.completion_tokens }}</span>
+          <span title="LLM 真实 usage 累计 / 非 LLM 环节估算累计 / 本次请求窗口水位峰值">
+            LLM {{ formatNum(traceTokenSummary.llm) }} · 工具结果 ≈{{ formatNum(traceTokenSummary.tool) }} · 水位 {{ fmtTok(traceTokenSummary.ctx) }}/{{ fmtTok(traceTokenSummary.window) }}
+          </span>
           <span :title="traceDetail.user_id">用户：{{ traceDetail.username || traceDetail.user_id || '-' }}</span>
           <span>开始：{{ formatTime(traceDetail.started_at) }}</span>
         </div>
@@ -926,7 +947,7 @@
               <span class="span-name">{{ span.name }}</span>
               <span class="span-bar" :title="formatMs(span.latency_ms)"><i :class="span.kind" :style="{ width: spanBarWidth(span) }"></i></span>
               <span class="status-dot" :class="span.status"></span>
-              <span class="span-meta">{{ formatMs(span.latency_ms) }}<template v-if="span.prompt_tokens || span.completion_tokens"> · {{ span.prompt_tokens }}+{{ span.completion_tokens }} tok</template></span>
+              <span class="span-meta">{{ formatMs(span.latency_ms) }}<template v-if="spanTokenText(span)"> · {{ spanTokenText(span) }}</template></span>
               <span class="span-arrow" :class="{ open: expandedSpans.has(span.id) }">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
                   <polyline points="6 9 12 15 18 9" />
@@ -935,6 +956,8 @@
             </button>
             <div v-if="expandedSpans.has(span.id)" class="span-body">
               <p v-if="span.error" class="inline-error">{{ span.error }}</p>
+              <p v-if="spanMetaText(span)" class="span-ctx-meta">{{ spanMetaText(span) }}</p>
+              <p v-if="span.ctx_tokens" class="span-ctx-meta">窗口水位 {{ fmtTok(span.ctx_tokens) }} / {{ fmtTok(128000) }}</p>
               <template v-if="span.input">
                 <span class="span-io-label">PROMPT / 入参</span>
                 <pre class="span-text">{{ span.input }}</pre>
@@ -1062,15 +1085,16 @@
               </tbody>
             </table>
             <p v-else class="empty-hint">暂无压缩链事件。发起多轮对话或手动压缩后即可看到。</p>
-            <div class="ctx-sub-title">会话摘要边界标记（compact_kind / 压缩前 token / 熔断计数）</div>
+            <div class="ctx-sub-title">会话摘要边界标记（compact_kind / 压缩边界与覆盖点 / 熔断计数）</div>
             <table v-if="govDrill.summaries.length" class="obs-table">
-              <thead><tr><th>会话</th><th>类型</th><th>压缩前 Token</th><th>摘要 Token</th><th>连败</th><th>用户编辑</th><th>更新时间</th></tr></thead>
+              <thead><tr><th>会话</th><th>类型</th><th>压缩前 Token</th><th>摘要 Token</th><th>边界 / 覆盖点</th><th>连败</th><th>用户编辑</th><th>更新时间</th></tr></thead>
               <tbody>
                 <tr v-for="s in govDrill.summaries" :key="s.session_id">
                   <td class="cell-input" :title="s.session_id">{{ (s.session_id || '').slice(0, 8) }}</td>
                   <td>{{ compactKindLabel(s.compact_kind) }}</td>
                   <td>{{ s.before_tokens || '-' }}</td>
                   <td>{{ s.token_estimate }}</td>
+                  <td class="cell-input" :title="'压缩边界 ' + (s.boundary_message_id || '-') + ' / 摘要覆盖点 ' + (s.covered_until_message_id || '-')">{{ (s.boundary_message_id || '-').slice(0, 8) }} / {{ (s.covered_until_message_id || '-').slice(0, 8) }}</td>
                   <td :class="{ 'cell-err': s.fail_streak >= 3 }">{{ s.fail_streak }}</td>
                   <td>{{ Number(s.edited_by_user) ? '✓' : '—' }}</td>
                   <td>{{ s.updated_at }}</td>
@@ -1114,6 +1138,7 @@ import ObsLogs from '@/components/observability/ObsLogs.vue'
 import ObsAlerts from '@/components/observability/ObsAlerts.vue'
 import ObsCachePanel from '@/components/observability/ObsCachePanel.vue'
 import { getMyObservabilityMetrics, getMyContextOverview, getMyContextSessions, getObservabilityMetrics, getObservabilityTraces, getObservabilityTrace, getObservabilityTraceLogs, getSkillReviews, getToolRoutingMetrics, getSessionObservability, getSedimentSuggestions, getObsMonitor, getObsToolChains, getObsDrill, getMyMemoryDrill, getMyCompactDrill, getMyMemoryEvents } from '@/api'
+import { fmtTok, spanTokenText, spanMetaText, traceTokenSummary as traceTokenSummaryOf } from '@/utils/contextTokens'
 
 const auth = useAuthStore()
 const queryCache = useQueryCacheStore()
@@ -1392,11 +1417,15 @@ const extractZeroYield = computed(() => {
 })
 
 function compactKindLabel(k) {
-  return { auto: '自动压缩', manual: '手动压缩', note: '会话笔记' }[k] || k || '-'
+  return {
+    session_memory: 'L2·Session Memory', auto_compact: 'L2·Auto 摘要',
+    auto_compact_hit: 'L2·Auto 命中', full: 'L3·兜底压缩', full_fallback: 'L3·兜底降级',
+    manual: '手动压缩', note: '会话笔记',
+  }[k] || k || '-'
 }
 
 async function openGovDrill(kind) {
-  const label = kind === 'compact' ? 'Compaction 压缩链明细' : '记忆写路径明细'
+  const label = kind === 'compact' ? '四层压缩链明细' : '记忆写路径明细'
   govDrill.value = { kind, label, loading: true, error: '', events: [], summaries: [], explanation: '' }
   try {
     const res = kind === 'compact' ? await getMyCompactDrill(50) : await getMyMemoryEvents(50)
@@ -1629,6 +1658,11 @@ function spanBarWidth(span) {
   if (!total || !span.latency_ms) return '2%'
   return Math.max(2, Math.min(100, (span.latency_ms / total) * 100)) + '%'
 }
+
+// 需求8：每个 span 都展示 Token —— LLM 为真实 usage（入+出，缓存命中另注），
+// TOOL/STEP 为估算口径（带 ≈），压缩动作 span 展示「压缩前→压缩后」。
+// 口径与文案统一收敛在 utils/contextTokens（与上下文用量徽章同源，便于单测）。
+const traceTokenSummary = computed(() => traceTokenSummaryOf(traceDetail.value?.spans))
 
 function completionPercent(value) {
   return value == null ? '—' : `${(value * 100).toFixed(1)}%`
@@ -2459,6 +2493,18 @@ function dayTipLines(row) {
   letter-spacing: 1px;
   color: var(--color-text-secondary);
   margin: 6px 0 4px;
+}
+
+/* span 的压缩标记与窗口水位（落盘路径 / 去重 / 清除 / 原始大小） */
+.span-ctx-meta {
+  margin: 4px 0;
+  font-size: 11.5px;
+  color: var(--color-text-secondary);
+  background: #f4f1ec;
+  border-left: 2px solid #c98a4b;
+  border-radius: 0 6px 6px 0;
+  padding: 4px 8px;
+  word-break: break-all;
 }
 
 .span-text {

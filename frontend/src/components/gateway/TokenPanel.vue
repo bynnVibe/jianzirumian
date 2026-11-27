@@ -200,7 +200,7 @@
         </div>
         <p class="token-note down" v-if="agent.token_comparison.trend === 'down'">✓ 平均用量较前期下降 {{ Math.abs(agent.token_comparison.delta_pct) }}%，优化见效。</p>
         <p class="token-note up" v-else-if="agent.token_comparison.trend === 'up'">↑ 平均用量较前期上升 {{ agent.token_comparison.delta_pct }}%，建议关注下方各段构成定位增量来源。</p>
-        <p class="token-note warn" v-if="agent.overview.token_overuse">⚠ 单请求平均 Token（{{ formatNum(agent.overview.avg_tokens_per_request) }}）已超过告警阈值 {{ formatNum(agent.overview.token_warn_threshold) }}，可收紧历史窗口（SESSION_MAX_HISTORY）或附件上下文预算。</p>
+        <p class="token-note warn" v-if="agent.overview.token_overuse">⚠ 单请求平均 Token（{{ formatNum(agent.overview.avg_tokens_per_request) }}）已超过告警阈值 {{ formatNum(agent.overview.token_warn_threshold) }}。会话窗口为 128K 连续窗口，可在「可观测性 → 我的上下文」查看四层压缩链（L0 落盘/去重 → L1 微压缩 → L2 Auto 95K → L3 兜底 119K）与工具结果占用，必要时手动压缩或新开对话。</p>
       </section>
 
       <!-- ============ Agent 侧：上下文构成（最新对话 / 历史对话 / 窗口聚合） ============ -->

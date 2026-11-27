@@ -2,6 +2,7 @@
 #
 # 把不依赖密钥/外网业务、结果可复现的验证操作固化为 GitHub Actions：
 #   1. 后端离线隔离回归（tests/run_isolated.py，不读真实 .env、不连业务 DB/外网）
+#      backend/tests 仅本地保留、不入公开仓库，克隆后缺失该目录时本步骤显式跳过
 #   2. 前端单元测试 + 生产构建（npm test / npm run build）
 #   3. 部署快照一致性检查（scripts/sync_deploy.py --check）
 #
@@ -30,7 +31,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r backend/requirements.txt
       - name: 离线隔离回归（run_isolated）
-        run: python backend/tests/run_isolated.py
+        run: |
+          if [ -f backend/tests/run_isolated.py ]; then
+            python backend/tests/run_isolated.py
+          else
+            echo "skip: backend/tests 仅本地保留、未随公开仓库分发，跳过离线隔离回归"
+          fi
 
   frontend:
     name: 前端测试与构建

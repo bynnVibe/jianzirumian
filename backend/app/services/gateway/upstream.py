@@ -20,6 +20,12 @@ logger = logging.getLogger("jianziruyang.gateway.upstream")
 _ANTHROPIC_VERSION = "2023-06-01"
 
 
+def _default_output_cap() -> int:
+    """L0 输出帽：下游未指定 max_tokens 时的默认上限（anthropic 协议必填该字段）。"""
+    from app.config import settings
+    return int(getattr(settings, "LLM_OUTPUT_CAP_TOKENS", 4000))
+
+
 # ---------------------------------------------------------------------------
 # 请求构造：返回 (headers, payload)
 # ---------------------------------------------------------------------------
@@ -47,6 +53,9 @@ def build_request(channel: dict, body: dict, mapped_model: str, stream: bool,
             options["temperature"] = body["temperature"]
         if body.get("top_p") is not None:
             options["top_p"] = body["top_p"]
+        # L0 输出帽：OpenAI 的 max_tokens 在 Ollama 协议下映射为 options.num_predict
+        if body.get("max_tokens"):
+            options["num_predict"] = int(body["max_tokens"])
         if body.get("tools") and body.get("tool_choice") != "none":
             payload["tools"] = body["tools"]
         if options:
@@ -58,7 +67,7 @@ def build_request(channel: dict, body: dict, mapped_model: str, stream: bool,
         payload = {
             "model": mapped_model,
             "messages": messages,
-            "max_tokens": int(body.get("max_tokens") or 2048),
+            "max_tokens": int(body.get("max_tokens") or _default_output_cap()),
             "stream": stream,
         }
         if system_text:

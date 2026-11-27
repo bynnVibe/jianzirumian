@@ -772,6 +772,12 @@ def _memory_system_messages(ctx: AssistantContext, query: str) -> List[dict]:
 
         # L1 用户指令（类比 CLAUDE.md User 层，与 chat 同源）
         msgs.extend(user_instructions.instruction_messages(user_id))
+        # 动态加载 · 常驻索引层（MEMORY.md 全量，与 chat 同源；画像卡之前注入）
+        from app.services import memory_store
+        index_text = memory_store.memory_index_text(user_id)
+        if index_text:
+            msgs.append({"role": "system",
+                         "content": f"【长期记忆索引（MEMORY.md 全量，供检索定位）】\n{index_text}"})
         # L2 用户画像卡（只读复用，新鲜度渲染同源 memory_line）
         profile = memory_service.profile_memories(user_id)
         if profile:

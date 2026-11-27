@@ -332,7 +332,7 @@ class AgentMemoryService:
         try:
             from app.core.llm import LLMFactory
 
-            llm = LLMFactory.create_for_role("memory_extract")
+            llm = LLMFactory.create_for_role("memory_agent")
         except Exception as e:
             logger.warning("助手域记忆抽取初始化失败（忽略）: %s", e)
             return [], "llm_unavailable"

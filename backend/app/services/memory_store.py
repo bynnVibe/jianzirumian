@@ -15,11 +15,16 @@
     users/<uid>/local/<kb_id>.md 用户在某知识库下的私人笔记（仅本人）
 
 二、动态记忆 · 短期（会话记忆，一个完整 session，users/<uid>/sessions/<sid>/）：
-  transcript.md   完整对话流水账：最原始、未经压缩、只读镜像（chat_messages 为源，
-                  随会话持久化全量重生成，从头到尾不丢细节，压缩链不改写此文件）
+  transcript.jsonl 完整对话流水账（参考 Claude Code JSONL 黑匣子格式）：每行一个
+                  JSON 事件（用户消息/助手回复/工具调用与结果，含 uuid/parentUuid/
+                  sessionId/时间戳与权限元数据），只读、追加式（append-only），
+                  chat_messages + tool_calls 为源，压缩链不改写此文件；
+                  旧 transcript.md 保留为归档不再更新
   summary.md      Session Memory 摘要笔记：后台 forked agent 从 transcript 提取
                   （首次上下文 ≥10K token 创建；后续 +5K token/工具调用/对话暂停更新）
-  task_state.md   Task State 任务进度：从 transcript/agent_process 投影（plan/steps/状态）
+  task_state      Task State 任务进度：会话进行期间是内存对象（_TASK_STATES 投影，
+                  驱动进度跟踪与任务推进），会话过程结束（对话暂停/删除会话/进程
+                  关闭）才渲染落盘 task_state.md
   Compaction      上下文达窗口 80% 以上时用 summary.md 替换历史（session_summary 实现）
 
 三、动态记忆 · 长期（跨会话沉淀，users/<uid>/）：
@@ -32,6 +37,7 @@
 记忆根目录与 SQLite 文件同址（backend/data/memory），隔离测试/内存 DB 不落盘，
 避免测试污染真实数据。
 """
+import json
 import logging
 import os
 import re
@@ -332,6 +338,43 @@ def rebuild_index(user_id: str, conn=None):
     _write(base / "users" / user_id / "MEMORY.md", "\n".join(lines) + "\n")
 
 
+# 动态加载 · 索引层注入预算（对齐 Claude Code：MEMORY.md 前 200 行全量注入）
+MEMORY_INDEX_MAX_LINES = 200
+MEMORY_INDEX_MAX_CHARS = 2000
+
+
+def memory_index_text(user_id: str) -> str:
+    """动态加载 · 常驻索引层：MEMORY.md 索引全量注入文本（受行数/字符预算约束）。
+
+    读 users/<uid>/MEMORY.md（旧布局 auto/MEMORY.md 兜底）；超 200 行或字符预算
+    时截断并附尾注（提示索引被截断），保证索引层不挤占历史/检索预算。
+    游客/空用户返回空串。
+    """
+    if not user_id or user_id in ("guest", "system", "-"):
+        return ""
+    base = base_dir()
+    if base is None:
+        return ""
+    text = _read(base / "users" / user_id / "MEMORY.md")
+    if not text:
+        text = _read(base / "users" / user_id / "auto" / "MEMORY.md")
+    text = (text or "").strip()
+    if not text:
+        return ""
+    lines = text.splitlines()
+    truncated = False
+    if len(lines) > MEMORY_INDEX_MAX_LINES:
+        lines = lines[:MEMORY_INDEX_MAX_LINES]
+        truncated = True
+    text = "\n".join(lines)
+    if len(text) > MEMORY_INDEX_MAX_CHARS:
+        text = text[:MEMORY_INDEX_MAX_CHARS].rstrip()
+        truncated = True
+    if truncated:
+        text += "\n…（索引过长已截断，完整索引见「我的记忆 → 记忆文件」）"
+    return text
+
+
 def auto_files(user_id: str) -> dict:
     """长期记忆文件视图（UI/观测）：MEMORY.md 索引正文 + topic 文件清单（含元数据）。
 
@@ -458,8 +501,8 @@ def write_session_memory(session_id: str, user_id: str, summary: str, meta: dict
     if p is None:
         return
     lines = ["---", f"session_id: {session_id}", f"user_id: {user_id}"]
-    for k in ("covered_until_message_id", "compact_kind", "edited_by_user", "updated_at",
-              "before_tokens", "ctx_tokens_at_update"):
+    for k in ("covered_until_message_id", "boundary_message_id", "compact_kind",
+              "edited_by_user", "updated_at", "before_tokens", "ctx_tokens_at_update"):
         lines.append(f"{k}: {meta.get(k, '')}")
     lines.append("---")
     _write(p, "\n".join(lines) + "\n" + (summary or "").strip() + "\n")
@@ -491,45 +534,114 @@ def read_session_memory(session_id: str) -> Optional[dict]:
 
 def transcript_path(session_id: str, user_id: str = "") -> Optional[Path]:
     d = session_dir(session_id, user_id)
-    return d / "transcript.md" if d else None
+    return d / "transcript.jsonl" if d else None
+
+
+def _transcript_events(session) -> list:
+    """把会话投影为 Claude Code 风格 JSONL 事件序列（确定性 uuid，供追加去重）。
+
+    用户/助手消息各一行（type=user/assistant，message.content 为纯文本）；
+    工具调用从 tool_calls 表投影为 tool_use/tool_result 两行（content 为块数组，
+    含工具名/入参/出参/状态），挂在其所属助手消息之后。meta 携带权限与轮次元数据。
+    """
+    sid = getattr(session, "session_id", "")
+    msgs = getattr(session, "messages", []) or []
+    tool_rows = []
+    try:
+        tool_rows = db.query(
+            "SELECT id, message_id, tool_name, input_json, output_json, status, created_at"
+            " FROM tool_calls WHERE session_id = ? ORDER BY created_at", (sid,))
+    except Exception:
+        tool_rows = []
+    tools_by_msg: dict = {}
+    for r in tool_rows:
+        tools_by_msg.setdefault(r.get("message_id") or "", []).append(r)
+    orphan_tools = tools_by_msg.pop("", [])
+
+    def _tool_events(r: dict) -> list:
+        tid = r.get("id") or ""
+        ts = r.get("created_at") or datetime.now().isoformat()
+        name = r.get("tool_name") or "tool"
+        try:
+            tool_input = json.loads(r.get("input_json") or "{}")
+        except (ValueError, TypeError):
+            tool_input = {"raw": r.get("input_json") or ""}
+        return [
+            {"type": "tool_use", "uuid": f"{sid}:tool:{tid}:use", "sessionId": sid,
+             "timestamp": ts,
+             "message": {"role": "assistant", "content": [
+                 {"type": "tool_use", "id": tid, "name": name, "input": tool_input}]},
+             "meta": {"tool_name": name}},
+            {"type": "tool_result", "uuid": f"{sid}:tool:{tid}:result", "sessionId": sid,
+             "timestamp": ts,
+             "message": {"role": "user", "content": [
+                 {"type": "tool_result", "tool_use_id": tid,
+                  "content": r.get("output_json") or ""}]},
+             "meta": {"tool_name": name, "status": r.get("status") or ""}},
+        ]
+
+    events = []
+    for seq, m in enumerate(msgs):
+        role = getattr(m, "role", "") or "assistant"
+        events.append({
+            "type": role if role in ("user", "assistant") else "assistant",
+            "uuid": f"{sid}:msg:{seq}", "sessionId": sid,
+            "timestamp": getattr(m, "created_at", "") or datetime.now().isoformat(),
+            "message": {"role": role, "content": getattr(m, "content", "") or ""},
+            "meta": {"seq": seq,
+                     "use_knowledge": bool(getattr(m, "use_knowledge", False)),
+                     "use_search": bool(getattr(m, "use_search", False)),
+                     "is_realtime": bool(getattr(m, "is_realtime", False)),
+                     "interrupted": bool(getattr(m, "interrupted", False))},
+        })
+        for r in tools_by_msg.get(getattr(m, "message_id", "") or "", []):
+            events.extend(_tool_events(r))
+    for r in orphan_tools:
+        events.extend(_tool_events(r))
+    return events
 
 
 def write_transcript(session) -> bool:
-    """短期记忆 · transcript：整个 session 的完整对话流水账（只读原始记录镜像）。
+    """短期记忆 · transcript：Claude Code 风格 JSONL 只读黑匣子（append-only）。
 
-    与现有完整会话记录模块融合：chat_messages 为源，每次会话持久化后全量重生成，
-    未经任何压缩、不丢细节；压缩链（micro/auto/Compaction）只改读时投影与摘要，
-    不改写此文件。返回是否落盘。
+    每行一个 JSON 事件（用户消息/助手回复/工具调用与结果 + uuid/parentUuid/
+    sessionId/时间戳/权限元数据）。chat_messages + tool_calls 为源：读已有行
+    uuid 集合，只追加缺失事件（不重写、不压缩、不丢细节）；文件缺失时从 DB
+    全量重建一次。压缩链（micro/auto/Compaction）只改读时投影与摘要，不改写
+    此文件。旧 transcript.md 保留为归档不再更新。返回是否落盘。
     """
     sid = getattr(session, "session_id", "")
     uid = getattr(session, "user_id", "") or "legacy"
     p = transcript_path(sid, uid)
     if p is None or not sid:
         return False
-    msgs = getattr(session, "messages", []) or []
-    lines = ["---", f"session_id: {sid}", f"user_id: {uid}",
-             f"title: {getattr(session, 'title', '')}",
-             f"created_at: {getattr(session, 'created_at', '')}",
-             f"updated_at: {getattr(session, 'updated_at', '')}",
-             f"message_count: {len(msgs)}", "---", "",
-             "# Transcript（完整对话流水账 · 只读原始记录）", ""]
-    for seq, m in enumerate(msgs):
-        role = "用户" if getattr(m, "role", "") == "user" else "助手"
-        flags = []
-        if getattr(m, "use_knowledge", False):
-            flags.append("知识库")
-        if getattr(m, "use_search", False):
-            flags.append("联网")
-        if getattr(m, "is_realtime", False):
-            flags.append("实时")
-        if getattr(m, "interrupted", False):
-            flags.append("已中断")
-        flag_text = f"（{'/'.join(flags)}）" if flags else ""
-        lines.append(f"## [{seq}] {role}{flag_text}")
-        lines.append("")
-        lines.append((getattr(m, "content", "") or "").rstrip())
-        lines.append("")
-    _write(p, "\n".join(lines) + "\n")
+    seen, last_uuid = set(), ""
+    if p.is_file():
+        for line in _read(p).splitlines():
+            try:
+                rec = json.loads(line)
+            except (ValueError, TypeError):
+                continue
+            u = rec.get("uuid")
+            if u:
+                seen.add(u)
+                last_uuid = u
+    new_lines = []
+    for ev in _transcript_events(session):
+        if ev["uuid"] in seen:
+            last_uuid = ev["uuid"]
+            continue
+        ev["parentUuid"] = last_uuid or None
+        last_uuid = ev["uuid"]
+        new_lines.append(json.dumps(ev, ensure_ascii=False))
+    if new_lines:
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            with p.open("a", encoding="utf-8") as f:
+                f.write("\n".join(new_lines) + "\n")
+        except OSError as e:
+            logger.warning("transcript.jsonl 追加失败（忽略，DB 镜像仍生效）: %s %s", p, e)
+            return False
     return True
 
 
@@ -538,32 +650,64 @@ def task_state_path(session_id: str, user_id: str = "") -> Optional[Path]:
     return d / "task_state.md" if d else None
 
 
-def write_task_state(session, assistant_msg=None) -> bool:
-    """短期记忆 · Task State：从 transcript/agent_process 投影任务进度。
+# Task State 会话期内存对象：sid → 进度投影。会话进行时驱动进度跟踪与任务推进，
+# 不落盘；会话过程结束（对话暂停/删除会话/进程关闭）由 flush 渲染为 task_state.md。
+_TASK_STATES: dict = {}
 
-    与现有任务进度模块整合：Agent plan/steps/status/intent/error 快照 + 会话目标
-    （首条用户消息）投影为 markdown，每轮收尾刷新；无 Agent 过程的快路径轮
-    仅记录目标与最近 activity。返回是否落盘。
-    """
+
+def _project_task_state(session, assistant_msg=None) -> dict:
+    """从 transcript/agent_process 投影任务进度为内存对象（plan/steps/状态/意图/错误）。"""
     sid = getattr(session, "session_id", "")
     uid = getattr(session, "user_id", "") or "legacy"
-    p = task_state_path(sid, uid)
-    if p is None or not sid:
-        return False
     msgs = getattr(session, "messages", []) or []
     goal = next((m.content for m in msgs if getattr(m, "role", "") == "user"), "")
     proc = getattr(assistant_msg, "agent_process", None) or {}
-    lines = ["---", f"session_id: {sid}", f"user_id: {uid}",
-             f"updated_at: {datetime.now().isoformat()}", "---", "",
-             "# Task State（任务进度投影）", "",
-             f"- 会话目标：{(goal or '').strip()[:120] or '无'}",
-             f"- 消息总数：{len(msgs)}"]
-    status = proc.get("status") or ""
-    if status:
-        lines.append(f"- 本轮状态：{status}")
-    if proc.get("intent"):
-        lines.append(f"- 意图识别：{proc['intent']}")
-    plan = proc.get("plan") or []
+    return {
+        "session_id": sid, "user_id": uid,
+        "goal": (goal or "").strip()[:120],
+        "message_count": len(msgs),
+        "status": proc.get("status") or "",
+        "intent": proc.get("intent") or "",
+        "plan": proc.get("plan") or [],
+        "steps": proc.get("steps") or [],
+        "error": str(proc.get("error") or "")[:300],
+        "updated_at": datetime.now().isoformat(),
+    }
+
+
+def update_task_state(session, assistant_msg=None) -> Optional[dict]:
+    """短期记忆 · Task State：会话进行期间更新内存对象（进度跟踪/任务驱动），不落盘。
+
+    与现有任务进度模块整合：Agent plan/steps/status/intent/error 快照 + 会话目标
+    （首条用户消息）投影为内存对象，每轮收尾刷新；无 Agent 过程的快路径轮
+    仅记录目标与消息数。会话过程结束时由 flush_task_state 落盘。
+    """
+    sid = getattr(session, "session_id", "")
+    if not sid:
+        return None
+    state = _project_task_state(session, assistant_msg)
+    _TASK_STATES[sid] = state
+    return state
+
+
+def get_task_state(session_id: str) -> Optional[dict]:
+    """读取会话期 Task State 内存对象（未落盘阶段供进度展示/任务驱动）。"""
+    return _TASK_STATES.get(session_id)
+
+
+def render_task_state(state: dict) -> str:
+    """把 Task State 内存对象渲染为 markdown（会话结束落盘格式）。"""
+    lines = ["---", f"session_id: {state.get('session_id', '')}",
+             f"user_id: {state.get('user_id', '')}",
+             f"updated_at: {state.get('updated_at', '')}", "---", "",
+             "# Task State（任务进度投影 · 会话结束记录）", "",
+             f"- 会话目标：{state.get('goal') or '无'}",
+             f"- 消息总数：{state.get('message_count', 0)}"]
+    if state.get("status"):
+        lines.append(f"- 本轮状态：{state['status']}")
+    if state.get("intent"):
+        lines.append(f"- 意图识别：{state['intent']}")
+    plan = state.get("plan") or []
     if plan:
         lines.extend(["", "## 计划步骤"])
         for i, step in enumerate(plan):
@@ -573,7 +717,7 @@ def write_task_state(session, assistant_msg=None) -> bool:
                 lines.append(f"{i + 1}. {text}" + (f"（{st}）" if st else ""))
             else:
                 lines.append(f"{i + 1}. {step}")
-    steps = proc.get("steps") or []
+    steps = state.get("steps") or []
     if steps:
         lines.extend(["", "## 执行轨迹（最近 10 步）"])
         for step in steps[-10:]:
@@ -583,36 +727,102 @@ def write_task_state(session, assistant_msg=None) -> bool:
                 lines.append(f"- {name}" + (f"：{st}" if st else ""))
             else:
                 lines.append(f"- {step}")
-    if proc.get("error"):
-        lines.extend(["", f"## 错误与卡点\n{str(proc['error'])[:300]}"])
-    _write(p, "\n".join(lines) + "\n")
+    if state.get("error"):
+        lines.extend(["", f"## 错误与卡点\n{state['error']}"])
+    return "\n".join(lines) + "\n"
+
+
+def flush_task_state(session_id: str, user_id: str = "") -> bool:
+    """会话过程结束：把内存 Task State 渲染落盘 task_state.md 并释放内存对象。"""
+    state = _TASK_STATES.pop(session_id, None)
+    if state is None:
+        return False
+    p = task_state_path(session_id, user_id or state.get("user_id", ""))
+    if p is None:
+        return False
+    _write(p, render_task_state(state))
     return True
 
 
+def flush_all_task_states():
+    """进程关闭钩子：所有在途会话的 Task State 内存对象统一落盘。"""
+    for sid in list(_TASK_STATES.keys()):
+        try:
+            flush_task_state(sid)
+        except Exception as e:
+            logger.warning("Task State 关闭落盘失败（忽略）: %s %s", sid, e)
+
+
+def write_task_state(session, assistant_msg=None) -> bool:
+    """兼容入口：更新内存对象并立即落盘（测试/外部直写用；主链路走 update + flush）。"""
+    state = update_task_state(session, assistant_msg)
+    if state is None:
+        return False
+    return flush_task_state(state["session_id"], state["user_id"])
+
+
 def session_files_overview(session_id: str, user_id: str = "") -> dict:
-    """短期记忆四模块文件视图（UI/观测）：transcript/summary/task_state 字符量与存在性。"""
+    """短期记忆文件视图（UI/观测）：transcript.jsonl/summary/task_state 字符量与存在性。
+
+    task_state 会话进行中为内存对象（尚未落盘）：以内存投影渲染计量并标 in_memory；
+    旧 transcript.md 仅在 JSONL 缺失时作为归档展示。
+    """
     d = session_dir(session_id, user_id)
     out = {"session_id": session_id, "dir": "", "modules": []}
     if d is None:
         return out
     base = base_dir()
     out["dir"] = str(d.relative_to(base)) if base else ""
-    for name, label in (("transcript.md", "Transcript 流水账"),
-                        ("summary.md", "Session Memory 摘要"),
+    jsonl_text = _read(d / "transcript.jsonl")
+    out["modules"].append({"file": "transcript.jsonl", "label": "Transcript 流水账（JSONL）",
+                           "exists": bool(jsonl_text), "chars": len(jsonl_text)})
+    if not jsonl_text:
+        legacy = _read(d / "transcript.md")
+        if legacy:
+            out["modules"].append({"file": "transcript.md", "label": "Transcript 流水账（旧版归档）",
+                                   "exists": True, "chars": len(legacy)})
+    for name, label in (("summary.md", "Session Memory 摘要"),
                         ("task_state.md", "Task State 任务进度")):
         text = _read(d / name)
-        out["modules"].append({"file": name, "label": label,
-                               "exists": bool(text), "chars": len(text)})
+        mod = {"file": name, "label": label, "exists": bool(text), "chars": len(text)}
+        if name == "task_state.md" and not text:
+            state = get_task_state(session_id)
+            if state:
+                rendered = render_task_state(state)
+                mod.update({"exists": True, "chars": len(rendered), "in_memory": True})
+        out["modules"].append(mod)
+    # L0 工具结果落盘目录（Tool-Result Offloading）：列出文件数与总字符量，供回读定位
+    tr = d / "tool-results"
+    if tr.is_dir():
+        files = sorted(p for p in tr.glob("*.txt") if p.is_file())
+        out["modules"].append({
+            "file": "tool-results/", "label": "工具结果落盘（可回读）",
+            "exists": bool(files), "chars": sum(len(_read(p)) for p in files),
+            "files": [{"name": p.name, "chars": p.stat().st_size} for p in files],
+        })
     return out
 
 
 def read_session_files(session_id: str, user_id: str = "") -> dict:
-    """短期记忆三文件正文（本人会话限定，属主校验由调用方负责）。"""
+    """短期记忆文件正文（本人会话限定，属主校验由调用方负责）。
+
+    task_state.md 缺失但内存对象在途时返回内存投影渲染（会话进行中视图）；
+    transcript.jsonl 缺失时回退旧 transcript.md 归档。
+    """
     d = session_dir(session_id, user_id)
     if d is None:
         return {}
-    return {name: _read(d / name)
-            for name in ("transcript.md", "summary.md", "task_state.md")}
+    out = {name: _read(d / name)
+           for name in ("transcript.jsonl", "summary.md", "task_state.md")}
+    if not out["transcript.jsonl"]:
+        legacy = _read(d / "transcript.md")
+        if legacy:
+            out["transcript.md"] = legacy
+    if not out["task_state.md"]:
+        state = get_task_state(session_id)
+        if state:
+            out["task_state.md"] = render_task_state(state)
+    return out
 
 
 # ---- AutoDream 并发锁（.consolidate-lock PID 文件锁，防多进程重复整合）----
@@ -798,7 +1008,7 @@ def migrate_taxonomy_v3(conn):
        索引上移至 users/<uid>/MEMORY.md；
     3) 原 Managed 层自定义内容并入 static/PROJECT.md（种子内容已融合，不重复追加）；
     4) 会话摘要 sessions/<sid>/SESSION.md → users/<uid>/sessions/<sid>/summary.md；
-    5) 存量会话按 chat_messages 补写 transcript.md（只读流水账镜像）。
+    5) 存量会话按 chat_messages 补写 transcript.jsonl（JSONL 只读黑匣子镜像）。
     """
     try:
         row = conn.execute("PRAGMA database_list").fetchone()
@@ -896,30 +1106,25 @@ def migrate_taxonomy_v3(conn):
                     old_md.unlink()
                 except OSError:
                     pass
-        # 5) 存量会话 transcript 补写（chat_messages 为源，全量不压缩）
+        # 5) 存量会话 transcript 补写（chat_messages 为源，JSONL 黑匣子，全量不压缩）
+        from types import SimpleNamespace
         s_cols = [c[0] for c in conn.execute("SELECT * FROM chat_sessions LIMIT 0").description]
         m_cols = [c[0] for c in conn.execute("SELECT * FROM chat_messages LIMIT 0").description]
         for s_row in conn.execute("SELECT * FROM chat_sessions"):
             s = dict(zip(s_cols, s_row))
             sid, uid = s.get("session_id"), s.get("user_id") or "legacy"
-            tp = base / "users" / uid / "sessions" / sid / "transcript.md"
+            tp = base / "users" / uid / "sessions" / sid / "transcript.jsonl"
             if tp.is_file():
                 continue
             m_rows = [dict(zip(m_cols, r)) for r in conn.execute(
                 "SELECT * FROM chat_messages WHERE session_id=? ORDER BY seq", (sid,))]
-            lines = ["---", f"session_id: {sid}", f"user_id: {uid}",
-                     f"title: {s.get('title', '')}",
-                     f"created_at: {s.get('created_at', '')}",
-                     f"updated_at: {s.get('updated_at', '')}",
-                     f"message_count: {len(m_rows)}", "---", "",
-                     "# Transcript（完整对话流水账 · 只读原始记录）", ""]
-            for seq, m in enumerate(m_rows):
-                role = "用户" if m.get("role") == "user" else "助手"
-                lines.append(f"## [{seq}] {role}")
-                lines.append("")
-                lines.append((m.get("content") or "").rstrip())
-                lines.append("")
-            _write(tp, "\n".join(lines) + "\n")
+            msgs = [SimpleNamespace(
+                role=m.get("role") or "assistant", content=m.get("content") or "",
+                created_at=m.get("created_at") or "", message_id=m.get("message_id") or "",
+                use_knowledge=bool(m.get("use_knowledge")), use_search=bool(m.get("use_search")),
+                is_realtime=bool(m.get("is_realtime")), interrupted=bool(m.get("interrupted")))
+                for m in m_rows]
+            write_transcript(SimpleNamespace(session_id=sid, user_id=uid, messages=msgs))
         logger.info("记忆静态/动态双轨迁移完成（memory_taxonomy_v3）: %s", base)
     except Exception as e:
         logger.warning("记忆双轨迁移失败（忽略，DB 镜像仍生效）: %s", e)

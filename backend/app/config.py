@@ -123,13 +123,17 @@ class Settings:
     SKILLS_DIR: str = os.getenv("SKILLS_DIR", str(BASE_DIR / "backend" / "skills"))
 
     # ---- 会话 ----
-    # 历史窗口：携带进 LLM 上下文的最近对话轮数（一轮=一问一答）。
-    # 收紧窗口是 Token 优化的 P0 手段之一，过大会显著放大每次请求的 prompt token。
+    # 历史窗口兼容参数：四层压缩改造后历史区按「连续窗口全量原文 + 压缩边界」装配，
+    # 该值仅作为 build_context_messages/get_history 的兼容入参，不再按轮数裁剪历史。
     SESSION_MAX_HISTORY: int = int(os.getenv("SESSION_MAX_HISTORY", "8"))
-    # 聊天页「上下文用量」展示口径：默认假定的模型上下文窗口大小（token），
-    # 用于缩略图/弹层的占用百分比计算；部署模型窗口不同可以环境变量覆盖。
-    CHAT_CONTEXT_WINDOW: int = int(os.getenv("CHAT_CONTEXT_WINDOW", "131072"))
+    # 聊天页「上下文用量」展示口径：会话级上下文窗口大小（token，名义值 128K=128000）。
+    # 一个会话 = 一个上下文窗口，四层压缩（日常约束/微压缩/系统压缩/兜底压缩）只作用
+    # 于本会话窗口；所有 Token 量纲以 K=1000 对齐。部署模型窗口不同可环境变量覆盖。
+    CHAT_CONTEXT_WINDOW: int = int(os.getenv("CHAT_CONTEXT_WINDOW", "128000"))
     CHAT_REQUEST_TIMEOUT: float = float(os.getenv("CHAT_REQUEST_TIMEOUT", "300"))
+    # ---- L0 日常约束 · 模型输出上限（Output Cap，对齐 Claude Code 每轮输出帽）----
+    # 主链路每轮模型输出上限（token）；压缩代理（memory_agent）显式用摘要输出预留值。
+    LLM_OUTPUT_CAP_TOKENS: int = int(os.getenv("LLM_OUTPUT_CAP_TOKENS", "4000"))
 
     # ---- 上下文预算（Token 优化 P0）----
     # 附件工具结果注入对话上下文的字符预算：单附件上限 + 全部附件总量上限，超限截断并标注。
@@ -139,39 +143,63 @@ class Settings:
     # 截图检索：图片 OCR 文本并入知识检索查询时的字符上限。
     # 检索查询过长会稀释向量/BM25 信号（完整原文仍注入对话上下文），故单独设更紧的预算。
     OCR_RETRIEVAL_CHARS: int = int(os.getenv("OCR_RETRIEVAL_CHARS", "300"))
-    # 历史消息中「较早」消息的逐条字符上限（最近 KEEP_RECENT_FULL 条不截断，保留完整语境）。
-    HISTORY_MSG_MAX_CHARS: int = int(os.getenv("HISTORY_MSG_MAX_CHARS", "800"))
-    # 历史窗口内保留完整不截断的最近消息条数。
-    KEEP_RECENT_FULL: int = int(os.getenv("KEEP_RECENT_FULL", "4"))
-    # 全文区助手长回答单条帽：最近 KEEP_RECENT_FULL 条内超过该字符数的助手回答
-    # 读时投影为头部摘录+原长尾注（用户消息不帽）；CJK≈1:1，1200 字≈1200 token。
-    FULL_ZONE_MAX_CHARS: int = int(os.getenv("FULL_ZONE_MAX_CHARS", "1200"))
-    # 会话摘要压缩触发阈值：消息条数或历史总字符数任一超过即触发（下调以更早压缩历史）。
-    SUMMARY_TRIGGER_MESSAGE_COUNT: int = int(os.getenv("SUMMARY_TRIGGER_MESSAGE_COUNT", "12"))
-    SUMMARY_TRIGGER_CHAR_COUNT: int = int(os.getenv("SUMMARY_TRIGGER_CHAR_COUNT", "6000"))
-    # ---- 记忆与上下文压缩治理（借鉴 Claude Code 设计）----
+    # 实时类助手答案入历史即衰减的字符上限（位置无关规则，四层压缩改造后保留）。
+    CLIP_OLD_CHARS: int = int(os.getenv("CLIP_OLD_CHARS", "200"))
+    # ---- 上下文四层压缩治理（对齐 Claude Code：日常约束→微压缩→系统压缩→兜底压缩）----
+    # 一个会话 = 一个上下文窗口（CHAT_CONTEXT_WINDOW，名义 128K）；以下阈值均由窗口推导。
     # 常驻「用户画像卡」注入字符预算（高重要度/偏好类记忆，每会话必载）。
     MEMORY_PROFILE_CHARS: int = int(os.getenv("MEMORY_PROFILE_CHARS", "300"))
-    # 记忆两层加载（画像卡 + 相关检索）合计注入字符预算。
+    # 记忆动态加载（画像卡 + 相关检索）合计注入字符预算。
     MEMORY_CTX_CHARS: int = int(os.getenv("MEMORY_CTX_CHARS", "600"))
-    # Session Memory 首次触发：上下文 token 估算达到该值立即创建 summary.md
-    # （对齐 Claude Code 10K 首次摘要口径；优先于条数/字符兜底阈值）。
+    # L0 工具结果落盘（Tool-Result Offloading）：单个结果超过该 token 数写盘，上下文只留预览+路径。
+    TOOL_RESULT_OFFLOAD_TOKENS: int = int(os.getenv("TOOL_RESULT_OFFLOAD_TOKENS", "8000"))
+    # L0 单轮工具结果合计预算：超出时从最大的结果开始落盘。
+    TOOL_RESULT_TURN_BUDGET_TOKENS: int = int(os.getenv("TOOL_RESULT_TURN_BUDGET_TOKENS", "16000"))
+    # L0 落盘结果在上下文保留的预览字节数（约 2KB，UTF-8 安全按行截断）。
+    TOOL_RESULT_PREVIEW_BYTES: int = int(os.getenv("TOOL_RESULT_PREVIEW_BYTES", "2048"))
+    # L0 回读工具单次分页返回的 token 上限。
+    TOOL_RESULT_READ_PAGE_TOKENS: int = int(os.getenv("TOOL_RESULT_READ_PAGE_TOKENS", "4000"))
+    # L1 微压缩（Micro Compaction）：窗口内工具结果合计达到该值进入微压缩。
+    MICRO_COMPACT_TRIGGER_TOKENS: int = int(os.getenv("MICRO_COMPACT_TRIGGER_TOKENS", "20000"))
+    # L1 可释放量低于该值则放弃微压缩（收益不抵前缀缓存失效代价）。
+    MICRO_COMPACT_MIN_FREE_TOKENS: int = int(os.getenv("MICRO_COMPACT_MIN_FREE_TOKENS", "10000"))
+    # L1 保护集：最近 N 个工具结果不清除（连同本轮结果）。
+    MICRO_COMPACT_KEEP_RECENT: int = int(os.getenv("MICRO_COMPACT_KEEP_RECENT", "3"))
+    # L2a Session Memory 首次触发：会话水位第一次达到该值创建 summary.md（对齐 CC 10K）。
     CONTEXT_COMPACT_TRIGGER_TOKENS: int = int(os.getenv("CONTEXT_COMPACT_TRIGGER_TOKENS", "10000"))
-    # Session Memory 后续更新触发：距上次摘要时点的上下文增长达到该 token 数即更新。
+    # L2a Session Memory 后续更新：距上次摘要水位增长 ≥ 该值（与工具调用数、自然断点三者同时满足）。
     SESSION_MEMORY_GROWTH_TOKENS: int = int(os.getenv("SESSION_MEMORY_GROWTH_TOKENS", "5000"))
-    # Session Memory 对话暂停触发：会话空闲超过该分钟数视为暂停，后台更新摘要笔记。
+    # L2a Session Memory 后续更新：期间工具调用累计 ≥ 该次数。
+    SESSION_MEMORY_TOOL_CALLS: int = int(os.getenv("SESSION_MEMORY_TOOL_CALLS", "3"))
+    # L2a Session Memory 摘要正文 token 上限（九段式结构化摘要）。
+    SESSION_MEMORY_MAX_TOKENS: int = int(os.getenv("SESSION_MEMORY_MAX_TOKENS", "2000"))
+    # L2b Auto Compaction：预留给摘要输出的 token（压缩代理输出上限）。
+    COMPACT_SUMMARY_RESERVE_TOKENS: int = int(os.getenv("COMPACT_SUMMARY_RESERVE_TOKENS", "20000"))
+    # L2b Auto Compaction：输入安全缓冲 token。触发阈值 = 窗口 − 摘要预留 − 输入缓冲（128K→95K）。
+    COMPACT_INPUT_BUFFER_TOKENS: int = int(os.getenv("COMPACT_INPUT_BUFFER_TOKENS", "13000"))
+    # L2b 压缩后保留区下限 token（至少保留这么多原文）。
+    AUTO_COMPACT_KEEP_MIN_TOKENS: int = int(os.getenv("AUTO_COMPACT_KEEP_MIN_TOKENS", "10000"))
+    # L2b 压缩后至少保留最近 N 轮对话（一轮=一问一答，含其工具配对）。
+    AUTO_COMPACT_KEEP_RECENT_TURNS: int = int(os.getenv("AUTO_COMPACT_KEEP_RECENT_TURNS", "3"))
+    # L2b 保留区上限 token（命中零调用路径要求覆盖点之后全部消息可放入该上限）。
+    AUTO_COMPACT_KEEP_MAX_TOKENS: int = int(os.getenv("AUTO_COMPACT_KEEP_MAX_TOKENS", "40000"))
+    # L3 兜底压缩（Full Compaction）：上下文占窗口比例达到该值（93%）强制兜底。
+    FULL_COMPACT_WINDOW_RATIO: float = float(os.getenv("FULL_COMPACT_WINDOW_RATIO", "0.93"))
+    # L2/L3 熔断阈值：Auto 连续失败达到该值升级为 Full（force 手动不受限）。
+    COMPACT_FAIL_STREAK_LIMIT: int = int(os.getenv("COMPACT_FAIL_STREAK_LIMIT", "3"))
+    # ---- 已退役配置（保留仅为兼容旧 .env，四层压缩改造后不再生效）----
+    # 对话暂停落盘 task_state 的空闲阈值（摘要触发语义已退役，落盘行为保留）。
     SESSION_MEMORY_PAUSE_MINUTES: float = float(os.getenv("SESSION_MEMORY_PAUSE_MINUTES", "10"))
-    # Compaction 硬触发：上下文占模型窗口比例达到该值（80%）时用 summary.md 替换历史。
     COMPACT_WINDOW_RATIO: float = float(os.getenv("COMPACT_WINDOW_RATIO", "0.8"))
-    # 微压缩冻结 clip：较早消息逐条字符上限（两档位置无关设计，历史前缀 append-only 稳定）。
-    # 800→400 减半：CJK 1:1 口径下 800 字≈800 token/条，多轮累积截断区偏大。
+    HISTORY_MSG_MAX_CHARS: int = int(os.getenv("HISTORY_MSG_MAX_CHARS", "800"))
+    KEEP_RECENT_FULL: int = int(os.getenv("KEEP_RECENT_FULL", "4"))
+    FULL_ZONE_MAX_CHARS: int = int(os.getenv("FULL_ZONE_MAX_CHARS", "1200"))
+    SUMMARY_TRIGGER_MESSAGE_COUNT: int = int(os.getenv("SUMMARY_TRIGGER_MESSAGE_COUNT", "12"))
+    SUMMARY_TRIGGER_CHAR_COUNT: int = int(os.getenv("SUMMARY_TRIGGER_CHAR_COUNT", "6000"))
     CLIP_MID_CHARS: int = int(os.getenv("CLIP_MID_CHARS", "400"))
-    # 已退役：原三档 clip 的更旧档深度压缩上限（保留配置项仅为兼容旧 .env，不再使用）。
-    CLIP_OLD_CHARS: int = int(os.getenv("CLIP_OLD_CHARS", "200"))
-    # 摘要批更新门控：距上次摘要覆盖点新增可摘要消息（不含最近保留区）≥ 该值才重算（前缀缓存友好）。
     SUMMARY_BATCH_MIN_MESSAGES: int = int(os.getenv("SUMMARY_BATCH_MIN_MESSAGES", "6"))
-    # 结构化摘要正文字符上限（五节 checklist 契约）。
     SUMMARY_MAX_CHARS: int = int(os.getenv("SUMMARY_MAX_CHARS", "400"))
+    MICRO_COMPACT_IDLE_MINUTES: float = float(os.getenv("MICRO_COMPACT_IDLE_MINUTES", "60"))
     # ---- 用户 Skill 配置（可管理的技能：chat 提示注入 / url_import 站点抓取策略）----
     # 单用户可创建的自定义 Skill 上限（内置 Skill 不计入）。
     MAX_SKILLS_PER_USER: int = int(os.getenv("MAX_SKILLS_PER_USER", "50"))

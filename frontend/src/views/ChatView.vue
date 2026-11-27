@@ -67,8 +67,11 @@
             :cache-info="msg.cache_info || {}"
             :can-refresh="canRefresh(msg, idx)"
             :busy="store.isGenerating"
+            :truncated="!!msg.truncated"
+            :output-cap="msg.output_cap || 4000"
             @refresh="refreshAnswer(idx)"
             @reask="handleReask"
+            @continue="store.sendMessage('继续')"
             @feedback="(fb) => handleFeedback(msg, fb)"
           >
             <template #process>
@@ -218,6 +221,7 @@ const phaseMessage = computed(() => {
     case 'fallback': return '当前模型不可用，已切换免费模型重试...'
     case 'citations_checked': return '已核对引用编号'
     case 'cache_hit': return '已核对上下文与证据，复用有效答案'
+    case 'compacting': return '上下文已达压缩阈值，正在压缩历史后继续作答…'
     default: return ''
   }
 })

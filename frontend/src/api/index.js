@@ -1349,7 +1349,7 @@ export function updateStaticMemoryLayer(layer, content) {
   return api.put(`/me/memory/static/${layer}`, { content })
 }
 
-/** 短期记忆文件视图（本人会话限定）：transcript/summary/task_state 概览与正文 */
+/** 短期记忆文件视图（本人会话限定）：transcript.jsonl/summary/task_state 概览与正文 */
 export function getMySessionMemoryFiles(sessionId) {
   return api.get('/me/memory/session-files', { params: { session_id: sessionId } })
 }

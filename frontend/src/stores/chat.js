@@ -267,6 +267,9 @@ export const useChatStore = defineStore('chat', () => {
           role: 'assistant',
           content: currentResponse.value,
           interrupted: !streamDoneReceived,
+          // L0 输出帽：本轮达到单轮上限被截断，气泡下提供「继续」入口
+          truncated: !!pendingDone.value?.truncated,
+          output_cap: pendingDone.value?.output_cap || 0,
           sources: sources.value,
           search_results: searchResults.value,
           tool_sources: toolSources.value,

@@ -34,6 +34,19 @@
             :key="seg.segment"
             :style="{ width: barWidth(seg), background: segColor(seg.segment) }"
           />
+          <b
+            v-for="tick in ticks"
+            :key="tick.key"
+            class="ctx-tick"
+            :class="tick.key"
+            :style="{ left: tick.left }"
+            :title="tick.title"
+          />
+        </div>
+        <div class="ctx-pop-ticks">
+          <span v-for="tick in ticks" :key="tick.key" class="ctx-tick-label" :class="tick.key">
+            <i />{{ tick.label }}
+          </span>
         </div>
         <div class="ctx-pop-legend">
           <div v-for="seg in usage.segments" :key="seg.segment" class="ctx-legend-row">
@@ -42,7 +55,29 @@
             <span class="ctx-legend-pct">{{ windowPct(seg) }}</span>
           </div>
         </div>
-        <div class="ctx-pop-foot">{{ Math.round(usage.context_window / 1000) }}K 上下文 · 默认窗口</div>
+        <div class="ctx-pop-meta">
+          <div class="ctx-meta-row">
+            <span>历史工具结果</span>
+            <strong>{{ fmtK(usage.tool_result_tokens || 0) }}</strong>
+          </div>
+          <div class="ctx-meta-row">
+            <span>距自动压缩（{{ fmtK(thresholds.auto) }}）</span>
+            <strong>{{ headroomText }}</strong>
+          </div>
+          <div class="ctx-meta-row">
+            <span>单轮输出上限</span>
+            <strong>{{ fmtK(thresholds.output_cap) }}</strong>
+          </div>
+          <div v-if="usage.last_compact" class="ctx-meta-row">
+            <span>最近压缩</span>
+            <strong>{{ compactLabel(usage.last_compact) }}</strong>
+          </div>
+          <div v-if="usage.auto_fail_streak" class="ctx-meta-row warn">
+            <span>自动压缩连续失败</span>
+            <strong>{{ usage.auto_fail_streak }} 次（≥3 次升级兜底压缩）</strong>
+          </div>
+        </div>
+        <div class="ctx-pop-foot">{{ fmtK(usage.context_window) }} 上下文窗口 · 四层压缩</div>
       </template>
       <p v-else class="ctx-pop-empty">暂无上下文记录<br>发起一次问答后即可看到各段占用占比</p>
     </div>
@@ -56,6 +91,10 @@
 // 与管理员/个人面板同口径：按最终生成调用真实 prompt_tokens 分摊）。
 import { ref, computed, watch, onBeforeUnmount } from 'vue'
 import { getSessionContextUsage } from '@/api'
+import {
+  DEFAULT_THRESHOLDS, mergeThresholds, buildTicks, compactLabel,
+  headroomText as headroomTextOf, fmtTok as fmtK,
+} from '@/utils/contextTokens'
 
 const props = defineProps({
   sessionId: { type: String, default: '' },
@@ -73,14 +112,25 @@ const SEG_COLORS = {
   knowledge: '#10b981',
   search: '#ec4899',
   tool: '#14b8a6',
+  tool_results: '#0ea5e9',
 }
 
-const EMPTY = { has_data: false, segments: [], total_tokens: 0, context_window: 131072, used_pct: 0 }
+// 四层压缩阈值刻度（K=1000，与后端 context_window.thresholds() 同口径，见 utils/contextTokens）
+const EMPTY = {
+  has_data: false, segments: [], total_tokens: 0, context_window: 128000, used_pct: 0,
+  thresholds: { ...DEFAULT_THRESHOLDS }, tool_result_tokens: 0,
+  last_compact: '', auto_fail_streak: 0, headroom_to_auto: 95000,
+}
 
 const usage = ref({ ...EMPTY })
 const open = ref(false)
 
 const CIRC = 2 * Math.PI * 14
+
+const thresholds = computed(() => mergeThresholds(usage.value.thresholds))
+// 三条刻度：微压缩进入 20K / 自动压缩 95K / 兜底压缩 119K（按窗口比例定位）
+const ticks = computed(() => buildTicks(usage.value.context_window, usage.value.thresholds))
+const headroomText = computed(() => headroomTextOf(usage.value.headroom_to_auto))
 
 const pctText = computed(() => (usage.value.has_data ? `${usage.value.used_pct}%` : '--'))
 const dashArray = computed(() => {
@@ -100,9 +150,6 @@ const badgeTitle = computed(() =>
 
 function segColor(segment) {
   return SEG_COLORS[segment] || '#9ca3af'
-}
-function fmtK(t) {
-  return t >= 1000 ? `${(t / 1000).toFixed(1)}K` : `${t}`
 }
 function windowPct(seg) {
   const w = usage.value.context_window || 1
@@ -234,9 +281,67 @@ defineExpose({ refresh: load })
   border-radius: 4px;
   background: #ede6dc;
   overflow: hidden;
-  margin-bottom: 12px;
+  margin-bottom: 6px;
+  position: relative;
 }
 .ctx-pop-bar i { display: block; height: 100%; }
+.ctx-tick {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  margin-left: -1px;
+  border-radius: 1px;
+  background: #6b7280;
+  opacity: 0.85;
+}
+.ctx-tick.auto { background: #b4620a; }
+.ctx-tick.full { background: #c0392b; }
+.ctx-pop-ticks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  margin-bottom: 10px;
+}
+.ctx-tick-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--color-text-secondary);
+}
+.ctx-tick-label i {
+  width: 2px;
+  height: 9px;
+  border-radius: 1px;
+  background: #6b7280;
+  display: block;
+}
+.ctx-tick-label.auto i { background: #b4620a; }
+.ctx-tick-label.full i { background: #c0392b; }
+.ctx-pop-meta {
+  border-top: 1px dashed var(--color-border);
+  padding-top: 9px;
+  margin-bottom: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.ctx-meta-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+.ctx-meta-row strong {
+  color: var(--color-text);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.ctx-meta-row.warn strong { color: #c0392b; }
 .ctx-pop-legend {
   display: flex;
   flex-direction: column;

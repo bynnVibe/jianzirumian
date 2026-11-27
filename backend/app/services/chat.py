@@ -39,6 +39,7 @@ from app.services.skill import skill_service
 from app.services import module_recall
 from app.services.records import upload_records
 from app.services import session_summary
+from app.services import context_window as cw
 from app.services import tool_orchestrator
 from app.services.tools import router as tool_router
 from app.services.web_search import web_search
@@ -66,6 +67,36 @@ _SKILL_DISTILL_RE = re.compile(
 
 class _SkipGapCheck(Exception):
     """内部控制流：本轮豁免能力缺口检测（非错误，不记日志）。"""
+
+
+# 上游「上下文超长」错误特征（OpenAI / Anthropic / Ollama / 网关透传文案）：
+# 命中即触发 L3 被动兜底压缩后重试一次，而不是直接把错误抛给用户。
+_CONTEXT_OVERFLOW_RE = re.compile(
+    r"context[_ ]?(length|window|size)|maximum context|context length exceeded"
+    r"|prompt is too long|too many tokens|reduce the length|input length"
+    r"|上下文(超长|已满|超出)|超出(模型)?(上下文|窗口)",
+    re.I,
+)
+
+
+def _is_context_overflow(err) -> bool:
+    """判定异常是否为上游上下文超长（L3 Full Compaction 的被动触发条件）。"""
+    return bool(_CONTEXT_OVERFLOW_RE.search(str(err or "")))
+
+
+# 回读意图（L0 落盘结果的可达性）：命中且本会话有落盘/已清除结果时，
+# 复杂度下限提升为 ReAct，使模型能调用 read_tool_result 取回完整正文。
+_READ_INTENT_RE = re.compile(r"全文|完整|详细|逐条|原文|全部(内容|正文)|展开|继续(读|看|输出|列出)")
+
+
+def _offload_read_intent(query: str, session_id: str) -> bool:
+    """本会话存在落盘/已清除的工具结果，且本轮问题命中回读意图。"""
+    if not _READ_INTENT_RE.search(query or ""):
+        return False
+    try:
+        return bool(cw.recent_offload_receipts(session_id, 1))
+    except Exception:
+        return False
 
 
 def _touches_personal_kb(sources) -> bool:
@@ -255,14 +286,15 @@ class ChatService:
         except Exception as e:
             logger.error("保存会话失败: %s", e)
             raise
-        # 短期记忆镜像（与完整会话记录融合）：transcript 只读流水账全量重生成，
-        # task_state 投影任务进度；压缩链不改写 transcript。落盘失败不阻断主链路。
+        # 短期记忆镜像（与完整会话记录融合）：transcript.jsonl 只读黑匣子追加式记录，
+        # task_state 会话期内更新内存对象（进度跟踪/任务驱动），会话过程结束才落盘；
+        # 压缩链不改写 transcript。落盘失败不阻断主链路。
         try:
             from app.services import memory_store
             memory_store.write_transcript(session)
             last_assistant = next(
                 (m for m in reversed(session.messages) if getattr(m, "role", "") == "assistant"), None)
-            memory_store.write_task_state(session, last_assistant)
+            memory_store.update_task_state(session, last_assistant)
         except Exception as e:
             logger.warning("短期记忆镜像落盘失败（忽略）: %s", e)
 
@@ -331,6 +363,12 @@ class ChatService:
             if session.user_id and session.user_id != user_id:
                 return False
             self.cancel_generation(session_id)
+            # 会话过程结束（删除）：在途 Task State 内存对象落盘 task_state.md 留档
+            try:
+                from app.services import memory_store
+                memory_store.flush_task_state(session_id, session.user_id)
+            except Exception:
+                pass
             from app.services.chat_actions import invalidate_session
             invalidate_session(session_id)
             from app.services import personal_tools, skill_drafts
@@ -700,14 +738,20 @@ class ChatService:
                 llm_messages.append({"role": "system", "content": _layer_msg["content"]})
                 obs.note_segment(_layer_msg["segment"], _layer_msg["content"])
 
-        # 记忆两层加载（借鉴 Claude Code：常驻索引层 + 按需检索层），合计受字符预算约束
+        # 记忆加载（对齐 Claude Code：静态加载 + 动态加载）。静态加载=上方静态三层全量；
+        # 动态加载=MEMORY.md 索引全量注入（常驻索引层）+ findRelevantMemories 按需检索
+        # + 常驻画像卡，检索层合计受字符预算约束。
+        # 动态加载 · 常驻索引层：MEMORY.md 索引全量（≤200 行/字符预算），属用户稳定上下文，
+        # 注入位置在 U 区历史之后（见下方），并并入 profile_hash 参与语义缓存门禁。
+        index_text = memory_store.memory_index_text(user_id)
+        obs.note_segment("memory_index", index_text)
         memory_text = ""
         profile_memories = memory_service.profile_memories(user_id)
         profile_text = "\n".join(memory_line(m) for m in profile_memories)
         obs.note_segment("memory_profile", profile_text)
         # L5 会话级去重：本会话已注入过的相关记忆不再重复注入（compact 后自然重置）
         surfaced_ids = memory_service.surfaced_ids(session.session_id)
-        relevant_memories = memory_service.retrieve_relevant(
+        relevant_memories = memory_service.find_relevant_memories(
             user_id, effective_query,
             exclude_ids=[m["id"] for m in profile_memories] + list(surfaced_ids),
         )
@@ -766,7 +810,7 @@ class ChatService:
             try:
                 probe_hit = await _probe_sc.probe(
                     user_id, effective_query,
-                    profile_hash=cache_policy.digest(profile_text),
+                    profile_hash=cache_policy.digest(index_text + "\n" + profile_text),
                     skills_hash=cache_policy.digest(skills_text + "\n" + instruction_text),
                     search_query=search_query)
             except Exception as probe_err:
@@ -798,14 +842,25 @@ class ChatService:
             memory_chars=len(memory_text),
         )
 
+        # 会话窗口水位：本轮起始沿用上一轮真实 prompt_tokens，使压缩判据与 span 的
+        # ctx_tokens 从第一个环节起就有值（首个 LLM span 后由 record_llm 自动推进）
+        obs.note_context_tokens(cw.get_state(session.session_id).get("ctx_tokens") or 0)
+        # L2b/L3 权威检查点：装配历史前按会话水位决定是否替换历史（压缩后再装配）
+        compact_ev = await self._compact_checkpoint(session, user_id)
+        if compact_ev:
+            yield compact_ev
         history_messages = session_summary.build_context_messages(
             session, settings.SESSION_MAX_HISTORY
         )
         # 历史消息不含本次刚保存的用户提问（最后一条）
         history_ctx = history_messages[:-1] if history_messages else []
+        # 历史区在 llm_messages 中的起点与长度：L3 被动触发（上游超长）后按此区间原地替换
+        hist_start, hist_len = len(llm_messages), len(history_ctx)
         llm_messages.extend(history_ctx)
         obs.note_segment("history", session_summary.history_segment_text(history_ctx))
-        # U 区：画像卡在追加式历史之后、工具/相关记忆之前——画像被重写只失效尾部小段
+        # U 区：索引层（MEMORY.md 全量）→ 画像卡，在追加式历史之后、工具/相关记忆之前——
+        # 索引/画像被重写只失效尾部小段，不污染头部+历史大前缀（前缀缓存整改 P0-2）
+        llm_messages.extend(chat_agent._index_messages(index_text))
         llm_messages.extend(chat_agent._profile_messages(profile_text))
 
         if runtime_skill["context"]:
@@ -841,11 +896,26 @@ class ChatService:
                 yield chat_agent.sse("error", {"code": "tool_selection_unavailable", "stage": "tool_selection", "message": "个人工具匹配失败或 Skill 依赖已变更，未执行该工作流。请核对工具启用状态与模型配置后重试。"})
                 return
 
+        # L0 回读可达性：已选定个人工具时补入 read_tool_result，使原生链路能取回落盘原文
+        if selected_tools and cw.recent_offload_receipts(session.session_id, 1):
+            from app.services.tools import base as tools_base
+            reader = tools_base.get_tool("read_tool_result")
+            if reader is not None and all(
+                    t["function"]["name"] != "read_tool_result" for t in selected_tools):
+                selected_tools = list(selected_tools) + [reader.to_function_schema()]
+
         # 3.5 复杂度分流：simple→fast（下方现有流水线不变），moderate→ReAct，complex→Plan&Execute。
-        # 带附件工具结果时强制 fast（附件为专用流程，Agent 不处理工具上下文）。
-        if not tool_context_text and not force_refresh and not selected_tools and not runtime_skill.get("identity") and not resume_checkpoint_id:
+        # 带附件工具结果时强制 fast（附件为专用流程，Agent 不处理工具上下文）；
+        # 例外：本轮命中回读意图且会话内有落盘结果时放开该限制，保证能取回完整正文。
+        read_intent = _offload_read_intent(query, session.session_id)
+        if (not tool_context_text or read_intent) and not force_refresh and not selected_tools and not runtime_skill.get("identity") and not resume_checkpoint_id:
             complexity = await classify_complexity(query, history_ctx)
             mode = complexity.get("mode", "fast")
+            if read_intent and mode == "fast":
+                mode = "react"
+                obs.record_step("offload_read_route",
+                                "命中回读意图且会话内有落盘工具结果，复杂度下限提升为 ReAct",
+                                fail_trace=False)
             # 沉淀个人 Skill 诉求：强制 ReAct（快路径无工具，无法检索材料/写入技能配置）
             skill_distill = bool(_SKILL_DISTILL_RE.search(query or ""))
             if skill_distill and mode == "fast":
@@ -875,6 +945,7 @@ class ChatService:
                         use_knowledge=use_knowledge, use_search=use_search,
                         skip_search_prompt=skip_search_prompt, history_ctx=history_ctx,
                         memory_profile=profile_text, memory_relevant=relevant_text,
+                        memory_index=index_text,
                         system_prompt=self._build_system_prompt() + ([{"role": "system", "content":
                             skills_text + "\n" + runtime_skill["context"]}] if skills_text or runtime_skill["context"] else []),
                         result=agent_result,
@@ -994,6 +1065,10 @@ class ChatService:
                 )
                 yield f"data: {self._json_event('status', {'phase': 'retrieval_reused', 'reused': True, 'message': f'已复用上一轮知识检索结果（{len(sources)} 份来源），本轮不重复检索', 'sources': sources})}\n\n"
                 if kb_has_content:
+                    # L0：复用快照同样入账（与上一轮相同片段 → 引用替换，不重复载入）
+                    context_text = self._ledger_fastpath(
+                        session, user_id, "search_knowledge", effective_query, context_text,
+                        sources, message_id=user_msg.message_id)
                     obs.note_segment("knowledge", context_text)
             else:
                 retrieve_task = asyncio.create_task(
@@ -1069,8 +1144,6 @@ class ChatService:
 
                 kb_has_content = bool(context_text.strip())
                 if kb_has_content:
-                    # segment 级 token 度量：知识上下文段（含重检后的最终上下文）
-                    obs.note_segment("knowledge", context_text)
                     # 发出检索完成信号
                     yield f"data: {self._json_event('status', {'phase': 'retrieved', 'message': f'检索到 {len(sources)} 份相关知识文档', 'sources': sources})}\n\n"
                     # 检索快照写入：供下一轮（如开启联网后重发）直接复用，不重复检索
@@ -1081,6 +1154,14 @@ class ChatService:
                                 "query": (search_query or effective_query)[:120],
                                 "summary": f"检索到 {len(results)} 条相关片段"}],
                     )
+                    # L0：知识上下文入账（片段级去重 + 超大落盘），来源编号保留；
+                    # 快照存原文，入账只影响本轮载入与往轮历史渲染
+                    context_text = self._ledger_fastpath(
+                        session, user_id, "search_knowledge", effective_query, context_text,
+                        sources, message_id=user_msg.message_id)
+                    cw.add_tool_calls(session.session_id, user_id, 1)
+                    # segment 级 token 度量：知识上下文段（含重检后的最终上下文）
+                    obs.note_segment("knowledge", context_text)
             # KB 无命中的提示词构造延后到搜索结果已知后统一决策（避免过早注入「知识库未收录」）
 
         # 等待联网搜索结果
@@ -1097,6 +1178,11 @@ class ChatService:
                 )
 
                 if search_context:
+                    # L0：联网上下文入账（按 URL 片段级去重 + 超大落盘），来源编号保留
+                    search_context = self._ledger_fastpath(
+                        session, user_id, "web_search", effective_query, search_context,
+                        message_id=user_msg.message_id)
+                    cw.add_tool_calls(session.session_id, user_id, 1)
                     # segment 级 token 度量：联网搜索上下文段
                     obs.note_segment("search", search_context)
                     search_results = [r.to_dict() for r in web_results]
@@ -1183,7 +1269,7 @@ class ChatService:
                     user_id=user_id, query=effective_query, messages=llm_messages, model=llm.model,
                     decision=cache_decision, sources=sources, revision=cache_revision,
                     use_knowledge=use_knowledge, use_search=use_search,
-                    profile_hash=cache_policy.digest(profile_text),
+                    profile_hash=cache_policy.digest(index_text + "\n" + profile_text),
                     skills_hash=cache_policy.digest(skills_text + "\n" + instruction_text),
                     search_query=search_query)
             except Exception:
@@ -1192,6 +1278,8 @@ class ChatService:
             obs.record_step("cache_write_policy", f"{cache_decision['kind']} {cache_decision['reason']}", fail_trace=False)
 
         # 7. 流式 LLM 生成
+        # L1 微压缩：主生成调用前清理可重现的旧工具结果（零调用，配对不变）
+        chat_agent._micro_before_call(session.session_id, user_id)
         yield f"data: {self._json_event('status', {'phase': 'generating', 'message': '正在生成回答...'})}\n\n"
 
         logger.info("开始 LLM 生成: 路由=网关业务路由(chat_answer), history_messages=%d",
@@ -1212,6 +1300,40 @@ class ChatService:
             raise
         except Exception as e:
             llm_error = e
+        # L3 被动触发：上游报「上下文超长」→ Full Compaction 后重建历史区并重试一次。
+        # 仍超窗则终止本次请求（提示新开对话），不静默截断。
+        if llm_error is not None and _is_context_overflow(llm_error):
+            obs.record_step("context_overflow", str(llm_error)[:200], status="error",
+                            error=str(llm_error)[:200], fail_trace=False)
+            stats = None
+            try:
+                stats = await session_summary.full_compact(session, reason="upstream_overflow")
+            except Exception as ce:
+                logger.warning("上游超长后兜底压缩失败: %s", ce)
+            if stats:
+                new_hist = session_summary.build_context_messages(session, settings.SESSION_MAX_HISTORY)
+                new_ctx = new_hist[:-1] if new_hist else []
+                llm_messages[hist_start:hist_start + hist_len] = new_ctx
+                hist_len = len(new_ctx)
+                history_ctx = new_ctx
+                # 压缩改写了 prompt，旧缓存写侧合同失效（避免按旧 prompt 落缓存）
+                llm.extra_body.pop("_gw_cache_contract", None)
+                if not self._fit_window(llm_messages, hist_start + hist_len):
+                    llm_error = RuntimeError("上下文已满，请新开对话")
+                else:
+                    yield f"data: {self._json_event('status', {'phase': 'compacting', 'message': '上下文超出模型窗口，已兜底压缩，正在重试…', 'compact_kind': stats.get('compact_kind')})}\n\n"
+                    full_response, llm_error = "", None
+                    t_gen = time.monotonic()
+                    try:
+                        async with aclosing(llm.chat(llm_messages, stream=True)) as stream:
+                            async for chunk in stream:
+                                full_response += chunk
+                                yield f"data: {self._json_event('token', {'content': chunk})}\n\n"
+                    except (asyncio.CancelledError, GeneratorExit):
+                        obs.record_llm("answer", llm_messages, full_response, t0=t_gen, status="cancelled")
+                        raise
+                    except Exception as e:
+                        llm_error = e
         # 注：旧 OpenRouter 免费模型降级已移除——网关代理在多上游间自动故障切换，
         # 全部上游失败时错误直接下传（日志含路由规则/模型/上游链路）
 
@@ -1223,6 +1345,8 @@ class ChatService:
         )
         # segment 级 token 度量：按最终生成调用的真实 prompt_tokens 分摊落库（与成本口径同源）
         obs.flush_segments(llm_messages, answer_pt)
+        # 会话窗口水位校准：主生成调用的完整 prompt token 即本会话上下文水位（四层压缩判据）
+        self._note_context_watermark(session, user_id, answer_pt)
 
         if llm_error is not None:
             error_msg = str(llm_error)
@@ -1231,7 +1355,11 @@ class ChatService:
 
             # 判读具体错误类型，给出用户可理解的提示
             low_msg = error_msg.lower()
-            if "openrouter" in low_msg or "rate limit" in low_msg or "rate-limited" in low_msg or "free-models" in low_msg:
+            if "上下文已满" in error_msg:
+                hint = ("上下文已满，请新开对话。\n\n"
+                        "本会话已执行兜底压缩（仅保留最近一轮与结构化摘要），仍超出模型窗口。\n"
+                        "建议：新建对话继续，或在原对话中用 /compact 指定侧重点后重试。")
+            elif "openrouter" in low_msg or "rate limit" in low_msg or "rate-limited" in low_msg or "free-models" in low_msg:
                 hint = ("当前模型被限流（上游免费额度暂时用完），网关已尝试全部候选上游仍失败。\n\n"
                         "解决方式：\n"
                         "1. 稍后重试（限流按分钟/每日重置）\n"
@@ -1381,6 +1509,10 @@ class ChatService:
             'user_message_id': user_msg.message_id,
             'message': assistant_msg.to_dict(),
         }
+        # L0 输出帽：达到单轮上限被截断时下发标记，前端提供「继续」入口
+        if getattr(llm, "truncated", False):
+            done_data['truncated'] = True
+            done_data['output_cap'] = int(getattr(settings, "LLM_OUTPUT_CAP_TOKENS", 4000))
         yield f"data: {self._json_event('done', done_data)}\n\n"
 
     async def _rewrite_intent(self, retrieval_query, llm_provider, ocr_excerpt, user_id=""):
@@ -1706,17 +1838,22 @@ class ChatService:
     async def _post_turn_background(self, session, user_msg, assistant_msg, llm_provider):
         """在当前请求总预算内完成摘要与记忆；普通错误降级，取消继续传播。
 
-        每轮 query loop 完整结束后后台执行：Session Memory 摘要（事件触发含
-        本轮工具调用）→ extractMemories（整轮 transcript 扫描）→ AutoDream 调度。
+        每轮 query loop 完整结束后后台执行：L2a Session Memory（首次 10K / 后续
+        「增长≥5K 且 工具≥3 且 自然断点」）→ L2b Auto Compaction 预判（≥95K）→
+        extractMemories（整轮 transcript 扫描）→ AutoDream 调度。
         """
         try:
             module_recall.flush_turn_modules(assistant_msg.message_id)
         except Exception as e:
             logger.warning("模块召回度量落库异常: %s", e)
-        # 本轮 transcript（extractMemories 扫描范围）与工具调用标记（摘要事件触发）
+        # 本轮 transcript（extractMemories 扫描范围）与工具调用标记
         proc = getattr(assistant_msg, "agent_process", None) or {}
         turn_tools = proc.get("tools") or []
         turn_has_tools = bool(turn_tools)
+        # 自然断点：本轮正常结束（非中断、非错误、无待处理 HITL 卡片）
+        natural_break = (not getattr(assistant_msg, "interrupted", False)
+                         and (proc.get("status") or "ok") == "ok"
+                         and not proc.get("hitl"))
         turn_lines = [f"用户：{getattr(user_msg, 'content', '')}",
                       f"助手：{getattr(assistant_msg, 'content', '')}"]
         if turn_tools:
@@ -1725,9 +1862,18 @@ class ChatService:
             turn_lines.append("工具调用：" + "、".join(names))
         turn_transcript = "\n".join(turn_lines)
         try:
-            await session_summary.maybe_summarize(session, llm_provider, turn_has_tools=turn_has_tools)
+            await session_summary.maybe_summarize(
+                session, llm_provider, turn_has_tools=turn_has_tools, natural_break=natural_break)
         except Exception as e:
             logger.warning("会话摘要任务异常: %s", e)
+        # L2b/L3 回合结束预判：水位达标时提前压缩，下一轮直接命中摘要（零调用）
+        try:
+            if session_summary.should_full_compact(session):
+                await session_summary.full_compact(session, reason="post_turn")
+            else:
+                await session_summary.auto_compact(session)
+        except Exception as e:
+            logger.warning("回合后上下文压缩异常: %s", e)
         try:
             # 记忆抽取窗口：近 3 条用户消息（含本轮），供跨轮纠正/覆盖判断；
             # 整轮 transcript 一并传入，后台抽取代理扫描本轮全部对话内容。
@@ -1746,6 +1892,87 @@ class ChatService:
             await memory_service.consolidate_if_due(session.user_id)
         except Exception as e:
             logger.warning("记忆巩固任务异常: %s", e)
+
+    def _ledger_fastpath(self, session, user_id: str, tool_name: str, query: str,
+                         context_text: str, sources=None, message_id: str = "") -> str:
+        """L0：快路径知识/联网上下文入账（片段级去重 + 超大落盘），返回渲染后文本。
+
+        来源编号行（[来源 N] / [网络来源 N]）保留，只替换正文，引用核对不受影响。
+        """
+        if not (context_text or "").strip():
+            return context_text
+        blocks = []
+        for i, part in enumerate(context_text.split("\n---\n")):
+            header, _, body = part.partition("\n")
+            key = ""
+            if sources and i < len(sources):
+                s = sources[i] or {}
+                key = (s.get("document_id") or s.get("source_image")
+                       or s.get("wiki_title") or s.get("url") or "")
+            if not key and tool_name == "web_search":
+                m = re.search(r"链接:\s*(\S+)", body)
+                key = m.group(1) if m else ""
+            blocks.append((key or header[:120], header, body))
+        boundary = (session_summary.get_summary(session.session_id) or {}).get("boundary_message_id") or ""
+        return cw.record_fastpath_context(
+            session.session_id, user_id, tool_name, query, blocks,
+            message_id=message_id,
+            boundary_message_id=boundary)
+
+    def _note_context_watermark(self, session, user_id: str, prompt_tokens: int):
+        """记录会话窗口水位（主生成调用真实 prompt_tokens）+ 窗口内工具结果合计。"""
+        try:
+            boundary = (session_summary.get_summary(session.session_id) or {}).get("boundary_message_id") or ""
+            cw.set_watermark(session.session_id, user_id, int(prompt_tokens or 0),
+                             cw.live_tool_result_tokens(session.session_id, boundary))
+        except Exception as e:
+            logger.debug("上下文水位记录失败（忽略）: %s", e)
+
+    async def _compact_checkpoint(self, session, user_id: str):
+        """L2b/L3 权威检查点：主链路调用前按水位决定是否需要替换历史/兜底压缩。"""
+        try:
+            if session_summary.should_full_compact(session):
+                stats = await session_summary.full_compact(session, reason="pre_call")
+            else:
+                stats = await session_summary.auto_compact(session)
+            if stats:
+                return chat_agent.sse("status", {
+                    "phase": "compacting",
+                    "message": f"上下文已压缩（{stats.get('compact_kind')}），继续作答…",
+                    "compact_kind": stats.get("compact_kind"),
+                })
+        except Exception as e:
+            logger.warning("调用前上下文压缩检查失败（忽略）: %s", e)
+        return None
+
+    def _fit_window(self, llm_messages: List[dict], protected: int) -> bool:
+        """L3 收尾：把尾部上下文（知识/联网/附件/相关记忆）按剩余预算裁剪，保证不超窗。
+
+        protected 之前的系统头与历史区不动，最后一条用户提问不动；只裁剪其间的
+        system 段（按占用从大到小），裁剪后仍超窗返回 False（由调用方终止本次请求）。
+        """
+        budget = max(0, cw.context_window() - cw.output_cap())
+        total = sum(obs.estimate_tokens(m.get("content") or "") for m in llm_messages)
+        if total <= budget:
+            return True
+        tail = [i for i in range(protected, max(protected, len(llm_messages) - 1))
+                if llm_messages[i].get("role") == "system"]
+        for i in sorted(tail, key=lambda k: obs.estimate_tokens(
+                llm_messages[k].get("content") or ""), reverse=True):
+            if total <= budget:
+                break
+            text = llm_messages[i].get("content") or ""
+            tok = obs.estimate_tokens(text)
+            if tok <= 0:
+                continue
+            marker = "\n…（上下文已满，本段已裁剪）"
+            # 裁剪标注自身也占 token：先扣标注与安全余量，避免「刚好裁到预算」反而超窗
+            overhead = obs.estimate_tokens(marker) + 8
+            keep = max(0, int(len(text) * max(0.0, (tok - (total - budget) - overhead) / tok)))
+            clipped = text[:keep] + (marker if keep < len(text) else "")
+            llm_messages[i] = {**llm_messages[i], "content": clipped}
+            total -= tok - obs.estimate_tokens(clipped)
+        return total <= budget
 
     def _build_system_prompt(self) -> List[dict]:
         """构建系统提示词。

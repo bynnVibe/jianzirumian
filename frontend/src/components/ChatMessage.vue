@@ -243,6 +243,11 @@
         </div>
       </div>
       <slot name="cards" />
+      <!-- L0 输出帽：单轮回答达到上限被截断，提供「继续」入口（以「继续」发起下一轮） -->
+      <div v-if="role === 'assistant' && content && truncated" class="msg-truncated">
+        <span>已达单轮输出上限 {{ capText }}，回答可能未完整。</span>
+        <button class="btn-action" :disabled="busy" @click="emit('continue')">继续</button>
+      </div>
       <div v-if="role === 'assistant' && content" class="message-actions">
         <button class="btn-action" @click="copyText">{{ copied ? '已复制' : '复制回答' }}</button>
         <button v-if="canRefresh" class="btn-action" :disabled="busy" @click="emit('refresh')" title="重新读取数据，不自动重放有副作用的操作">重新获取最新答案</button>
@@ -364,6 +369,7 @@
 import { ref, reactive, computed, watch, nextTick } from 'vue'
 import MarkdownIt from 'markdown-it'
 import { groupKnowledgeSources, configureChatMarkdown } from '@/utils/chatStream'
+import { fmtTok } from '@/utils/contextTokens'
 import { createBookmark, getImageUrl as buildImageUrl, getAttachmentFileUrl } from '@/api'
 import UrlSource from '@/components/UrlSource.vue'
 
@@ -382,9 +388,13 @@ const props = defineProps({
   cacheInfo: { type: Object, default: () => ({}) },
   canRefresh: { type: Boolean, default: false },
   busy: { type: Boolean, default: false },
+  truncated: { type: Boolean, default: false },
+  outputCap: { type: Number, default: 4000 },
 })
 
-const emit = defineEmits(['reask', 'feedback', 'refresh'])
+const emit = defineEmits(['reask', 'feedback', 'refresh', 'continue'])
+// 输出帽量纲与上下文窗口一致：K = 1000，整千不带小数
+const capText = computed(() => fmtTok(props.outputCap || 4000))
 const toolSourcesOpen = ref(false)
 function safeExternalUrl(value) {
   try {
@@ -1066,6 +1076,21 @@ button.source-header {
 .score-low {
   background: #f8d7da;
   color: #721c24;
+}
+
+/* ---- 输出帽截断提示（L0 日常约束） ---- */
+.msg-truncated {
+  margin-top: 12px;
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  border: 1px solid #f0d9a8;
+  border-radius: 8px;
+  background: #fdf6e6;
+  color: #8a6420;
+  font-size: 12.5px;
 }
 
 /* ---- 消息操作按钮 ---- */

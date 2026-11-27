@@ -31,6 +31,7 @@ FINAL_ANSWER_RULES = (
     "默认使用中文，保留必要的专业术语；可用简洁的段落、列表和来源引用。"
     "涉及对比、清单、打分、参数、方案评估等结构化数据时，优先用 Markdown 表格输出"
     "（表头行 + |---| 分隔行 + 数据行），以便前端渲染为表格。"
+    "单轮回答不超过约 4K Token，超长内容分段输出，必要时提示用户回复「继续」。"
 )
 
 
@@ -160,7 +161,17 @@ class BaseLLM(ABC):
 
     supports_tools = False
 
-    async def chat_tools(self, messages, tools, *, tool_choice="auto", stream=True):
+    def __init__(self):
+        # L0 输出帽：本次调用的结束原因（length 表示达到单轮输出上限，前端可「继续」）
+        self.finish_reason = ""
+
+    @property
+    def truncated(self) -> bool:
+        """本次输出是否因达到输出上限被截断（上游 finish_reason/done_reason=length）。"""
+        return (self.finish_reason or "") == "length"
+
+    async def chat_tools(self, messages, tools, *, tool_choice="auto", stream=True,
+                         max_tokens: Optional[int] = None):
         raise ToolModelUnavailable("当前模型未配置原生 Function Calling 能力")
         yield  # 保持异步生成器协议
 
@@ -169,15 +180,29 @@ class BaseLLM(ABC):
         self,
         messages: List[dict],
         stream: bool = False,
+        *,
+        max_tokens: Optional[int] = None,
     ) -> AsyncGenerator[str, None]:
-        """聊天接口，支持流式输出"""
+        """聊天接口，支持流式输出。
+
+        max_tokens=None 时取 L0 输出帽（LLM_OUTPUT_CAP_TOKENS，默认 4K）；
+        显式传 0 表示不限制（压缩代理等需要长输出的场景传摘要预留值）。
+        """
         ...
+
+
+def _output_cap(max_tokens: Optional[int]) -> int:
+    """L0 输出帽：None→配置默认；0→不限制；正整数→按调用方指定（如摘要预留 20K）。"""
+    if max_tokens is None:
+        return int(getattr(settings, "LLM_OUTPUT_CAP_TOKENS", 4000))
+    return max(0, int(max_tokens))
 
 
 class OllamaLLM(BaseLLM):
     """Ollama 本地模型"""
 
     def __init__(self, base_url: str = None, model: str = None):
+        super().__init__()
         self.base_url = (base_url or settings.OLLAMA_BASE_URL).rstrip("/")
         self.model = model or settings.OLLAMA_MODEL
 
@@ -185,13 +210,20 @@ class OllamaLLM(BaseLLM):
         self,
         messages: List[dict],
         stream: bool = False,
+        *,
+        max_tokens: Optional[int] = None,
     ) -> AsyncGenerator[str, None]:
         url = f"{self.base_url}/api/chat"
+        cap = _output_cap(max_tokens)
+        self.finish_reason = ""
         payload = {
             "model": self.model,
             "messages": messages,
             "stream": stream,
         }
+        if cap > 0:
+            # Ollama 的输出上限在 options.num_predict（非 OpenAI 的 max_tokens）
+            payload["options"] = {"num_predict": cap}
 
         client = _get_ollama_client()
         if stream:
@@ -213,6 +245,7 @@ class OllamaLLM(BaseLLM):
                             yield content
                         if chunk.get("done"):
                             finished = True
+                            self.finish_reason = chunk.get("done_reason") or ""
                             # 可观测性：Ollama 结束块携带真实 token 用量
                             agent_obs.note_usage(
                                 chunk.get("prompt_eval_count"), chunk.get("eval_count")
@@ -228,6 +261,7 @@ class OllamaLLM(BaseLLM):
             resp = await client.post(url, json=payload)
             resp.raise_for_status()
             data = resp.json()
+            self.finish_reason = data.get("done_reason") or ""
             agent_obs.note_usage(data.get("prompt_eval_count"), data.get("eval_count"))
             yield AnswerTextFilter().feed(data.get("message", {}).get("content", "") or "")
 
@@ -237,6 +271,7 @@ class OpenAICompatibleLLM(BaseLLM):
 
     def __init__(self, base_url: str = None, api_key: str = None, model: str = None,
                  extra_body: dict = None, supports_tools: bool = False):
+        super().__init__()
         self.supports_tools = supports_tools
         self.base_url = (base_url or settings.API_BASE_URL).rstrip("/")
         self.api_key = api_key or settings.API_KEY
@@ -249,9 +284,15 @@ class OpenAICompatibleLLM(BaseLLM):
         self,
         messages: List[dict],
         stream: bool = False,
+        *,
+        max_tokens: Optional[int] = None,
     ) -> AsyncGenerator[str, None]:
         client = _get_openai_client(self.base_url, self.api_key, self.model)
         self.cache_info = {}
+        self.finish_reason = ""
+        cap = _output_cap(max_tokens)
+        # L0 输出帽：0 表示不限制，不下发 max_tokens 字段
+        cap_kw = {"max_tokens": cap} if cap > 0 else {}
 
         if stream:
             finished = False
@@ -266,6 +307,7 @@ class OpenAICompatibleLLM(BaseLLM):
                     messages=messages,
                     stream=True,
                     extra_body=self.extra_body,
+                    **cap_kw,
                 ))
                 async for chunk in response:
                     _report_openai_usage(chunk)
@@ -277,6 +319,7 @@ class OpenAICompatibleLLM(BaseLLM):
                     choice = chunk.choices[0]
                     if choice.finish_reason:
                         finished = True
+                        self.finish_reason = choice.finish_reason
                     delta = choice.delta
                     if getattr(delta, "reasoning_content", None):
                         reasoning_chunks += 1
@@ -310,14 +353,17 @@ class OpenAICompatibleLLM(BaseLLM):
                 messages=messages,
                 stream=False,
                 extra_body=self.extra_body,
+                **cap_kw,
             ))
             _report_openai_usage(response)
             self.cache_info = (getattr(response, "model_extra", None) or {}).get("_gw_cache_info") or {}
             if not response.choices:
                 raise ValueError("LLM 返回无 choices")
+            self.finish_reason = response.choices[0].finish_reason or ""
             yield AnswerTextFilter().feed(response.choices[0].message.content or "")
 
-    async def chat_tools(self, messages, tools, *, tool_choice="auto", stream=True):
+    async def chat_tools(self, messages, tools, *, tool_choice="auto", stream=True,
+                         max_tokens: Optional[int] = None):
         """结构化通道，与既有文本 chat 兼容；仅 done 事件携带可执行的完整调用。"""
         from app.core.json_schema import checked_schema
         if not self.supports_tools:
@@ -332,10 +378,14 @@ class OpenAICompatibleLLM(BaseLLM):
             names.add(fn["name"])
             checked_schema(fn.get("parameters", {}))
         self.cache_info = {}
+        self.finish_reason = ""
+        cap = _output_cap(max_tokens)
         extra = {k: v for k, v in (self.extra_body or {}).items() if not k.startswith("_gw_cache_")}
         client = _get_openai_client(self.base_url, self.api_key, self.model)
         payload = dict(model=self.model, messages=messages, tools=tools, tool_choice=tool_choice,
                        stream=stream, extra_body=extra or None)
+        if cap > 0:
+            payload["max_tokens"] = cap
         response = None
         accumulator, answer_filter = ToolCallAccumulator(), AnswerTextFilter()
         try:
@@ -368,6 +418,7 @@ class OpenAICompatibleLLM(BaseLLM):
                 content = answer_filter.feed(delta["content"])
                 if content:
                     yield {"type": "text", "text": content}
+            self.finish_reason = accumulator.finish_reason or ""
             yield {"type": "done", "tool_calls": accumulator.completed(),
                    "finish_reason": accumulator.finish_reason}
         finally:

@@ -109,6 +109,33 @@ def _apply_context_budget(summaries: List[str]) -> Tuple[List[str], bool]:
     return clipped, truncated
 
 
+def _ledger_summaries(session_id: str, user_id: str, message_id: str,
+                      entries: List[tuple]) -> Tuple[List[str], bool]:
+    """L0 日常约束：附件工具结果入账（结果级去重 + 超大落盘 + 2KB 预览 + 回读路径）。
+
+    entries: [(tool_name, args, full_text)]，与 summaries 一一对应。
+    返回 (渲染后文本列表, 是否发生落盘/去重)；账本不可用时退回既有字符预算截断。
+    """
+    try:
+        from app.services import context_window as cw
+    except Exception:
+        return _apply_context_budget([e[2] for e in entries])
+    out, offloaded = [], False
+    for tool_name, args, text in entries:
+        try:
+            row = cw.record_tool_result(session_id, user_id, tool_name, args, text or "",
+                                        message_id=message_id)
+            cw.add_tool_calls(session_id, user_id, 1)
+            out.append(cw.render_result(row))
+            if row.get("storage") == "offloaded" or row.get("state") == "dedup_ref":
+                offloaded = True
+        except Exception as e:
+            logger.warning("附件结果入账失败（降级为字符截断）: %s", e)
+            clipped, _ = _apply_context_budget([text or ""])
+            out.append(clipped[0])
+    return out, offloaded
+
+
 def _ocr_excerpt(records: List[dict], limit: int) -> str:
     """从附件工具记录中提取图片 OCR 文本，压缩为检索用摘录。
 
@@ -167,6 +194,8 @@ async def handle_attachments(
         action = "ocr"
     summaries: List[str] = []
     records: List[dict] = []
+    # L0 账本入账条目（与 summaries 一一对应）：工具名 / 入参 / 完整原文
+    entries: List[tuple] = []
 
     for att in attachments:
         filename = att.get("filename", "")
@@ -174,6 +203,7 @@ async def handle_attachments(
         kind = att.get("kind") or detect_kind(filename)
         if not kind or not file_path:
             summaries.append(f"附件「{filename}」的类型暂不支持处理。")
+            entries.append(("attachment", {"filename": filename}, summaries[-1]))
             continue
 
         ctx = tools_base.ToolContext(
@@ -186,6 +216,7 @@ async def handle_attachments(
             proposal = propose({**att, "kind": kind}, user_id, session_id, message_id)
             records.append({"confirmation": proposal})
             summaries.append(f"附件「{filename}」仅生成入库提案，尚未执行。请用户在确认卡片核对目标并点击确认；不得声称已入库。")
+            entries.append(("image_upload", {"filename": filename, "action": action}, summaries[-1]))
             continue
         elif action == "summarize":
             tool = knowledge_summarize_tool
@@ -208,6 +239,9 @@ async def handle_attachments(
             status = "error"
 
         summaries.append(result.summary)
+        # 入账用完整原文（识别/解析结果），上下文只渲染预览/引用，原文落盘可回读
+        entries.append((tool.name, {"filename": filename, "kind": kind, "action": action},
+                        result.text or result.summary or ""))
         record = {
             "tool_name": tool.name,
             "filename": filename,
@@ -226,9 +260,10 @@ async def handle_attachments(
             {**record, "text": _clip_budget(record["text"], 500)}, status,
         )
 
-    clipped, truncated = _apply_context_budget(summaries)
+    # L0：附件结果统一入账（去重/落盘/预览），替代丢弃式字符截断；原文可经 read_tool_result 回读
+    clipped, truncated = _ledger_summaries(session_id, user_id, message_id, entries)
     header = "【聊天框附件处理结果】"
     if truncated:
-        header += "（部分内容因上下文预算被截断，如需完整内容请单独查看附件）"
+        header += "（超大/重复内容已落盘或引用替换，如需完整正文可用 read_tool_result 按 id 回读）"
     context_text = header + "\n" + "\n\n".join(clipped) if clipped else ""
     return context_text, records

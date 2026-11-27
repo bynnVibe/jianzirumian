@@ -288,10 +288,13 @@ body {
 .span-kind-badge.llm { background: #e8ecf7; color: #3b4f8f; }
 .span-kind-badge.tool { background: #e3f0e6; color: #2e6b3e; }
 .span-kind-badge.step { background: #ede6dc; color: #6b5b45; }
+.span-kind-badge.context { background: #f3e6d8; color: #8a5a2b; }
+.span-tok { font-variant-numeric: tabular-nums; }
+.span-ctx { color: #8a7e72; }
 .span-name { font-weight: 600; flex: 1; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .span-bar { flex: 1; min-width: 40px; height: 6px; background: rgba(0,0,0,.06); border-radius: 3px; overflow: hidden; }
 .span-bar i { display: block; height: 100%; border-radius: 3px; background: #9ca3af; }
-.span-bar i.llm { background: #3b82f6; } .span-bar i.tool { background: #8b5cf6; }
+.span-bar i.llm { background: #3b82f6; } .span-bar i.tool { background: #8b5cf6; } .span-bar i.context { background: #d97706; }
 .span-meta { color: #8a7e72; white-space: nowrap; }
 .span-arrow { color: #8a7e72; transition: transform .2s; font-size: 11px; }
 .span-arrow.open { transform: rotate(180deg); }
@@ -545,6 +548,7 @@ body {
             <span><span class="toggle on" onclick="this.classList.toggle('on')"></span>知识检索</span>
             <span><span class="toggle" onclick="this.classList.toggle('on')"></span>联网搜索</span>
             <span style="margin-left:auto;font-size:11px;color:#b3a798">仅从知识库中检索</span>
+            <span style="font-size:11px;color:#8a7e72;cursor:pointer;border:1px solid var(--color-border);border-radius:10px;padding:1px 8px" title="上下文用量：一个会话一个 128K 窗口" onclick="openModal('ctxModal')">🧮 上下文 12.4K / 128K</span>
           </div>
           <div class="composer-box">
             <textarea placeholder="向你的笔记提问…（Enter 发送，Shift+Enter 换行；也可直接拖入图片 / Word / PDF）"></textarea>
@@ -1030,6 +1034,7 @@ body {
               <tr><td>assistant（知识助手）</td><td>open&amp;model-mix</td><td>（默认模型）</td><td>右侧栏伴随 Agent</td></tr>
               <tr><td>intent_rewrite / evidence_check</td><td>open&amp;model-mix</td><td>（默认模型）</td><td>意图改写 / 证据充分性校验</td></tr>
               <tr><td>wiki_compile / digest</td><td>bailian-main</td><td>qwen-plus</td><td>百科编译 / 综合词条</td></tr>
+              <tr><td>memory_agent（记忆代理·统一）</td><td>open&amp;model-mix</td><td>（默认模型）</td><td>Session Memory / extractMemories / AutoDream 等记忆 forked agent 统一路由</td></tr>
               <tr><td>embed / ocr / rerank</td><td>（按类别上游）</td><td>text-embedding-v4 等</td><td>向量化 / 文字识别 / 重排</td></tr></tbody></table></div>
             <p class="note">原系统设置的 LLM / 知识助手 / OpenRouter 免费模型已合并至此；每次调用的「路由规则 → 模型 → 上游」在后端日志以 <code>[业务路由]</code>/<code>[网关选路]</code>/<code>[网关出网]</code> 显性记录。配置改动未保存离开会弹窗拦截。</p></div>
         </div>
@@ -1117,8 +1122,8 @@ body {
             <p class="note">仅展示自己的业务指标，无其他用户记录或技术调用详情。完成率不计进行中和主动取消的操作，不代表答案准确率。</p></div>
           <div class="panel demo-section"><h3>我的上下文 & 记忆概览（点数值钻取）</h3>
             <div class="demo-stats"><div class="demo-stat"><strong>6 / 200</strong><span>记忆条数 / 上限</span></div><div class="demo-stat"><strong>3</strong><span>画像卡候选</span></div><div class="demo-stat"><strong>4</strong><span>被检索命中</span></div><div class="demo-stat"><strong>2</strong><span>从未使用</span></div><div class="demo-stat"><strong>0.692</strong><span>平均重要度</span></div><div class="demo-stat"><strong>1.8</strong><span>平均置信度</span></div></div>
-            <div class="demo-stats" style="margin-top:8px"><div class="demo-stat" style="cursor:pointer" onclick="openDrillExample('压缩链明细')"><strong>11.8k</strong><span>压缩节省 Token</span></div><div class="demo-stat"><strong>84.3%</strong><span>摘要压缩率</span></div><div class="demo-stat"><strong style="color:#b05555">0</strong><span>熔断会话</span></div><div class="demo-stat" style="cursor:pointer" onclick="openDrillExample('记忆写路径明细')"><strong>7</strong><span>写路径事件</span></div></div>
-            <p class="note">Compaction 压缩链：micro 空闲衰减（三档截断 + 空闲 ≥60 分钟读时衰减）→ auto 摘要压缩（token 阈值触发结构化摘要，连败 3 次熔断）→ window80 硬触发（上下文达窗口 80% 用 summary.md 替换历史）；摘要持久于短期记忆 summary.md，DB 缺失时文件恢复。点击「压缩节省 Token / 写路径事件」或「压缩链明细 / 记忆写路径明细」按钮钻取事件流。</p>
+            <div class="demo-stats" style="margin-top:8px"><div class="demo-stat" style="cursor:pointer" onclick="openDrillExample('压缩链明细')"><strong>18.6k</strong><span>压缩节省 Token</span></div><div class="demo-stat"><strong>84.3%</strong><span>摘要压缩率</span></div><div class="demo-stat"><strong>5</strong><span>工具结果落盘</span></div><div class="demo-stat"><strong style="color:#b05555">0</strong><span>熔断会话</span></div><div class="demo-stat" style="cursor:pointer" onclick="openDrillExample('记忆写路径明细')"><strong>7</strong><span>写路径事件</span></div></div>
+            <p class="note">上下文四层压缩（一个会话一个 128K 窗口，触发频率递减、代价递增）：<b>L0 日常约束</b>（每轮输出帽 4K + 超大工具结果落盘留 2KB 预览与路径 + 重复结果去重）→ <b>L1 微压缩</b>（每次调用前跑，工具结果合计 ≥20K 进入、可释放 &lt;10K 放弃，旧的可重现输出换占位符但保留工具配对）→ <b>L2 系统压缩</b>（Session Memory 只记不替换；Auto 达 95K 触发结构化摘要，summary.md 命中零 LLM 调用）→ <b>L3 兜底 Full</b>（Auto 连败 3 次或占用 ≥119K，全部工具结果落盘、仅留最近 1 轮原文）。摘要持久于短期记忆 summary.md，DB 缺失时文件恢复。点击「压缩节省 Token / 写路径事件」或「压缩链明细 / 记忆写路径明细」按钮钻取事件流。</p>
             <div class="demo-table-wrap"><table class="demo-table"><thead><tr><th>类型</th><th>条数</th><th>钻取</th></tr></thead>
               <tbody><tr><td>用户信息</td><td>6</td><td><a href="#">查看明细</a></td></tr><tr><td>反馈纠正</td><td>0</td><td><a href="#">查看明细</a></td></tr><tr><td>项目目标</td><td>0</td><td><a href="#">查看明细</a></td></tr><tr><td>参考索引</td><td>0</td><td><a href="#">查看明细</a></td></tr></tbody></table></div>
             <details class="demo-section"><summary>记忆钻取弹窗示例（从未使用 · 2 条）</summary>
@@ -1135,23 +1140,28 @@ body {
                   <tr><td>个人指令 User 叠加</td><td>users/&lt;uid&gt;/USER.md</td><td>「我的指令」镜像（≤500 字），本人可写，优先级高于系统默认</td></tr>
                   <tr><td>KB 共享 Project 叠加</td><td>kb/&lt;kb_id&gt;/PROJECT.md</td><td>按知识库共享的项目约定，KB 属主/管理员可写</td></tr>
                   <tr><td>本人私有 Local 叠加</td><td>users/&lt;uid&gt;/local/&lt;kb&gt;.md</td><td>本人在某知识库下的私有笔记，仅本人可见可写</td></tr>
-                  <tr><td>短期·transcript</td><td>users/&lt;uid&gt;/sessions/&lt;sid&gt;/transcript.md</td><td>整个 Session 完整对话流水账，只读原始记录，不丢任何细节（与 chat_messages 融合镜像）</td></tr>
-                  <tr><td>短期·Session Memory</td><td>users/&lt;uid&gt;/sessions/&lt;sid&gt;/summary.md</td><td>上下文达 10K Token 首次创建；增长 5K/工具调用/对话暂停触发后台代理更新；用户编辑后自动压缩不再覆盖</td></tr>
-                  <tr><td>短期·Task State</td><td>users/&lt;uid&gt;/sessions/&lt;sid&gt;/task_state.md</td><td>从 transcript 追踪任务进度（plan/steps/status 投影，整合现有任务进度模块）</td></tr>
+                  <tr><td>短期·transcript</td><td>users/&lt;uid&gt;/sessions/&lt;sid&gt;/transcript.jsonl</td><td>CC 风格 JSONL 只读黑匣子：每行一个 JSON 事件（消息/工具调用与结果 + uuid/parentUuid/时间戳/元数据），append-only 去重，压缩不丢任何细节（旧 transcript.md 留档）</td></tr>
+                  <tr><td>短期·工具结果原文</td><td>users/&lt;uid&gt;/sessions/&lt;sid&gt;/tool-results/r-&lt;id&gt;.txt</td><td>L0 落盘：单条 &gt;8K token 或单轮合计 &gt;16K 时把原文写盘，上下文只留 2KB 预览 + 路径；模型用 read_tool_result(path, offset, limit) 分页回读，按会话/用户校验，越权与路径穿越一律拒绝</td></tr>
+                  <tr><td>短期·Session Memory</td><td>users/&lt;uid&gt;/sessions/&lt;sid&gt;/summary.md</td><td>上下文达 10K Token 首次创建；后续须同时满足「自上次覆盖点增长 ≥5K + 工具调用 ≥3 次 + 本轮自然结束」才 fork 更新（只记不替换历史）；用户编辑后自动压缩不再覆盖</td></tr>
+                  <tr><td>短期·Task State</td><td>users/&lt;uid&gt;/sessions/&lt;sid&gt;/task_state.md</td><td>会话进行期间是内存对象（plan/steps/status 投影，驱动进度跟踪与任务推进）；对话暂停 ≥10 分钟/删除会话/进程关闭才落盘 task_state.md</td></tr>
                   <tr><td>长期记忆四类型</td><td>users/&lt;uid&gt;/MEMORY.md 索引 + memories/&lt;type&gt;_&lt;id8&gt;.md</td><td>user/feedback/project/reference；extractMemories 每轮扫描整轮 transcript 抽取（hasMemoryWritesSince 去重），AutoDream 三重门控（24h/5 会话/.consolidate-lock）整理</td></tr>
                   <tr><td>附：助手分域镜像</td><td>users/&lt;uid&gt;/agents/&lt;agent&gt;.md</td><td>知识助手/聊天助手记忆按域隔离演进</td></tr>
                 </tbody></table></div>
-              <p class="note"><b>口径说明：</b>Markdown 是持久记录载体，SQLite 是查询镜像（写路径双写、恢复路径文件优先）；记忆根目录与 SQLite 同址，全部按用户维度隔离。注入顺序：静态三层（全量）→ 个人指令 → KB/本人叠加层 → 长期记忆画像卡 + 相关检索。真实系统「我的记忆」弹窗含<b>用户/助手/记忆文件</b>三页签：记忆文件页签展示各层字符量/落盘状态，静态层仅管理员编辑、叠加层按权限编辑，长期记忆经记忆 CRUD 演进，并可按会话查看短期记忆三文件。</p>
+              <p class="note"><b>口径说明：</b>Markdown/JSONL 是持久记录载体，SQLite 是查询镜像（写路径双写、恢复路径文件优先）；记忆根目录与 SQLite 同址，全部按用户维度隔离。加载机制对齐 Claude Code「静态加载 + 动态加载」：静态三层（全量）→ 个人指令 → KB/本人叠加层 → MEMORY.md 索引全量（≤200 行/2000 字）+ 画像卡 + findRelevantMemories 相关检索；Session Memory/extractMemories/AutoDream 等 forked agent 统一走网关 memory_agent 业务路由。真实系统「我的记忆」弹窗含<b>用户/助手/记忆文件</b>三页签：记忆文件页签展示各层字符量/落盘状态，静态层仅管理员编辑、叠加层按权限编辑，长期记忆经记忆 CRUD 演进，并可按会话查看短期记忆文件（transcript.jsonl / summary.md / task_state.md / tool-results 原文，task_state 在途标「内存中」）。</p>
             </details>
-            <details class="demo-section"><summary>Compaction 压缩链示意（micro 衰减 → auto 摘要 → window80 硬触发）</summary>
-              <div class="demo-table-wrap"><table class="demo-table"><thead><tr><th>级</th><th>触发</th><th>机制</th></tr></thead>
+            <details class="demo-section"><summary>上下文四层压缩示意（L0 日常约束 → L1 微压缩 → L2 系统压缩 → L3 兜底 Full）</summary>
+              <div class="demo-table-wrap"><table class="demo-table"><thead><tr><th>层</th><th>触发</th><th>机制 / 事件 kind</th></tr></thead>
                 <tbody>
-                  <tr><td>micro 空闲衰减</td><td>读时投影，不落库</td><td>历史消息三档分级截断；会话空闲 ≥60 分钟时旧消息读时压到 200 字、最近 5 条保留全文（事件 kind=micro）</td></tr>
-                  <tr><td>auto 摘要压缩</td><td>token 阈值（首次 10K，小会话豁免 + 条数/字符兜底）</td><td>全量历史送摘要器（单条 2000 字/总量 20000 字预算）产出结构化摘要；递归守卫 + 连续失败 3 次熔断（手动 force 可绕过）；落库 compact_kind/before_tokens 边界标记</td></tr>
-                  <tr><td>window80 硬触发</td><td>上下文 ≥ 总窗口 80%（131072×0.8）</td><td>绕过批门控与熔断立即压缩，用 summary.md 摘要替换对应历史、保留最近消息（kind=window80）；尊重用户编辑过的摘要（edited_by_user）</td></tr>
-                  <tr><td>Session Memory 持久</td><td>摘要落库时 / DB 缺失时</td><td>摘要同步写短期记忆 summary.md；DB 摘要缺失时读文件恢复（restored_from_file）；压缩后注入「摘要 + continuation 指令」再水化，自动模式抑制不必要的追问</td></tr>
+                  <tr><td>L0 日常约束·输出帽</td><td>每次模型调用</td><td>每轮输出上限 4K token（三协议统一：openai max_tokens / anthropic max_tokens / ollama num_predict），显式传入更大值时以显式值为准</td></tr>
+                  <tr><td>L0 日常约束·结果落盘</td><td>单条 &gt;8K token 或单轮合计 &gt;16K（从最大开始）</td><td>原文写 tool-results/r-&lt;id&gt;.txt，上下文留 2KB 预览 + 路径 + 回读提示；落盘失败降级 inline（kind=offload）</td></tr>
+                  <tr><td>L0 日常约束·去重</td><td>同文件重复读取 / 同命令重复执行</td><td>结果级：完全一致替换为「同 [T{轮次}·来源 X]，内容未变」；片段级：长重复片段替换为引用，保留来源头（kind=dedup）</td></tr>
+                  <tr><td>L1 微压缩 Micro</td><td>每次 API 调用前；窗口内工具结果合计 ≥20K 进入，可释放 &lt;10K 放弃</td><td>旧的可重现结果（Read/Bash/Grep/Glob/WebSearch/WebFetch/search_knowledge）换占位符但保留工具配对；保护本轮 + 最近 3 轮、子 agent 输出、Task 状态、HITL 结果；悬空去重引用降级为占位符（kind=micro / micro_skip）</td></tr>
+                  <tr><td>L2 系统压缩·Session Memory</td><td>首次上下文 ≥10K；后续「增长 ≥5K + 工具调用 ≥3 次 + 本轮自然结束」三条件同时满足</td><td>fork 代理更新 summary.md，只推进摘要覆盖点 covered_until，不替换历史、不动压缩边界（kind=session_memory）</td></tr>
+                  <tr><td>L2 系统压缩·Auto Compaction</td><td>上下文 ≥95K（128K − 20K 摘要输出预留 − 13K 输入缓冲）</td><td>summary.md 完整覆盖保留区之外 → 零 LLM 调用直接替换（kind=auto_compact_hit）；未命中 fork 九段式结构化摘要（max_tokens=20000），保留区取「≥10K / 最近 3 轮 / 上限 40K」三者交集（kind=auto_compact / auto_fail / auto_blocked）</td></tr>
+                  <tr><td>L3 兜底 Full Compaction</td><td>Auto 连败 3 次熔断升级，或上下文 ≥119,040（128K×93%），或上游报超长被动触发</td><td>全部工具结果落盘、仅保留最近 1 轮原文 + 摘要（含【可回读的工具结果】清单）；LLM 仍失败走确定性兜底（逐条枚举用户消息，kind=full / full_fallback）</td></tr>
+                  <tr><td>手动压缩</td><td>用户点「压缩历史」（可填侧重点）</td><td>绕过熔断直接压缩（kind=manual）；成功后 fail_streak 与工具计数清零；尊重用户编辑过的摘要（edited_by_user）</td></tr>
                 </tbody></table></div>
-              <p class="note"><b>口径说明：</b>此为静态示意。手动「压缩历史」按钮（可填侧重点）保留；压缩节省 Token = Σ(before_tokens − after_tokens)，摘要压缩率 = 1 − Σafter/Σbefore（auto/manual/window80 摘要计入口径）；熔断会话 = fail_streak ≥3 的会话数，手动压缩成功后清零。全部事件落 context_compact_events 供钻取。</p>
+              <p class="note"><b>口径说明：</b>此为静态示意。一个会话一个连续窗口，名义 128K = 128,000 token（K=1000），全部量纲统一；压缩边界 boundary 只由 Auto/Full/手动推进，Session Memory 只推进覆盖点 covered_until。压缩节省 Token = Σ(before_tokens − after_tokens)，摘要压缩率 = 1 − Σafter/Σbefore（auto/manual/full 摘要计入口径）；熔断会话 = fail_streak ≥3 的会话数，手动或自动成功后清零。无压缩事件时历史区逐字节稳定（前缀缓存不变量），往轮工具结果的来源编号恒为 [T{轮次}·来源 X]，本轮尾部注入保持 [来源 X]。全部事件落 context_compact_events 供钻取。</p>
             </details>
           </div>
         </div>
@@ -1312,11 +1322,11 @@ body {
             <div class="aspect-title">记忆与上下文治理（写路径事件 / 压缩链事件 / 节省 Token / 熔断会话）</div>
             <div class="demo-stats">
               <div class="demo-stat" style="cursor:pointer" onclick="openDrillExample('记忆写路径明细')"><strong>7</strong><span>记忆写路径事件</span></div>
-              <div class="demo-stat" style="cursor:pointer" onclick="openDrillExample('压缩链明细')"><strong>12</strong><span>压缩链事件</span></div>
-              <div class="demo-stat"><strong>11.8k</strong><span>压缩节省 Token</span></div>
+              <div class="demo-stat" style="cursor:pointer" onclick="openDrillExample('压缩链明细')"><strong>26</strong><span>压缩链事件</span></div>
+              <div class="demo-stat"><strong>18.6k</strong><span>压缩节省 Token</span></div>
               <div class="demo-stat"><strong style="color:#b05555">0</strong><span>熔断会话</span></div>
             </div>
-            <p class="note">治理分布：写路径按层（静态·User 1 / 静态·Project 1 / 个人指令 2 / KB Project 1 / 本人 Local 1 / 长期记忆 3）与按动作（新增 3 / 更新 2 / 删除 1 / 簇合并 1 / 超限遗忘 0 / AutoDream 整理 1）；压缩链按类型（micro 5 / auto 4 / manual 2 / window80 1 / 失败 1 / 熔断 0）。点击卡片钻取全站逐条事件（时间/用户/动作/记忆层/类型/明细 或 压缩前后 token）。</p>
+            <p class="note">治理分布：写路径按层（静态·User 1 / 静态·Project 1 / 个人指令 2 / KB Project 1 / 本人 Local 1 / 长期记忆 3）与按动作（新增 3 / 更新 2 / 删除 1 / 簇合并 1 / 超限遗忘 0 / AutoDream 整理 1）；压缩链按四层类型（L0 offload 6 / dedup 4；L1 micro 3 / micro_skip 2；L2 session_memory 5 / auto_compact_hit 2 / auto_compact 1；L3 full 1 / full_fallback 0；manual 2 / auto_fail 1 / auto_blocked 0）。点击卡片钻取全站逐条事件（时间/用户/动作/记忆层/类型/明细 或 压缩前后 token）。</p>
             <div class="panel"><h3>Token 用量分析 <span class="tag green" style="margin-left:6px">▼ 12% 较前期</span></h3>
               <div class="token-compare">
                 <div><span class="compare-num">717</span><span class="compare-label">近期平均 Token/请求</span></div>
@@ -1439,6 +1449,7 @@ body {
             <div class="modal" style="width:min(860px,94vw)">
               <h3>全链路追踪 · <span class="agent-badge agent-chat" id="tmAgent">chat</span><span class="close-x" onclick="closeTraceModal()">×</span></h3>
               <div class="trace-meta" id="tmMeta"></div>
+              <div class="trace-meta" id="tmTokens" style="margin-top:4px"></div>
               <div><span class="span-kind-badge step">输入</span><pre class="span-text" id="tmInput" style="margin-top:6px"></pre></div>
               <div id="tmAnswerWrap" style="margin-top:10px"><div class="trace-answer-head"><span class="span-io-label" style="margin:0">AI回复内容</span><button class="btn btn-outline btn-sm" onclick="copyTraceAnswer(this)">复制</button></div><pre class="span-text" id="tmAnswer" style="margin-top:6px"></pre></div>
               <p class="inline-error" id="tmError" hidden></p>
@@ -1784,7 +1795,7 @@ body {
         <div class="guide-block" id="gsec-4"><h3><span class="gb-num">4</span>聊天框附件：随手拖入</h3>
           <ul><li>拖入 / 粘贴图片、Word、PDF：默认只识别或总结；明确保存意图生成确认卡，点击确认才写入可写知识库（默认私人库，24h 有效）。</li><li>截图粘贴即问：OCR 图中文字并入检索查询；识别内容按 300 字裁剪避免稀释信号。</li></ul></div>
         <div class="guide-block" id="gsec-5"><h3><span class="gb-num">5</span>用户记忆：越用越懂你</h3>
-          <ul><li>静态/动态双轨 Markdown 记忆（参考 Claude Code）：静态三层全局规矩（User 输出约定 / Project 系统规则 / Local 检索约束）全量加载；短期记忆按会话落 transcript/summary/task_state，Compaction 80% 硬触发；长期记忆 user/feedback/project/reference 四类型 + MEMORY.md 索引，extractMemories 每轮抽取、AutoDream 三重门控整理。</li><li>敏感信息（密码 / token / 证件号）正则拦截不落库；个人中心「我的记忆」可浏览 / 编辑 / 删除 / 主动写入；两层加载（常驻画像卡 + 相关检索）注入回答。</li></ul></div>
+          <ul><li>静态/动态双轨记忆（参考 Claude Code）：静态三层全局规矩（User 输出约定 / Project 系统规则 / Local 检索约束）全量加载；短期记忆按会话落 transcript.jsonl（JSONL 只读黑匣子）/summary/task_state（会话期内存对象，结束落盘）/tool-results（超大工具结果原文，上下文只留预览与路径），上下文四层压缩（128K 窗口：日常约束 → 微压缩 → 系统压缩 95K → 兜底 Full 119K）；长期记忆 user/feedback/project/reference 四类型 + MEMORY.md 索引，extractMemories 每轮抽取、AutoDream 三重门控整理。</li><li>敏感信息（密码 / token / 证件号）正则拦截不落库；个人中心「我的记忆」可浏览 / 编辑 / 删除 / 主动写入；静态加载 + 动态加载（MEMORY.md 索引全量 + findRelevantMemories 检索 + 常驻画像卡）注入回答；记忆 forked agent 统一走网关 memory_agent 路由。</li></ul></div>
         <div class="guide-block" id="gsec-6"><h3><span class="gb-num">6</span>知识库工作台：总览 + 详情</h3>
           <ul><li>总览（/kb）分公共 / 个人两区；详情（/kb/:kbId）8 页签：文档 / 检索测试 / 思维导图 / 知识总结 / 知识图谱 / 知识收藏 / 知识百科 / RAG评估。</li><li>个人库物理隔离仅属主可见；游客仅见文档 / 检索测试；「上传文档」弹窗复用上传界面并锁定当前库。</li></ul></div>
         <div class="guide-block" id="gsec-7"><h3><span class="gb-num">7</span>知识编译 llm-wiki</h3>
@@ -1906,11 +1917,32 @@ body {
     <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end"><button class="btn btn-outline" onclick="closeModal('instructionModal')">取消</button><button class="btn btn-primary" onclick="closeModal('instructionModal')">保存</button></div>
   </div>
 </div>
+<!-- 上下文用量弹层（一个会话一个 128K 连续窗口 · 四层压缩阈值刻度） -->
+<div class="modal-mask" id="ctxModal" onclick="if(event.target===this)closeModal('ctxModal')">
+  <div class="modal" style="width:min(560px,92vw)">
+    <h3>上下文用量 <span class="close-x" onclick="closeModal('ctxModal')">×</span></h3>
+    <p class="note" style="margin-top:0">一个会话 = 一个上下文窗口（<b>128K</b> = 128,000 Token，K = 1000）。当前水位取最近一次主链路调用的真实 prompt Token；四层压缩（日常约束 → 微压缩 → 系统压缩 → 兜底压缩）只作用于本会话窗口。</p>
+    <div class="demo-stats" style="grid-template-columns:repeat(2,minmax(0,1fr));gap:10px"><div class="demo-stat" style="padding:12px"><strong style="font-size:20px">12.4K / 128K</strong><span>当前水位 / 窗口（9.7%）</span></div><div class="demo-stat" style="padding:12px"><strong style="font-size:20px">3.2K</strong><span>工具结果合计</span></div><div class="demo-stat" style="padding:12px"><strong style="font-size:20px">82.6K</strong><span>距自动压缩还剩</span></div><div class="demo-stat" style="padding:12px"><strong style="font-size:15px;word-break:break-all">session_memory</strong><span>最近压缩类型</span></div></div>
+    <div class="share-bar" style="margin:10px 0 4px"><span style="width:9.7%"></span></div>
+    <p class="note" style="margin:0">阈值刻度：<b>20K</b> 微压缩进入 · <b>95K</b> Auto Compaction（128K − 20K 摘要预留 − 13K 输入缓冲）· <b>119K</b> Full Compaction（窗口 93%）· 每轮输出上限 <b>4K</b>。</p>
+    <div class="demo-table-wrap" style="margin-top:10px"><table class="demo-table"><thead><tr><th>语义段</th><th>Token</th><th>占比</th></tr></thead>
+      <tbody>
+        <tr><td>历史对话（原文保留）</td><td>5,200</td><td>41.9%</td></tr>
+        <tr><td>工具结果（配对入账）</td><td>3,200</td><td>25.8%</td></tr>
+        <tr><td>系统提示词</td><td>1,800</td><td>14.5%</td></tr>
+        <tr><td>本轮知识/附件上下文</td><td>1,200</td><td>9.7%</td></tr>
+        <tr><td>记忆注入（索引+画像+相关）</td><td>600</td><td>4.8%</td></tr>
+        <tr><td>摘要（再水化）</td><td>400</td><td>3.2%</td></tr>
+      </tbody></table></div>
+    <p class="note"><b>口径说明：</b>各段按最终生成调用真实 prompt_tokens 分摊（与管理员 Token 分析同源）；工具结果单独成段，历史段剔除工具配对行避免重复计量。超大结果已落盘时该段只计预览 + 路径回执。</p>
+    <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end"><button class="btn btn-outline" onclick="closeModal('ctxModal')">关闭</button></div>
+  </div>
+</div>
 <!-- 会话笔记（结构化摘要 · 短期记忆 summary.md 持久） -->
 <div class="modal-mask" id="noteModal" onclick="if(event.target===this)closeModal('noteModal')">
   <div class="modal" style="width:min(520px,92vw)">
     <h3>会话笔记 <span class="close-x" onclick="closeModal('noteModal')">×</span></h3>
-    <p class="note" style="margin-top:0">系统把较早对话压缩为结构化摘要（意图 / 结论 / 约束 / 未决 / 下一步 + 用户消息枚举 / 知识来源与附件状态 / 当前工作 / 错误与纠正），同步持久于短期记忆 summary.md，重新打开会话时据此续接上下文（DB 缺失时文件恢复）。编辑保存后自动压缩不再覆盖你的笔记。</p>
+    <p class="note" style="margin-top:0">系统把较早对话压缩为九节结构化摘要（意图 / 结论 / 约束 / 未决 / 下一步 + 用户消息枚举 / 知识来源与附件状态 / 当前工作 / 错误与纠正），同步持久于短期记忆 summary.md，重新打开会话时据此续接上下文（DB 缺失时文件恢复）。Session Memory 在上下文首次达 10K 时创建，之后满足「增长 ≥5K + 工具调用 ≥3 次 + 本轮自然结束」才更新；水位达 95K 时 Auto Compaction 优先直接复用本摘要（零模型调用）。编辑保存后自动压缩不再覆盖你的笔记。</p>
     <div class="form-row"><textarea rows="10" placeholder="九节结构化摘要：意图 / 结论 / 约束 / 未决 / 下一步 / 用户消息 / 知识来源 / 当前工作 / 错误与纠正">意图：了解丰隆穴功效与按摩方法
 结论：祛痰要穴，拇指按揉 3~5 分钟，两侧交替
 约束：仅从知识库检索，未开联网
@@ -1953,8 +1985,8 @@ body {
       <p class="note"><b>长期记忆文件视图</b>：MEMORY.md 索引 + 每条记忆独立 .md（frontmatter 元数据），user/feedback/project/reference 四类型；extractMemories 每轮抽取、AutoDream 三重门控定期整理。</p>
       <div class="file-row"><span class="fname">MEMORY.md · - [memories/user_a1b2c3d4.md](memories/user_a1b2c3d4.md) — 用户关注睡眠质量改善</span></div>
       <div class="file-row"><span class="fname">memories/feedback_e5f6a7b8.md · 回答先给结论再给依据（置信 3）</span></div>
-      <p class="note"><b>短期记忆文件视图</b>（按会话隔离）：选择本人会话查看 transcript.md 只读流水账 / summary.md 摘要 / task_state.md 任务进度。</p>
-      <div class="file-row" style="flex-wrap:wrap"><span class="tag blue">Transcript 流水账 8.2k 字</span><span class="tag green">Session Memory 摘要 620 字</span><span class="tag">Task State 任务进度 180 字</span></div>
+      <p class="note"><b>短期记忆文件视图</b>（按会话隔离）：选择本人会话查看 transcript.jsonl（JSONL 只读黑匣子）/ summary.md 摘要 / task_state.md 任务进度（会话在途为内存对象渲染，标「内存中」；旧 transcript.md 以归档条目留档）。</p>
+      <div class="file-row" style="flex-wrap:wrap"><span class="tag blue">Transcript 流水账（JSONL）8.2k 字</span><span class="tag green">Session Memory 摘要 620 字</span><span class="tag">Task State 任务进度 180 字 · 内存中</span></div>
     </div>
     <div style="margin-top:12px;display:flex;justify-content:flex-end"><button class="btn btn-outline" onclick="closeModal('memoryModal')">关闭</button></div>
   </div>
@@ -2162,12 +2194,13 @@ const TRACES = {
   't-1026': { agent: 'chat', status: 'ok', latency: '2.6s', tokens: '1,420 + 480', user: '演示用户甲', started: '2026-11-12 10:26:18', input: '丰隆穴有什么功效？怎么按摩？',
     answer: '丰隆穴被古人奉为祛痰至宝，「痰多宜向丰隆寻」[来源 3]；为足阳明胃经之络穴，可健脾胃、化痰湿 [来源 1][来源 2]。按摩：拇指指腹按揉，酸胀为度，每次 3~5 分钟，两侧交替。', error: '',
     spans: [
-      { seq: 1, kind: 'step', name: '意图改写', ms: '180ms', status: 'ok', bar: 7, input: '丰隆穴有什么功效？怎么按摩？', output: '丰隆穴 功效 按摩 方法 自我按摩' },
-      { seq: 2, kind: 'tool', name: 'search_knowledge', ms: '320ms', status: 'ok', bar: 12, input: '{"query":"丰隆穴 功效 按摩","top_k":6}', output: '命中 6 条（FAISS 4 + BM25 2 → RRF → Rerank 保留 5）' },
-      { seq: 3, kind: 'step', name: 'Rerank 重排', ms: '210ms', status: 'ok', bar: 8, output: '保留 5 条 · 最低相关度 40%' },
-      { seq: 4, kind: 'step', name: '证据充分性判断', ms: '160ms', status: 'ok', bar: 6, output: '证据充分：true' },
-      { seq: 5, kind: 'llm', name: 'chat_answer 流式生成', ms: '1.6s', status: 'ok', bar: 62, tok: '1,420+480', input: '[系统提示词 + 百科卡片×5 + 检索片段 + 记忆注入]\n丰隆穴有什么功效？怎么按摩？', output: '丰隆穴为祛痰要穴……[来源 1][来源 3]' },
-      { seq: 6, kind: 'step', name: '引用编号核对', ms: '90ms', status: 'ok', bar: 4, output: '引用核对通过：3 处编号均命中来源' },
+      { seq: 1, kind: 'step', name: '意图改写', ms: '180ms', status: 'ok', bar: 7, itok: 46, otok: 18, ctx: 1264, input: '丰隆穴有什么功效？怎么按摩？', output: '丰隆穴 功效 按摩 方法 自我按摩' },
+      { seq: 2, kind: 'tool', name: 'search_knowledge', ms: '320ms', status: 'ok', bar: 12, itok: 32, otok: 9600, ctx: 10896, input: '{"query":"丰隆穴 功效 按摩","top_k":6}', output: '命中 6 条（FAISS 4 + BM25 2 → RRF → Rerank 保留 5）· 结果 9,600 tok' },
+      { seq: 3, kind: 'context', name: 'context.offload 结果落盘', ms: '35ms', status: 'ok', bar: 2, itok: 9600, otok: 520, ctx: 1816, output: 'L0 日常约束：单条 9,600 tok > 8K 阈值 → 写盘\nusers/u-1/sessions/s-88/tool-results/r-1026-2.txt\n上下文保留 2KB 预览 + 文件路径（520 tok）\n释放 9,080 tok；模型可用 read_tool_result(path, offset) 分页回读' },
+      { seq: 4, kind: 'step', name: 'Rerank 重排', ms: '210ms', status: 'ok', bar: 8, itok: 520, otok: 360, ctx: 2176, output: '保留 5 条 · 最低相关度 40%' },
+      { seq: 5, kind: 'step', name: '证据充分性判断', ms: '160ms', status: 'ok', bar: 6, itok: 2176, otok: 12, ctx: 2188, output: '证据充分：true' },
+      { seq: 6, kind: 'llm', name: 'chat_answer 流式生成', ms: '1.6s', status: 'ok', bar: 62, itok: 1420, otok: 480, cached: 900, ctx: 3608, input: '[系统提示词 + 百科卡片×5 + 检索片段 + 记忆注入]\n丰隆穴有什么功效？怎么按摩？', output: '丰隆穴为祛痰要穴……[来源 1][来源 3]' },
+      { seq: 7, kind: 'step', name: '引用编号核对', ms: '90ms', status: 'ok', bar: 4, itok: 480, otok: 24, ctx: 3632, output: '引用核对通过：3 处编号均命中来源' },
     ],
     logs: [
       { source: 'request', text: '>>> POST /api/chat/send-with-files | user=演示用户甲\n<<< 200 | 2.6s' },
@@ -2176,10 +2209,11 @@ const TRACES = {
     ] },
   't-1024': { agent: 'wiki_assistant', status: 'error', latency: '5.0s', tokens: '1,180 + 420', user: '演示用户乙', started: '2026-11-12 10:24:02', input: '帮我整理失眠调理词条', answer: '', error: 'web_search 上游超时（1.1s），fail-fast 短路',
     spans: [
-      { seq: 1, kind: 'step', name: '接收问题', ms: '40ms', status: 'ok', bar: 2 },
-      { seq: 2, kind: 'tool', name: 'search_knowledge', ms: '300ms', status: 'ok', bar: 6, output: '命中 3 条（失眠 调理 食疗）' },
-      { seq: 3, kind: 'tool', name: 'web_search', ms: '1.1s', status: 'error', bar: 22, input: '{"query":"失眠 调理 食疗"}', error: 'TimeoutError: upstream=anysearch elapsed=1.1s' },
-      { seq: 4, kind: 'llm', name: 'assistant 总结', ms: '2.2s', status: 'ok', bar: 44, tok: '1,180+420', output: '（基于知识库片段生成词条草稿，联网部分缺失已标注）' },
+      { seq: 1, kind: 'step', name: '接收问题', ms: '40ms', status: 'ok', bar: 2, itok: 24, otok: 8, ctx: 21024 },
+      { seq: 2, kind: 'tool', name: 'search_knowledge', ms: '300ms', status: 'ok', bar: 6, itok: 28, otok: 14200, ctx: 35224, output: '命中 3 条（失眠 调理 食疗）· 结果 14,200 tok' },
+      { seq: 3, kind: 'tool', name: 'web_search', ms: '1.1s', status: 'error', bar: 22, itok: 20, otok: 0, ctx: 35224, input: '{"query":"失眠 调理 食疗"}', error: 'TimeoutError: upstream=anysearch elapsed=1.1s' },
+      { seq: 4, kind: 'context', name: 'context.micro_compact 微压缩', ms: '48ms', status: 'ok', bar: 3, itok: 14200, otok: 640, ctx: 21664, output: 'L1 微压缩：窗口内可重现工具结果合计 22,400 tok ≥ 20K → 进入；清除 3 条往轮 search_knowledge / read_file 旧输出，占位符保留工具配对（[工具结果 #12 已清除，可用 read_tool_result 回读]）\n可释放 13,600 tok ≥ 10K → 执行；本轮结果、子 agent 输出、Task 状态受保护不裁剪' },
+      { seq: 5, kind: 'llm', name: 'assistant 总结', ms: '2.2s', status: 'ok', bar: 44, itok: 1180, otok: 420, ctx: 22084, output: '（基于知识库片段生成词条草稿，联网部分缺失已标注）' },
     ],
     logs: [
       { source: 'request', text: '>>> POST /api/wiki/assistant | user=演示用户乙\n<<< 500 | 5.0s' },
@@ -2187,18 +2221,40 @@ const TRACES = {
     ] },
   't-1022': { agent: 'wiki_compile', status: 'ok', latency: '8.2s', tokens: '3,200 + 300', user: 'system', started: '2026-11-12 10:20:13', input: '增量编译 · 丰隆穴（来源：文字记录2.jpg）', answer: '', error: '',
     spans: [
-      { seq: 1, kind: 'step', name: '读取增量素材', ms: '120ms', status: 'ok', bar: 2 },
-      { seq: 2, kind: 'llm', name: 'wiki_compile', ms: '7.6s', status: 'ok', bar: 92, tok: '3,200+300', output: '## 概述\n丰隆穴属足阳明胃经络穴……\n## 关键要点\n- 定位：外踝尖上八寸……' },
-      { seq: 3, kind: 'step', name: '双写落盘', ms: '260ms', status: 'ok', bar: 4, output: 'wiki_pages + 向量库 2 chunks + data/wiki 镜像' },
+      { seq: 1, kind: 'step', name: '读取增量素材', ms: '120ms', status: 'ok', bar: 2, itok: 40, otok: 6200, ctx: 9400 },
+      { seq: 2, kind: 'context', name: 'context.dedup 重复结果去重', ms: '12ms', status: 'ok', bar: 1, itok: 6200, otok: 60, ctx: 3260, output: 'L0 去重：文字记录2.jpg 本会话第 2 次读取，结果与 [T1·来源 2] 完全一致 → 替换为「同 [T1·来源 2]，内容未变」（60 tok），释放 6,140 tok；原文仍在账本与磁盘中，可回读' },
+      { seq: 3, kind: 'llm', name: 'wiki_compile', ms: '7.6s', status: 'ok', bar: 92, itok: 3200, otok: 300, cached: 1800, ctx: 6460, output: '## 概述\n丰隆穴属足阳明胃经络穴……\n## 关键要点\n- 定位：外踝尖上八寸……' },
+      { seq: 4, kind: 'step', name: '双写落盘', ms: '260ms', status: 'ok', bar: 4, itok: 300, otok: 40, ctx: 6500, output: 'wiki_pages + 向量库 2 chunks + data/wiki 镜像' },
     ],
     logs: [{ source: 'wiki', text: '[WIKI] 编译完成：丰隆穴 → 2 chunks' }] },
 };
+const tokNum = n => (n || 0).toLocaleString('en-US');
+const tokK = n => (n >= 1000 ? (n / 1000).toFixed(1) + 'K' : String(n || 0));
+// 每个链路都要能看 Token：LLM span 用上游真实 usage（含缓存命中），其余 span 用 estimate_tokens 估算（前缀 ≈）
+function spanTokLabel(s) {
+  if (s.itok == null && s.otok == null) return s.tok ? s.tok + ' tok' : '';
+  if (s.kind === 'llm') return '入 ' + tokNum(s.itok) + ' · 出 ' + tokNum(s.otok) + ' tok' + (s.cached ? '（缓存 ' + tokNum(s.cached) + '）' : '');
+  return '≈入 ' + tokNum(s.itok) + ' · 出 ' + tokNum(s.otok) + ' tok';
+}
+function renderTraceTokens(spans) {
+  const sum = (arr, k) => arr.reduce((a, s) => a + (s[k] || 0), 0);
+  const llm = spans.filter(s => s.kind === 'llm');
+  const est = spans.filter(s => s.kind !== 'llm' && (s.itok != null || s.otok != null));
+  const cached = sum(llm, 'cached');
+  const ctx = spans.reduce((a, s) => (s.ctx != null ? s.ctx : a), 0);
+  const el = document.getElementById('tmTokens');
+  el.title = 'LLM span 取上游真实 usage（单次消费，不重复计费）；工具 / 步骤 / 压缩 span 按 estimate_tokens 估算（中文 1 字≈1 token，其余 4 字符≈1 token）。窗口水位为该 span 结束时会话 128K 窗口的占用快照。';
+  el.innerHTML = '<span>LLM 计费：<b>入 ' + tokNum(sum(llm, 'itok')) + ' · 出 ' + tokNum(sum(llm, 'otok')) + ' tok</b>' + (cached ? '（缓存命中 ' + tokNum(cached) + '）' : '') + '</span>'
+    + '<span>工具/步骤/压缩估算：≈入 ' + tokNum(sum(est, 'itok')) + ' · 出 ' + tokNum(sum(est, 'otok')) + ' tok</span>'
+    + '<span>窗口水位：<b>' + tokK(ctx) + ' / 128K</b>（' + (ctx / 128000 * 100).toFixed(1) + '%）</span>';
+}
 function openTraceModal(id, row) {
   let t = TRACES[id];
   if (!t && row) {
     const c = row.children;
+    const pair = String(c[7].textContent).replace(/,/g, '').match(/(\d+)\s*\+\s*(\d+)/) || [];
     t = { agent: row.dataset.agent, status: row.dataset.status, latency: c[5].textContent, tokens: c[7].textContent, user: c[2].textContent, started: '2026-11-12 ' + c[0].textContent, input: c[3].textContent, answer: '', error: '',
-      spans: [ { seq: 1, kind: 'step', name: '接收问题', ms: '40ms', status: 'ok', bar: 3 }, { seq: 2, kind: 'llm', name: '生成回答', ms: c[5].textContent, status: row.dataset.status, bar: 80, tok: c[7].textContent } ],
+      spans: [ { seq: 1, kind: 'step', name: '接收问题', ms: '40ms', status: 'ok', bar: 3, itok: 24, otok: 8, ctx: 1200 }, { seq: 2, kind: 'llm', name: '生成回答', ms: c[5].textContent, status: row.dataset.status, bar: 80, itok: +(pair[1] || 0), otok: +(pair[2] || 0), ctx: 1200 + +(pair[1] || 0) + +(pair[2] || 0) } ],
       logs: [{ source: 'request', text: '>>> 请求开始 | user=' + c[2].textContent + '\n<<< ' + (STATUS_TEXT[row.dataset.status] || '-') + ' | ' + c[5].textContent }] };
   }
   if (!t) return;
@@ -2214,7 +2270,8 @@ function openTraceModal(id, row) {
   document.getElementById('tmSpans').hidden = false;
   document.getElementById('tmLogBtn').textContent = '查看详细日志';
   document.getElementById('tmLogEntries').innerHTML = (t.logs || []).map(l => '<div class="log-entry"><span class="span-io-label">' + esc(l.source) + '</span><pre class="span-text">' + esc(l.text) + '</pre></div>').join('');
-  document.getElementById('tmSpans').innerHTML = t.spans.map(s => '<div class="span-item"><button class="span-head" onclick="toggleSpanBody(this)"><span class="span-seq">#' + s.seq + '</span><span class="span-kind-badge ' + s.kind + '">' + s.kind + '</span><span class="span-name">' + esc(s.name) + '</span><span class="span-bar"><i class="' + s.kind + '" style="width:' + (s.bar || 20) + '%"></i></span><span class="status-dot ' + s.status + '"></span><span class="span-meta">' + s.ms + (s.tok ? ' · ' + s.tok + ' tok' : '') + '</span><span class="span-arrow">▼</span></button><div class="span-body" hidden>' + (s.error ? '<p class="inline-error">' + esc(s.error) + '</p>' : '') + (s.input ? '<span class="span-io-label">PROMPT / 入参</span><pre class="span-text">' + esc(s.input) + '</pre>' : '') + (s.output ? '<span class="span-io-label">RESPONSE / 结果</span><pre class="span-text">' + esc(s.output) + '</pre>' : '') + (!s.input && !s.output && !s.error ? '<p class="note" style="margin:0">（无附加内容）</p>' : '') + '</div></div>').join('');
+  document.getElementById('tmSpans').innerHTML = t.spans.map(s => '<div class="span-item"><button class="span-head" onclick="toggleSpanBody(this)"><span class="span-seq">#' + s.seq + '</span><span class="span-kind-badge ' + s.kind + '">' + s.kind + '</span><span class="span-name">' + esc(s.name) + '</span><span class="span-bar"><i class="' + s.kind + '" style="width:' + (s.bar || 20) + '%"></i></span><span class="status-dot ' + s.status + '"></span><span class="span-meta">' + s.ms + (spanTokLabel(s) ? ' · <span class="span-tok">' + spanTokLabel(s) + '</span>' : '') + (s.ctx != null ? ' · <span class="span-ctx">ctx ' + tokK(s.ctx) + '</span>' : '') + '</span><span class="span-arrow">▼</span></button><div class="span-body" hidden>' + (s.error ? '<p class="inline-error">' + esc(s.error) + '</p>' : '') + (s.input ? '<span class="span-io-label">PROMPT / 入参</span><pre class="span-text">' + esc(s.input) + '</pre>' : '') + (s.output ? '<span class="span-io-label">RESPONSE / 结果</span><pre class="span-text">' + esc(s.output) + '</pre>' : '') + (!s.input && !s.output && !s.error ? '<p class="note" style="margin:0">（无附加内容）</p>' : '') + '</div></div>').join('');
+  renderTraceTokens(t.spans || []);
   document.getElementById('traceModal').classList.add('open');
 }
 function closeTraceModal() { document.getElementById('traceModal').classList.remove('open'); }

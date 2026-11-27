@@ -320,7 +320,7 @@
         </template>
         <template v-else>
           <p class="memory-desc">
-            记忆以 Markdown 文件持久记录（参考 Claude Code 设计）：静态记忆为全局规矩（User 输出约定 / Project 系统规则 / Local 检索约束），每轮全量加载；动态记忆分会话短期（transcript 流水账 / summary 摘要 / task_state 进度）与跨会话长期（user/feedback/project/reference 四类型 + MEMORY.md 索引）。个人指令与 KB 叠加层按权限编辑；数据库仅作查询镜像。
+            记忆以 Markdown 文件持久记录（参考 Claude Code 设计）：静态记忆为全局规矩（User 输出约定 / Project 系统规则 / Local 检索约束），静态加载每轮全量注入；动态加载含 MEMORY.md 索引全量注入 + findRelevantMemories 按需检索。动态记忆分会话短期（transcript.jsonl 黑匣子 / summary 摘要 / task_state 进度内存对象）与跨会话长期（user/feedback/project/reference 四类型 + MEMORY.md 索引）。Session Memory/extractMemories/AutoDream 统一走网关 memory_agent 业务路由。个人指令与 KB 叠加层按权限编辑；数据库仅作查询镜像。
           </p>
           <div class="memory-agent-select">
             <label class="form-label">项目（知识库）</label>
@@ -375,7 +375,7 @@
               <p v-else class="memory-empty">暂无长期记忆文件。对话中出现的偏好与事实会自动抽取落盘。</p>
             </div>
             <div class="layer-auto">
-              <p class="memory-desc">短期记忆文件视图（按会话隔离）：transcript.md 只读完整流水账 / summary.md Session Memory 摘要 / task_state.md 任务进度投影。选择本人会话查看落盘文件。</p>
+              <p class="memory-desc">短期记忆文件视图（按会话隔离）：transcript.jsonl 只读黑匣子（JSONL 追加式流水账）/ summary.md Session Memory 摘要 / task_state 任务进度（会话进行中为内存对象，会话结束落盘 task_state.md）。选择本人会话查看。</p>
               <div class="memory-agent-select">
                 <label class="form-label">会话</label>
                 <select class="form-input" v-model="sessionFilesId" @change="loadSessionFiles">
@@ -389,7 +389,7 @@
                 <div class="layer-chips">
                   <span v-for="m in sessionFilesData.overview?.modules || []" :key="m.file" class="layer-chip" :class="{ on: m.exists }"
                         :title="sessionFilesData.overview?.dir ? '目录：memory/' + sessionFilesData.overview.dir : ''">
-                    {{ m.label }} · {{ m.chars }} 字
+                    {{ m.label }} · {{ m.chars }} 字{{ m.in_memory ? ' · 内存中' : '' }}
                   </span>
                 </div>
                 <div v-for="m in sessionFilesData.overview?.modules || []" :key="'sf-' + m.file" class="session-file-block">
@@ -994,7 +994,7 @@ const extractHint = computed(() => {
   if (!s.runs) return '尚未运行过自动抽取：完成一轮对话后会在后台抽取；也可在上方输入「记住：…」立即写入。'
   switch (s.last_reason) {
     case 'llm_unavailable':
-      return '抽取模型角色（memory_extract）未绑定可用上游，请在网关角色路由中绑定；显式「记住：…」不受影响。'
+      return '记忆代理角色（memory_agent）未绑定可用上游，请在网关角色路由中绑定；显式「记住：…」不受影响。'
     case 'llm_error':
       return '最近一次抽取调用失败（网关/上游异常），可在可观测性查看网关日志；显式「记住：…」仍会落库。'
     case 'parse_error':

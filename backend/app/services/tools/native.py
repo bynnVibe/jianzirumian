@@ -39,6 +39,58 @@ def _result_payload(result):
     return payload
 
 
+def _ledger_payload(ctx, name, args, call_id, payload):
+    """L0 日常约束：原生 Function Calling 的结果统一入账（去重/落盘/预览）。
+
+    role=tool 只载入渲染后的正文；超大/重复内容落盘或引用替换，原文可经
+    read_tool_result 回读。入账失败时降级为原样载入，不阻断工具链路。
+    """
+    from app.services import context_window as cw
+
+    sid = getattr(ctx, "session_id", "") or ""
+    uid = getattr(ctx, "user_id", "") or ""
+    if not sid or not payload.get("success"):
+        return payload
+    data = payload.get("data") or {}
+    body = str(payload.get("text") or "")
+    bulky = {k: data[k] for k in ("output", "results") if k in data}
+    if bulky:
+        body += "\n" + json.dumps(bulky, ensure_ascii=False, allow_nan=False)
+    try:
+        row = cw.record_tool_result(sid, uid, name, args or {}, body, message_id=call_id)
+        cw.add_tool_calls(sid, uid)
+    except Exception as e:
+        logger.warning("原生工具结果入账失败（降级为原样载入）: %s", e)
+        return payload
+    out = dict(payload)
+    out["text"] = cw.render_result(row)
+    if row.get("state") != "live" or row.get("storage") == "offloaded":
+        # 正文已落盘/被引用替换：去掉重复的大块数据，保留来源等轻量元信息
+        out["data"] = {k: v for k, v in data.items() if k not in ("output", "results")}
+        out["result_id"] = row.get("id", "")
+        if row.get("path"):
+            out["offload_path"] = row["path"]
+    return out
+
+
+def _micro_before_call(ctx, messages):
+    """L1 微压缩：原生工具循环每次模型调用前运行，并就地同步已装配消息的渲染。"""
+    from app.services import context_window as cw
+
+    sid = getattr(ctx, "session_id", "") or ""
+    if not sid:
+        return
+    try:
+        from app.services import session_summary as ss
+        boundary = (ss.get_summary(sid) or {}).get("boundary_message_id") or ""
+        stats = cw.micro_compact(sid, getattr(ctx, "user_id", "") or "",
+                                 cw.turn_seq_for_session(sid), boundary)
+        if stats:
+            cw.apply_micro_to_messages(messages, stats.get("placeholders") or {})
+    except Exception as e:
+        logger.warning("原生工具循环微压缩失败（忽略）: %s", e)
+
+
 async def run_tool_loop(llm, messages, ctx, tools, *, result=None, deadline=None, max_calls=6, stream_final=False):
     """仅 yield 可公开摘要；原始结果留在 result 供调用方组装证据，不发给浏览器。"""
     result = result if result is not None else {}
@@ -73,6 +125,8 @@ async def run_tool_loop(llm, messages, ctx, tools, *, result=None, deadline=None
 
     try:
         while True:
+            # L1 微压缩：每次模型调用前清理可重现的旧工具结果（占位符替换，配对不变）
+            _micro_before_call(ctx, messages)
             text, completed = [], None
             stream = llm.chat_tools(messages, tools, tool_choice="auto", stream=True)
             try:
@@ -208,7 +262,8 @@ async def run_tool_loop(llm, messages, ctx, tools, *, result=None, deadline=None
                         yield {"event": "status", "phase": "tool_results", "tool_sources": result["tool_sources"]}
                 yield record
                 messages.append({"role": "tool", "tool_call_id": call["id"],
-                                 "content": json.dumps(payload, ensure_ascii=False, allow_nan=False)})
+                                 "content": json.dumps(_ledger_payload(ctx, name, args, call["id"], payload),
+                                                       ensure_ascii=False, allow_nan=False)})
     except TimeoutError:
         result.update(status="error", error="tool_timeout")
         terminal = interrupted("timeout")

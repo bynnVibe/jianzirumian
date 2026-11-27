@@ -41,7 +41,7 @@ _OPEN_HEALTH_STATES = ("circuit_open", "down")
 ROLES = (
     "chat_answer", "assistant", "intent_rewrite", "evidence_check", "tool_decision",
     "wiki_compile", "embed", "rerank", "ocr",
-    "memory_extract", "session_summary", "knowledge_summarize", "text_polish",
+    "memory_agent", "memory_extract", "session_summary", "knowledge_summarize", "text_polish",
     "content_polish", "kb_summary",
 )
 
@@ -49,7 +49,7 @@ ROLES = (
 # （如 LLM 规则误选 embedding/rerank/ocr 上游，反之亦然）。未登记 role 归 llm。
 ROLE_CATEGORY = {
     "chat_answer": "llm", "assistant": "llm", "intent_rewrite": "llm", "tool_decision": "llm",
-    "evidence_check": "llm", "wiki_compile": "llm", "memory_extract": "llm",
+    "evidence_check": "llm", "wiki_compile": "llm", "memory_agent": "llm", "memory_extract": "llm",
     "session_summary": "llm", "knowledge_summarize": "llm", "text_polish": "llm",
     "content_polish": "llm", "kb_summary": "llm",
     "embed": "embedding", "rerank": "rerank", "ocr": "ocr",

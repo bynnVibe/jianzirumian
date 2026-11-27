@@ -112,7 +112,7 @@ const STAGE_LABELS = {
   chat_agent: 'Agent 分流', skill_distill_route: 'Skill 沉淀路由', plan: '规划',
   model_selection: '模型选择', tool_execution: '工具执行', agent: 'Agent 轮次',
   complexity_classify: '复杂度判定', cache_write_policy: '缓存写入策略',
-  memory_extract: '记忆抽取', session_summary: '会话摘要',
+  memory_agent: '记忆代理', memory_extract: '记忆抽取', session_summary: '会话摘要',
 }
 const stageLabel = name => {
   if (!name) return ''

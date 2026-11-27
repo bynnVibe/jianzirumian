@@ -66,6 +66,7 @@ const server = await createServer({
       // ChatMessage 新增依赖的真实模块（UrlSource 及其 markdown 工具），不用全局 @ 别名以免绕过上方测试桩
       if (id === '@/components/UrlSource.vue') return fileURLToPath(new URL('../components/UrlSource.vue', import.meta.url))
       if (id === '@/utils/urlArticles') return fileURLToPath(new URL('./urlArticles.js', import.meta.url))
+      if (id === '@/utils/contextTokens') return fileURLToPath(new URL('./contextTokens.js', import.meta.url))
     },
     load(id) {
       if (id === '\0chat-test-api') return ['sendChatMessage', 'sendChatMessageWithFiles', 'createSession', 'listSessions', 'deleteSession', 'switchSession', 'getChatHistory', 'clearChatHistory', 'createBookmark', 'getImageUrl', 'getAttachmentFileUrl', 'getUrlSnapshot', 'stopChatGeneration', 'listCheckpoints', 'abandonCheckpoint']
@@ -200,6 +201,21 @@ test('知识来源默认收起，数量按文档统计', async () => {
   assert.match(html, /aria-expanded="false"/)
   assert.doesNotMatch(html, /不应默认显示的片段/)
   assert.match(html, /data-cite-num="8"/)
+})
+
+test('输出帽截断：气泡下给出 4K 上限说明与「继续」入口，未截断不渲染', async () => {
+  const { default: ChatMessage } = await server.ssrLoadModule('/src/components/ChatMessage.vue')
+  const html = await renderToString(createSSRApp(ChatMessage, {
+    role: 'assistant', content: '前半段回答', truncated: true, outputCap: 4000,
+  }))
+  assert.match(html, /已达单轮输出上限 4K/)
+  assert.match(html, /class="msg-truncated"/)
+  assert.match(html, />继续<\/button>/)
+  const plain = await renderToString(createSSRApp(ChatMessage, { role: 'assistant', content: '完整回答' }))
+  assert.doesNotMatch(plain, /msg-truncated/)
+  // 用户消息不显示输出帽提示
+  const user = await renderToString(createSSRApp(ChatMessage, { role: 'user', content: '问题', truncated: true }))
+  assert.doesNotMatch(user, /msg-truncated/)
 })
 
 test('完整 token 在 done 之前交付，不等待响应结束', async () => {

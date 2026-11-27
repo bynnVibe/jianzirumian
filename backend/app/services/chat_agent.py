@@ -54,6 +54,10 @@ logger = logging.getLogger("jianziruyang.chat_agent")
 _SKILL_DISTILL_CTX: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "chat_agent_skill_distill", default=False)
 
+# L0 回读工具可见性标记：本会话存在落盘/已清除结果时，决策/规划提示词追加 read_tool_result 行
+_READ_RESULT_CTX: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "chat_agent_read_result", default=False)
+
 # Agent 单轮整体熔断时限：受全局请求预算约束，同时防止 ReAct/Plan 循环失控
 AGENT_TIMEOUT_SECONDS = max(60.0, min(float(settings.CHAT_REQUEST_TIMEOUT), 200.0))
 # ReAct 模式最多工具调用步数
@@ -106,6 +110,50 @@ def capability_gap_event(gap_id: str, scenario: str, scenario_label: str,
 def _clip(text: str, limit: int = _MAX_OBSERVATION_CHARS) -> str:
     text = text or ""
     return text if len(text) <= limit else text[:limit] + "\n...(内容过长已截断)"
+
+
+def _ledger_record(session_id: str, user_id: str, tool: str, args: dict, observation: str,
+                   message_id: str = "") -> Optional[dict]:
+    """L0 日常约束：工具结果入账（结果级去重 + 超大落盘 + 2KB 预览），返回账本行。
+
+    入账后上下文只渲染预览/引用/占位符，原文落盘可经 read_tool_result 回读；
+    同时累加「距上次摘要」的工具调用计数（Session Memory 后续触发条件之一）。
+    失败时返回 None，调用方降级为既有字符截断（不阻断主流程）。
+    """
+    if not session_id:
+        return None
+    try:
+        from app.services import context_window as cw
+        row = cw.record_tool_result(session_id, user_id, tool, args or {}, observation or "",
+                                    message_id=message_id)
+        cw.add_tool_calls(session_id, user_id, 1)
+        return row
+    except Exception as e:
+        logger.warning("[CHAT_AGENT] 工具结果入账失败（降级为截断）: %s", e)
+        return None
+
+
+def _render_observation(row: Optional[dict], observation: str) -> str:
+    """观测回喂文本：有账本行按 state/storage 渲染，否则退回字符截断。"""
+    if row:
+        try:
+            from app.services import context_window as cw
+            return cw.render_result(row)
+        except Exception:
+            pass
+    return _clip(observation)
+
+
+def _micro_before_call(session_id: str, user_id: str):
+    """L1 微压缩：每次模型调用前运行（零调用；≥20K 进入、可释放 <10K 放弃）。"""
+    if not session_id:
+        return
+    try:
+        from app.services import context_window as cw, session_summary as ss
+        boundary = (ss.get_summary(session_id) or {}).get("boundary_message_id") or ""
+        cw.micro_compact(session_id, user_id, cw.turn_seq_for_session(session_id), boundary)
+    except Exception as e:
+        logger.debug("[CHAT_AGENT] 微压缩跳过: %s", e)
 
 
 def _summary(observation: str, limit: int = 80) -> str:
@@ -190,6 +238,13 @@ def _build_tool_lines(use_knowledge: bool, use_search: bool, search_needs_auth: 
             f"不得照抄材料原文中的可执行命令，不得包含密码/密钥等敏感信息。"
         )
         n += 1
+    if _READ_RESULT_CTX.get():
+        lines.append(
+            f"{n}. read_tool_result(id, offset, limit)：回读本会话已落盘/已清除的工具结果原文"
+            f"（id 见观测中的 [工具结果 #id] 与落盘回执路径）。"
+            f"需要被截断/清除内容的完整正文时调用它，按 offset 分页续读，不要凭空猜测原文。"
+        )
+        n += 1
     if not lines:
         lines.append("（本次没有可用检索工具，请直接依据自身知识作答，输出 action=final）")
     return "\n".join(lines)
@@ -249,6 +304,8 @@ class _AgentState:
         self.plan_steps: List[dict] = []
         self.thoughts: List[str] = []
         self.tool_records: List[dict] = []
+        # L0 工具结果账本：最近一次工具结果的账本行（观测回喂按预览/引用/占位符渲染）
+        self.last_result_row: Optional[dict] = None
         # 检索快照复用（开启联网后重发同一问题）：预填上一轮命中，跳过重复检索/重排
         self.reuse_active = False
         self.reuse_hint = ""
@@ -363,6 +420,16 @@ async def _exec_web_search(state: _AgentState, query: str) -> str:
 # 消息构建
 # ---------------------------------------------------------------------------
 
+def _index_messages(index_text: str) -> List[dict]:
+    """U 区（半动态）：MEMORY.md 索引全量注入（对齐 Claude Code 动态加载·常驻索引层）。
+    置于追加式历史之后、画像卡之前——索引随记忆写入变化，只失效尾部小段，
+    不污染头部+历史的大前缀（前缀缓存整改 P0-2）。"""
+    if not (index_text or "").strip():
+        return []
+    return [{"role": "system",
+             "content": f"【长期记忆索引（MEMORY.md 全量），供检索定位，不要逐字复述】\n{index_text.strip()}"}]
+
+
 def _profile_messages(profile_text: str) -> List[dict]:
     """U 区（半动态）：常驻画像卡。自动抽取每轮可能重写画像，故注入在追加式历史之后、
     相关记忆/提问之前——画像变化只失效尾部小段，不污染头部+历史的大前缀（前缀缓存整改 P0-2）。"""
@@ -384,7 +451,7 @@ def _relevant_messages(relevant_text: str) -> List[dict]:
 def _build_decision_messages(profile_text: str, relevant_text: str, history_ctx: List[dict],
                              query: str, use_knowledge: bool, use_search: bool,
                              instruction_text: str = "", reuse_hint: str = "",
-                             search_needs_auth: bool = False) -> List[dict]:
+                             search_needs_auth: bool = False, index_text: str = "") -> List[dict]:
     from app.services.user_instructions import format_instruction_messages
 
     messages = [{"role": "system",
@@ -396,6 +463,7 @@ def _build_decision_messages(profile_text: str, relevant_text: str, history_ctx:
         content = (h.get("content") or "").strip()
         if content:
             messages.append({"role": role, "content": content})
+    messages.extend(_index_messages(index_text))
     messages.extend(_profile_messages(profile_text))
     messages.extend(_relevant_messages(relevant_text))
     if (reuse_hint or "").strip():
@@ -407,7 +475,7 @@ def _build_decision_messages(profile_text: str, relevant_text: str, history_ctx:
 def _build_plan_messages(profile_text: str, relevant_text: str, history_ctx: List[dict],
                          query: str, use_knowledge: bool, use_search: bool,
                          instruction_text: str = "", reuse_hint: str = "",
-                         search_needs_auth: bool = False) -> List[dict]:
+                         search_needs_auth: bool = False, index_text: str = "") -> List[dict]:
     from app.services.user_instructions import format_instruction_messages
 
     messages = [{"role": "system",
@@ -420,6 +488,7 @@ def _build_plan_messages(profile_text: str, relevant_text: str, history_ctx: Lis
         content = (h.get("content") or "").strip()
         if content:
             messages.append({"role": role, "content": content})
+    messages.extend(_index_messages(index_text))
     messages.extend(_profile_messages(profile_text))
     messages.extend(_relevant_messages(relevant_text))
     if (reuse_hint or "").strip():
@@ -430,14 +499,15 @@ def _build_plan_messages(profile_text: str, relevant_text: str, history_ctx: Lis
 
 def _build_answer_messages(system_prompt: List[dict], profile_text: str, relevant_text: str,
                            history_ctx: List[dict], augmented_query: str,
-                           instruction_text: str = "") -> List[dict]:
-    """分区装配：静态头 → L1 用户指令 → C 区历史（追加式·前缀主体）→ U 区画像
+                           instruction_text: str = "", index_text: str = "") -> List[dict]:
+    """分区装配：静态头 → L1 用户指令 → C 区历史（追加式·前缀主体）→ U 区索引+画像
     （每轮可能被自动抽取重写，后移避免失效历史前缀）→ D 区相关记忆 → 用户提问。"""
     from app.services.user_instructions import format_instruction_messages
 
     messages = list(system_prompt or [])
     messages.extend(format_instruction_messages(instruction_text))
     messages.extend(history_ctx or [])
+    messages.extend(_index_messages(index_text))
     messages.extend(_profile_messages(profile_text))
     messages.extend(_relevant_messages(relevant_text))
     messages.append({"role": "user", "content": augmented_query})
@@ -467,6 +537,7 @@ async def run_chat_agent(
     history_ctx: List[dict],
     memory_profile: str = "",
     memory_relevant: str = "",
+    memory_index: str = "",
     system_prompt: List[dict],
     result: dict,
     instruction_text: str = "",
@@ -495,6 +566,13 @@ async def run_chat_agent(
     state = _AgentState()
     deadline = time.monotonic() + AGENT_TIMEOUT_SECONDS
     allowed_tools = set()
+    # L0 回读工具：本会话存在落盘/已清除的工具结果时开放（按路径分页回读原文）
+    try:
+        from app.services import context_window as _cw
+        if session_id and _cw.recent_offload_receipts(session_id, 1):
+            allowed_tools.add("read_tool_result")
+    except Exception:
+        pass
     if use_knowledge:
         allowed_tools.add("search_knowledge")
     # 未开联网但可询问授权时，规划/决策仍可见 web_search（标记需授权），
@@ -530,17 +608,30 @@ async def run_chat_agent(
                              "message": f"已复用上一轮知识检索结果（{len(state.kb_results)} 条命中），本轮不重复检索",
                              "sources": state.kb_sources})
     _sd_token = _SKILL_DISTILL_CTX.set(bool(skill_distill))
+    _rr_token = _READ_RESULT_CTX.set("read_tool_result" in allowed_tools)
 
     def _remaining() -> float:
         return deadline - time.monotonic()
 
     async def _run_tool(tool: str, args: dict) -> str:
-        """执行工具并返回观测文本（异常转观测，静默降级）。"""
+        """执行工具并返回观测文本（异常转观测，静默降级）；结果统一入 L0 账本。"""
+        observation = await _exec_tool(tool, args)
+        state.last_result_row = _ledger_record(
+            session_id, user_id, tool, args, observation, message_id=request_id)
+        return observation
+
+    async def _exec_tool(tool: str, args: dict) -> str:
         try:
             if tool == "search_knowledge":
                 return await _exec_search_knowledge(state, (args or {}).get("query", ""), user_id)
             if tool == "web_search":
                 return await _exec_web_search(state, (args or {}).get("query", ""))
+            if tool == "read_tool_result":
+                from app.services import context_window as cw
+                a = args or {}
+                return cw.read_tool_result(
+                    session_id, user_id, str(a.get("id") or a.get("result_id") or ""),
+                    offset=int(a.get("offset") or 0), limit=int(a.get("limit") or 0))
             if tool == "find_skill_material":
                 obs_text = await skill_distill_svc.find_material(
                     (args or {}).get("query", "") or query)
@@ -575,7 +666,7 @@ async def run_chat_agent(
     try:
         if mode == "plan_execute":
             async for ev in _plan_and_execute(
-                agent_llm, state, query, user_id, history_ctx, memory_profile, memory_relevant,
+                agent_llm, state, query, user_id, history_ctx, memory_profile, memory_relevant, memory_index,
                 use_knowledge, use_search, skip_search_prompt, allowed_tools,
                 _run_tool, _remaining, _emit_timeout, result, session_id=session_id,
                 instruction_text=instruction_text,
@@ -584,7 +675,7 @@ async def run_chat_agent(
                 yield ev
         else:
             async for ev in _react_loop(
-                agent_llm, state, query, user_id, history_ctx, memory_profile, memory_relevant,
+                agent_llm, state, query, user_id, history_ctx, memory_profile, memory_relevant, memory_index,
                 use_knowledge, use_search, skip_search_prompt, allowed_tools,
                 _run_tool, _remaining, _emit_timeout, result, session_id=session_id,
                 instruction_text=instruction_text, search_needs_auth=search_needs_auth,
@@ -596,7 +687,7 @@ async def run_chat_agent(
             return  # HITL 暂停（clarify / need_search）：本轮结束，不进入回答阶段
         # ---- 回答阶段（流式） ----
         async for ev in _answer_phase(
-            agent_llm, state, query, user_id, history_ctx, memory_profile, memory_relevant,
+            agent_llm, state, query, user_id, history_ctx, memory_profile, memory_relevant, memory_index,
             system_prompt, use_knowledge, use_search, skip_search_prompt,
             _remaining, _emit_timeout, result, session_id=session_id,
             instruction_text=instruction_text, request_id=request_id, force_refresh=force_refresh,
@@ -624,10 +715,11 @@ async def run_chat_agent(
         yield sse("error", {"message": f"复杂问答处理失败：{e}"})
     finally:
         _SKILL_DISTILL_CTX.reset(_sd_token)
+        _READ_RESULT_CTX.reset(_rr_token)
 
 
 async def _react_loop(agent_llm, state, query, user_id, history_ctx, memory_profile, memory_relevant,
-                      use_knowledge, use_search, skip_search_prompt, allowed_tools,
+                      memory_index, use_knowledge, use_search, skip_search_prompt, allowed_tools,
                       _run_tool, _remaining, _emit_timeout, result, session_id="", instruction_text="",
                       search_needs_auth=False):
     """ReAct 决策 / 工具循环（Thought→Action→Observation 回喂下一轮）。"""
@@ -635,11 +727,12 @@ async def _react_loop(agent_llm, state, query, user_id, history_ctx, memory_prof
                                         use_knowledge and "search_knowledge" in allowed_tools,
                                         use_search or search_needs_auth, instruction_text=instruction_text,
                                         reuse_hint=state.reuse_hint,
-                                        search_needs_auth=search_needs_auth)
+                                        search_needs_auth=search_needs_auth, index_text=memory_index)
     for step in range(MAX_TOOL_STEPS):
         if _remaining() <= 0:
             yield _emit_timeout(f"decision#{step + 1} deadline exceeded")
             return
+        _micro_before_call(session_id, user_id)
         t0 = time.monotonic()
         try:
             raw = await asyncio.wait_for(_llm_complete(messages, agent_llm), timeout=_remaining())
@@ -729,11 +822,12 @@ async def _react_loop(agent_llm, state, query, user_id, history_ctx, memory_prof
             return
 
         messages.append({"role": "assistant", "content": raw})
-        messages.append({"role": "user", "content": f"[工具 {tool} 返回]\n{_clip(observation)}"})
+        messages.append({"role": "user",
+                         "content": f"[工具 {tool} 返回]\n{_render_observation(state.last_result_row, observation)}"})
 
 
 async def _plan_and_execute(agent_llm, state, query, user_id, history_ctx, memory_profile, memory_relevant,
-                            use_knowledge, use_search, skip_search_prompt, allowed_tools,
+                            memory_index, use_knowledge, use_search, skip_search_prompt, allowed_tools,
                             _run_tool, _remaining, _emit_timeout, result, session_id="", instruction_text="",
                             pending_steps=None, search_needs_auth=False):
     """Plan&Execute：规划步骤清单 → 顺序执行（失败标记后继续，v1 不动态重规划）。
@@ -778,7 +872,8 @@ async def _plan_and_execute(agent_llm, state, query, user_id, history_ctx, memor
                                         use_knowledge and "search_knowledge" in allowed_tools,
                                         use_search or search_needs_auth, instruction_text=instruction_text,
                                         reuse_hint=state.reuse_hint,
-                                        search_needs_auth=search_needs_auth)
+                                        search_needs_auth=search_needs_auth, index_text=memory_index)
+        _micro_before_call(session_id, user_id)
         t0 = time.monotonic()
         try:
             raw = await asyncio.wait_for(_llm_complete(messages, agent_llm), timeout=_remaining())
@@ -874,7 +969,7 @@ async def _plan_and_execute(agent_llm, state, query, user_id, history_ctx, memor
 
 
 async def _answer_phase(agent_llm, state, query, user_id, history_ctx, memory_profile, memory_relevant,
-                        system_prompt, use_knowledge, use_search, skip_search_prompt,
+                        memory_index, system_prompt, use_knowledge, use_search, skip_search_prompt,
                         _remaining, _emit_timeout, result, session_id="", instruction_text="",
                         request_id="", force_refresh=False):
     """回答阶段：统一格式化累积命中 → 流式生成 → 引用核对 → obs 度量 → 回填 result。"""
@@ -987,8 +1082,10 @@ async def _answer_phase(agent_llm, state, query, user_id, history_ctx, memory_pr
     # 4. 流式生成
     yield sse("status", {"phase": "generating", "message": "正在生成回答..."})
     answer_messages = _build_answer_messages(system_prompt, memory_profile, memory_relevant,
-                                             history_ctx, augmented_query, instruction_text=instruction_text)
+                                             history_ctx, augmented_query, instruction_text=instruction_text,
+                                             index_text=memory_index)
     result["prompt_chars"] = sum(len(m.get("content", "")) for m in answer_messages)
+    _micro_before_call(session_id, user_id)
     full_response = ""
     t0 = time.monotonic()
     ait = None

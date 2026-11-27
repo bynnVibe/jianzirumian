@@ -48,6 +48,7 @@ SEGMENT_LABELS = {
     "memory_local": "记忆·本人私有叠加层",
     "memory_profile": "记忆·画像卡",
     "memory_relevant": "记忆·相关检索",
+    "memory_index": "记忆·索引层（MEMORY.md）",
     "agent_memory": "记忆·助手分域",
     "skills": "用户 Skill",
     "history": "历史对话",
@@ -55,7 +56,14 @@ SEGMENT_LABELS = {
     "knowledge": "知识上下文",
     "search": "联网搜索",
     "tool": "附件工具",
+    "tool_results": "历史工具结果",
 }
+
+
+def _context_thresholds() -> dict:
+    """四层压缩阈值刻度（量纲统一 K=1000），供面板与聊天页弹层展示。"""
+    from app.services import context_window as cw
+    return cw.thresholds()
 
 # ---- 请求级上下文（同一 asyncio 任务内传递；to_thread 会复制上下文） ----
 _trace_id: contextvars.ContextVar[str] = contextvars.ContextVar("agent_trace_id", default="")
@@ -71,6 +79,16 @@ _trace_error_stage: contextvars.ContextVar[str] = contextvars.ContextVar("agent_
 _pending_usage: contextvars.ContextVar[Optional[tuple]] = contextvars.ContextVar("agent_pending_usage", default=None)
 # 本次请求累积的上下文各段 (segment, text, 估算token)，由 flush_segments 按真实口径落库
 _pending_segments: contextvars.ContextVar[Optional[list]] = contextvars.ContextVar("agent_pending_segments", default=None)
+# 本次请求的会话窗口水位（主链路最近一次真实 prompt_tokens），供每个 span 记 ctx_tokens
+_ctx_tokens: contextvars.ContextVar[int] = contextvars.ContextVar("agent_ctx_tokens", default=0)
+
+
+def note_context_tokens(ctx_tokens: int) -> None:
+    """登记当前会话窗口水位（四层压缩判据），后续 span 均带该时点水位。"""
+    try:
+        _ctx_tokens.set(int(ctx_tokens or 0))
+    except (TypeError, ValueError):
+        pass
 
 
 def _now() -> str:
@@ -143,6 +161,7 @@ def start_trace(agent: str, user_id: str = "", input_text: str = "", session_id:
     _trace_error_stage.set("")
     _pending_usage.set(None)
     _pending_segments.set(None)
+    _ctx_tokens.set(0)
     try:
         db.execute(
             "INSERT INTO agent_traces (id, agent, user_id, input, status, started_at, session_id)"
@@ -215,19 +234,31 @@ def _latency(t0: Optional[float]) -> int:
 
 def _insert_span(kind: str, name: str, input_text: str, output_text: str,
                  status: str, error: str, pt: int, ct: int, latency: int,
-                 cached: int = 0) -> None:
+                 cached: int = 0, input_tokens: Optional[int] = None,
+                 output_tokens: Optional[int] = None, meta: Optional[dict] = None) -> None:
+    """落一条 span。
+
+    prompt_tokens/completion_tokens/cached_tokens 语义不变（仅 LLM span 填写，计费口径）；
+    input_tokens/output_tokens 为全类型 span 的 Token 监控口径（非 LLM 为估算值），
+    ctx_tokens 记该 span 时点的会话窗口水位，meta 记落盘/去重/清除等压缩标记。
+    """
     tid = _trace_id.get()
     if not tid:
         return
+    it = estimate_tokens(input_text) if input_tokens is None else int(input_tokens)
+    ot = estimate_tokens(output_text) if output_tokens is None else int(output_tokens)
     try:
         db.execute(
             "INSERT INTO agent_spans (id, trace_id, seq, kind, name, input, output, status, error,"
-            " prompt_tokens, completion_tokens, cached_tokens, latency_ms, started_at, ended_at)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " prompt_tokens, completion_tokens, cached_tokens, latency_ms, started_at, ended_at,"
+            " input_tokens, output_tokens, ctx_tokens, meta)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 str(uuid.uuid4()), tid, _next_seq(), kind, name or "",
                 _clip(input_text), _clip(output_text), status, (error or "")[:500],
                 pt, ct, cached, latency, _now(), _now(),
+                it, ot, _ctx_tokens.get(),
+                json.dumps(meta, ensure_ascii=False) if meta else "",
             ),
         )
     except Exception as e:
@@ -253,7 +284,11 @@ def record_llm(name: str, prompt, response: str = "", t0: Optional[float] = None
     latency = _latency(t0)
     if status != "ok" and fail_trace:
         mark_failed(error)
-    _insert_span("llm", name, prompt_text, response or "", status, error, pt, ct, latency, cached)
+    _insert_span("llm", name, prompt_text, response or "", status, error, pt, ct, latency, cached,
+                 input_tokens=pt, output_tokens=ct)
+    # 主链路水位推进：LLM 调用的真实 prompt token 即当前窗口水位（供后续 span 与压缩判据）
+    if pt:
+        note_context_tokens(pt)
     logger.info(
         "[AGENT] trace=%s llm=%s status=%s latency=%dms tokens=%d+%d cached=%d | response: %s",
         _trace_id.get() or "-", name or "-", status, latency, pt, ct, cached,
@@ -263,14 +298,19 @@ def record_llm(name: str, prompt, response: str = "", t0: Optional[float] = None
 
 
 def record_tool(name: str, args, result, t0: Optional[float] = None,
-                status: str = "ok", error: str = "", fail_trace: bool = True) -> None:
-    """记录一次工具调用 span（输入参数 + 返回结果）。"""
+                status: str = "ok", error: str = "", fail_trace: bool = True,
+                meta: Optional[dict] = None) -> None:
+    """记录一次工具调用 span（输入参数 + 返回结果）。
+
+    Token 监控：input_tokens=入参估算，output_tokens=进入上下文的结果估算；
+    meta 可携带原始大小/落盘路径/去重标记（原始量与入账量分离，便于核对压缩收益）。
+    """
     args_text = args if isinstance(args, str) else json.dumps(args or {}, ensure_ascii=False)
     result_text = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
     latency = _latency(t0)
     if status != "ok" and fail_trace:
         mark_failed(error)
-    _insert_span("tool", name, args_text, result_text, status, error, 0, 0, latency)
+    _insert_span("tool", name, args_text, result_text, status, error, 0, 0, latency, meta=meta)
     logger.info(
         "[AGENT] trace=%s tool=%s status=%s latency=%dms | args=%s | result: %s",
         _trace_id.get() or "-", name or "-", status, latency, args_text[:200],
@@ -279,12 +319,16 @@ def record_tool(name: str, args, result, t0: Optional[float] = None,
 
 
 def record_step(name: str, detail: str = "", t0: Optional[float] = None,
-                status: str = "ok", error: str = "", fail_trace: bool = True) -> None:
-    """记录一个流程步骤 span（检索/重排/证据校验等非 LLM、非工具环节）。"""
+                status: str = "ok", error: str = "", fail_trace: bool = True,
+                output: str = "", meta: Optional[dict] = None) -> None:
+    """记录一个流程步骤 span（检索/重排/证据校验等非 LLM、非工具环节）。
+
+    output 为该步骤产出的上下文文本（如知识检索产物），计入 output_tokens。
+    """
     latency = _latency(t0)
     if status != "ok" and fail_trace:
         mark_failed(error)
-    _insert_span("step", name, detail or "", "", status, error, 0, 0, latency)
+    _insert_span("step", name, detail or "", output or "", status, error, 0, 0, latency, meta=meta)
     logger.info(
         "[AGENT] trace=%s step=%s status=%s latency=%dms %s",
         _trace_id.get() or "-", name or "-", status, latency, (detail or "").replace("\n", " ")[:200],
@@ -296,9 +340,23 @@ def record_skip(name: str, reason: str = "") -> None:
 
     过程面板据此展示「跳过 + 原因」，而不是让阶段凭空消失。
     """
-    _insert_span("step", name, reason or "", "", "skipped", "", 0, 0, 0)
+    _insert_span("step", name, reason or "", "", "skipped", "", 0, 0, 0,
+                 input_tokens=0, output_tokens=0)
     logger.info("[AGENT] trace=%s step=%s skipped | %s",
                 _trace_id.get() or "-", name or "-", (reason or "").replace("\n", " ")[:200])
+
+
+def record_context_action(name: str, before_tokens: int = 0, after_tokens: int = 0,
+                          detail: str = "", meta: Optional[dict] = None) -> None:
+    """压缩动作自身落 span（context.offload / dedup / micro_compact / auto_compact / full_compact）。
+
+    input_tokens=压缩前，output_tokens=压缩后（释放量 = 前者 − 后者），零模型调用。
+    """
+    _insert_span("step", f"context.{name}", detail or "", "", "ok", "", 0, 0, 0,
+                 input_tokens=int(before_tokens), output_tokens=int(after_tokens), meta=meta)
+    logger.info("[AGENT] trace=%s context.%s %d→%d tok | %s",
+                _trace_id.get() or "-", name, int(before_tokens), int(after_tokens),
+                (detail or "").replace("\n", " ")[:200])
 
 
 # 可重试的失败错误码（过程快照 error.retryable 的判定依据）
@@ -749,19 +807,21 @@ def personal_context_overview(user_id: str, days: int = 7, range_mode: str = "da
         for r in seg_rows
     ]
 
-    # 历史压缩（Compaction 链）：边界标记（compact_kind）分布 + 摘要 token 占用
+    # 历史压缩（四层压缩链）：边界标记（compact_kind）分布 + 摘要 token 占用
     comp = db.query_one(
         "SELECT COUNT(*) AS n, COALESCE(SUM(token_estimate), 0) AS tokens,"
-        " COALESCE(SUM(compact_kind = 'auto'), 0) AS auto_n,"
+        " COALESCE(SUM(compact_kind = 'session_memory'), 0) AS session_memory_n,"
         " COALESCE(SUM(compact_kind = 'manual'), 0) AS manual_n,"
         " COALESCE(SUM(compact_kind = 'note'), 0) AS note_n,"
-        " COALESCE(SUM(compact_kind = 'window80'), 0) AS window80_n,"
+        " COALESCE(SUM(compact_kind IN ('auto_compact','auto_compact_hit')), 0) AS auto_compact_n,"
+        " COALESCE(SUM(compact_kind IN ('full','full_fallback')), 0) AS full_n,"
         " COALESCE(MAX(fail_streak), 0) AS fail_max,"
         " COALESCE(SUM(fail_streak >= 3), 0) AS breaker_n"
         " FROM chat_session_summaries WHERE user_id = ?",
         (user_id,),
     ) or {}
-    # 压缩链事件流（micro/auto/manual/window80/auto_fail/auto_blocked）：次数与 token 节省口径
+    # 压缩链事件流（L0 offload/dedup、L1 micro/micro_skip、L2 session_memory/auto_compact*、
+    # L3 full/full_fallback、auto_fail）：次数与 token 节省口径
     ev_rows = db.query(
         "SELECT kind, COUNT(*) AS n, COALESCE(SUM(before_tokens), 0) AS bt,"
         " COALESCE(SUM(after_tokens), 0) AS at FROM context_compact_events"
@@ -769,9 +829,13 @@ def personal_context_overview(user_id: str, days: int = 7, range_mode: str = "da
         (user_id, since),
     )
     chain = {r["kind"]: int(r["n"]) for r in ev_rows}
-    saved = sum(int(r["bt"]) - int(r["at"]) for r in ev_rows if r["kind"] in ("auto", "manual", "window80"))
-    before_sum = sum(int(r["bt"]) for r in ev_rows if r["kind"] in ("auto", "manual", "window80"))
-    after_sum = sum(int(r["at"]) for r in ev_rows if r["kind"] in ("auto", "manual", "window80"))
+    # 节省量口径：真正替换历史的层（Auto 命中/未命中、Full、手动）；微压缩释放量另列
+    _SAVE_KINDS = ("auto_compact", "auto_compact_hit", "full", "full_fallback", "manual")
+    saved = sum(int(r["bt"]) - int(r["at"]) for r in ev_rows if r["kind"] in _SAVE_KINDS)
+    before_sum = sum(int(r["bt"]) for r in ev_rows if r["kind"] in _SAVE_KINDS)
+    after_sum = sum(int(r["at"]) for r in ev_rows if r["kind"] in _SAVE_KINDS)
+    micro_saved = sum(int(r["bt"]) - int(r["at"]) for r in ev_rows if r["kind"] == "micro")
+    daily_saved = sum(int(r["bt"]) - int(r["at"]) for r in ev_rows if r["kind"] in ("offload", "dedup"))
 
     from app.services.memory import MemoryService
 
@@ -830,18 +894,23 @@ def personal_context_overview(user_id: str, days: int = 7, range_mode: str = "da
             "sessions_with_summary": int(comp.get("n", 0) or 0),
             "summary_tokens": int(comp.get("tokens", 0) or 0),
             "trigger_tokens": int(getattr(settings, "CONTEXT_COMPACT_TRIGGER_TOKENS", 10000)),
-            # Compaction 链指标：类型分布/事件流/节省量/熔断水位/空闲衰减阈值
-            "kind_counts": {"auto": int(comp.get("auto_n", 0) or 0),
+            # 四层压缩链指标：类型分布/事件流/节省量/熔断水位/阈值刻度
+            "kind_counts": {"session_memory": int(comp.get("session_memory_n", 0) or 0),
                             "manual": int(comp.get("manual_n", 0) or 0),
                             "note": int(comp.get("note_n", 0) or 0),
-                            "window80": int(comp.get("window80_n", 0) or 0)},
+                            "auto_compact": int(comp.get("auto_compact_n", 0) or 0),
+                            "full": int(comp.get("full_n", 0) or 0)},
             "chain_events": {k: chain.get(k, 0) for k in
-                             ("micro", "auto", "manual", "window80", "auto_fail", "auto_blocked")},
+                             ("offload", "dedup", "micro", "micro_skip", "session_memory",
+                              "auto_compact_hit", "auto_compact", "auto_fail",
+                              "full", "full_fallback", "manual", "auto_blocked")},
             "tokens_saved": max(0, saved),
+            "micro_tokens_saved": max(0, micro_saved),
+            "daily_tokens_saved": max(0, daily_saved),
             "compress_ratio": round(1 - after_sum / before_sum, 3) if before_sum else 0.0,
             "fail_streak_max": int(comp.get("fail_max", 0) or 0),
             "breaker_sessions": int(comp.get("breaker_n", 0) or 0),
-            "idle_decay_minutes": int(getattr(settings, "MICRO_COMPACT_IDLE_MINUTES", 60)),
+            "thresholds": _context_thresholds(),
         },
         "memory": memory,
     }
@@ -852,13 +921,26 @@ def session_context_usage(session_id: str) -> dict:
 
     数据源与管理员/个人面板的上下文构成同口径（agent_token_segments，按最终生成调用
     真实 prompt_tokens 分摊），但按会话取最近一条 trace，供聊天页「上下文用量」缩略图
-    与明细弹层展示；总量取 trace 真实 prompt_tokens（缺失时退化为段合计）。
+    与明细弹层展示；总量取该 trace 中主生成调用（name=answer）的真实 prompt_tokens
+    （多步 Agent 的整条 trace 求和会偏大），缺失时退化为段合计。
+    另返回四层压缩阈值刻度、工具结果合计、最近压缩类型与 Auto 连续失败计数。
     无记录（新会话/未发起问答）时返回结构完整的空概览。
     """
-    window = int(getattr(settings, "CHAT_CONTEXT_WINDOW", 131072))
+    from app.services import context_window as cw
+
+    window = cw.context_window()
+    thresholds = cw.thresholds()
+    state = cw.get_state(session_id)
+    extra = {
+        "thresholds": thresholds,
+        "tool_result_tokens": int(state.get("tool_result_tokens") or 0),
+        "last_compact": state.get("last_compact_kind") or "",
+        "auto_fail_streak": int(state.get("auto_fail_streak") or 0),
+        "headroom_to_auto": max(0, thresholds["auto"] - int(state.get("ctx_tokens") or 0)),
+    }
     empty = {
         "has_data": False, "segments": [], "total_tokens": 0,
-        "context_window": window, "used_pct": 0.0, "trace_at": "",
+        "context_window": window, "used_pct": 0.0, "trace_at": "", **extra,
     }
     if not session_id:
         return empty
@@ -877,7 +959,13 @@ def session_context_usage(session_id: str) -> dict:
         (trace["id"],),
     )
     seg_total = sum(int(r["tokens"]) for r in rows)
-    total = int(trace["prompt_tokens"] or 0) or seg_total
+    # 主生成调用的完整 prompt 即会话窗口水位（多步链路只取 answer，不做全 trace 求和）
+    main = db.query_one(
+        "SELECT prompt_tokens FROM agent_spans WHERE trace_id = ? AND kind = 'llm'"
+        " AND name = 'answer' ORDER BY seq DESC LIMIT 1",
+        (trace["id"],),
+    )
+    total = int((main or {}).get("prompt_tokens") or 0) or seg_total
     segments = [
         {
             "segment": r["segment"],
@@ -894,6 +982,7 @@ def session_context_usage(session_id: str) -> dict:
         "context_window": window,
         "used_pct": round(total / window * 100, 1) if window else 0.0,
         "trace_at": trace["started_at"],
+        **{**extra, "headroom_to_auto": max(0, thresholds["auto"] - total)},
     }
 
 
@@ -1047,7 +1136,7 @@ def session_observability(session_id: str, day: str = "", trace_id: str = "") ->
         "SELECT segment, COALESCE(SUM(tokens), 0) AS tokens, COUNT(*) AS n"
         " FROM agent_token_segments WHERE trace_id IN"
         " (SELECT id FROM agent_traces WHERE session_id = ?)"
-        " AND segment IN ('memory', 'memory_profile', 'memory_relevant')"
+        " AND segment IN ('memory', 'memory_profile', 'memory_relevant', 'memory_index')"
         " GROUP BY segment ORDER BY tokens DESC",
         (session_id,),
     )
@@ -1390,16 +1479,28 @@ def monitor_metrics(days: int = 7, range_mode: str = "days") -> dict:
     for r in mem_ev_rows:
         mem_by_layer[r["layer"]] = mem_by_layer.get(r["layer"], 0) + int(r["n"])
         mem_by_action[r["action"]] = mem_by_action.get(r["action"], 0) + int(r["n"])
+    # 四层压缩链事件分布（L0 offload/dedup、L1 micro/micro_skip、L2 session_memory/auto_compact*、
+    # L3 full/full_fallback）：节省量只计真正替换历史的层，L0/L1 节省量另列。
+    _SAVE_KINDS_SQL = "('auto_compact','auto_compact_hit','full','full_fallback','manual')"
     cmp_ev = db.query_one(
         "SELECT COUNT(*) AS total,"
+        " COALESCE(SUM(kind = 'offload'), 0) AS offload,"
+        " COALESCE(SUM(kind = 'dedup'), 0) AS dedup,"
         " COALESCE(SUM(kind = 'micro'), 0) AS micro,"
-        " COALESCE(SUM(kind = 'auto'), 0) AS auto,"
+        " COALESCE(SUM(kind = 'micro_skip'), 0) AS micro_skip,"
+        " COALESCE(SUM(kind = 'session_memory'), 0) AS session_memory,"
+        " COALESCE(SUM(kind = 'auto_compact_hit'), 0) AS auto_compact_hit,"
+        " COALESCE(SUM(kind = 'auto_compact'), 0) AS auto_compact,"
         " COALESCE(SUM(kind = 'manual'), 0) AS manual,"
-        " COALESCE(SUM(kind = 'window80'), 0) AS window80,"
+        " COALESCE(SUM(kind IN ('full','full_fallback')), 0) AS full_n,"
         " COALESCE(SUM(kind = 'auto_fail'), 0) AS fail,"
         " COALESCE(SUM(kind = 'auto_blocked'), 0) AS blocked,"
-        " COALESCE(SUM(CASE WHEN kind IN ('auto','manual','window80')"
-        "   THEN before_tokens - after_tokens ELSE 0 END), 0) AS saved"
+        f" COALESCE(SUM(CASE WHEN kind IN {_SAVE_KINDS_SQL}"
+        "   THEN before_tokens - after_tokens ELSE 0 END), 0) AS saved,"
+        " COALESCE(SUM(CASE WHEN kind = 'micro'"
+        "   THEN before_tokens - after_tokens ELSE 0 END), 0) AS micro_saved,"
+        " COALESCE(SUM(CASE WHEN kind IN ('offload','dedup')"
+        "   THEN before_tokens - after_tokens ELSE 0 END), 0) AS daily_saved"
         " FROM context_compact_events WHERE created_at >= ?", (since,)) or {}
     breaker_row = db.query_one(
         "SELECT COUNT(*) AS n FROM chat_session_summaries WHERE fail_streak >= 3") or {}
@@ -1420,9 +1521,15 @@ def monitor_metrics(days: int = 7, range_mode: str = "days") -> dict:
             "last_at": mem_ex_row.get("last_at"),
             "last_detail": mem_ex_last.get("detail") or "",
         },
-        "compact_events": {k: int(cmp_ev.get(k, 0) or 0)
-                           for k in ("total", "micro", "auto", "manual", "window80", "fail", "blocked")},
+        "compact_events": {
+            **{k: int(cmp_ev.get(k, 0) or 0)
+               for k in ("total", "offload", "dedup", "micro", "micro_skip", "session_memory",
+                         "auto_compact_hit", "auto_compact", "manual", "fail", "blocked")},
+            "full": int(cmp_ev.get("full_n", 0) or 0),
+        },
         "tokens_saved": max(0, int(cmp_ev.get("saved", 0) or 0)),
+        "micro_tokens_saved": max(0, int(cmp_ev.get("micro_saved", 0) or 0)),
+        "daily_tokens_saved": max(0, int(cmp_ev.get("daily_saved", 0) or 0)),
         "breaker_sessions": int(breaker_row.get("n", 0) or 0),
     }
     # 在线采样评测回流（DeepEval 风格）：近窗口样本数/均分/低分数，质量告警规则消费
